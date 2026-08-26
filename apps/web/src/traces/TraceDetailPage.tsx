@@ -2,9 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
-import type { AuditRecord, TraceSpan } from "../types";
+import type { AuditRecord, TraceRecord, TraceSpan } from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 import { TraceCanvas } from "./TraceCanvas";
+
+type TraceDetail = { trace: TraceRecord; audits: AuditRecord[] };
 
 function download(fileName: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -110,19 +112,22 @@ export function TraceDetailPage() {
 
   const detailQuery = useQuery({
     queryKey: ["trace", traceId],
-    queryFn: () => api.trace(traceId),
+    queryFn: (): Promise<TraceDetail> => api.trace(traceId),
     enabled: !locked && traceId.length > 0,
-    refetchInterval: (query) =>
+    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
       query.state.data?.trace.status === "running" ? 1_200 : 4_000,
   });
 
-  const trace = detailQuery.data?.trace ?? null;
-  const audits = detailQuery.data?.audits ?? [];
+  const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
+  const audits: AuditRecord[] = detailQuery.data?.audits ?? [];
 
   const warningsBySpan = new Map<string, number>();
   for (const audit of audits) {
     if (!audit.warning || !audit.spanId) continue;
-    warningsBySpan.set(audit.spanId, (warningsBySpan.get(audit.spanId) ?? 0) + 1);
+    warningsBySpan.set(
+      audit.spanId,
+      (warningsBySpan.get(audit.spanId) ?? 0) + 1,
+    );
   }
   const runAudits = audits.filter((audit) => audit.phase === "run");
   const warningCount = audits.filter((audit) => audit.warning).length;

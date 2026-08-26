@@ -7,7 +7,7 @@ import {
 } from "@tanstack/react-table";
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
-import type { TraceSummary } from "../types";
+import type { Agent, TraceSummary } from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 
 const columnHelper = createColumnHelper<TraceSummary>();
@@ -65,13 +65,13 @@ export function TracesPage() {
   const authQuery = useQuery({ queryKey: ["auth"], queryFn: api.auth });
   const locked = authQuery.data?.required === true && !hasAuthToken();
 
-  const agentsQuery = useQuery({
+  const agentsQuery = useQuery<{ agents: Agent[] }>({
     queryKey: ["agents"],
     queryFn: api.listAgents,
     enabled: !locked,
     refetchInterval: 5_000,
   });
-  const agents = agentsQuery.data?.agents ?? [];
+  const agents: Agent[] = agentsQuery.data?.agents ?? [];
   const selectedAgentId =
     searchParams.get("agent") ?? agents[0]?.id ?? "";
 
