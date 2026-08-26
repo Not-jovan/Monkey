@@ -3,6 +3,7 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
+import type { TraceService } from "./traces/trace-service.js";
 import type {
   Agent,
   AgentRun,
@@ -24,7 +25,12 @@ export class AgentService {
     private readonly store: JsonStore,
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
+    private readonly traces?: TraceService,
   ) {}
+
+  private redact(text: string): string {
+    return this.traces?.redactText(text) ?? text;
+  }
 
   async initialize(): Promise<void> {
     await this.store.initialize();
@@ -77,6 +83,7 @@ export class AgentService {
     };
     await this.workspaces.create(agent);
     await this.store.mutate((database) => database.agents.push(agent));
+    this.traces?.recordLifecycle(agent.id, "created", "Agent " + agent.name + " created");
     return agent;
   }
 
@@ -101,6 +108,7 @@ export class AgentService {
       return structuredClone(agent);
     });
     await this.workspaces.writeInstructions(updated);
+    this.traces?.recordLifecycle(id, "updated", "Agent " + updated.name + " updated");
     return updated;
   }
 
@@ -113,17 +121,25 @@ export class AgentService {
       database.messages = database.messages.filter((item) => item.agentId !== id);
       database.runs = database.runs.filter((item) => item.agentId !== id);
     });
+    this.traces?.recordLifecycle(id, "deleted", "Agent " + agent.name + " deleted");
     return { archivedWorkspace };
   }
 
   async startAgent(id: string): Promise<Agent> {
-    return this.setStatus(id, "ready");
+    const agent = await this.setStatus(id, "ready");
+    this.traces?.recordLifecycle(id, "started", "Agent started by user");
+    return agent;
   }
 
   async stopAgent(id: string): Promise<Agent> {
     this.getAgent(id);
+    // Record the intervention while the run is still active so the span lands
+    // inside the trace it interrupts.
+    this.traces?.onUserIntervention(id, "terminate");
     await this.cancelExecution(id);
-    return this.setStatus(id, "stopped");
+    const agent = await this.setStatus(id, "stopped");
+    this.traces?.recordLifecycle(id, "stopped", "Agent stopped by user");
+    return agent;
   }
 
   getMessages(agentId: string): Message[] {
@@ -162,11 +178,14 @@ export class AgentService {
     }
     const timestamp = now();
     const runId = randomUUID();
+    // The raw prompt goes to Codex; every stored or returned copy is masked so
+    // pasted credentials never persist in the transcript.
+    const redactedPrompt = this.redact(prompt);
     const run: AgentRun = {
       id: runId,
       agentId,
       status: "queued",
-      prompt,
+      prompt: redactedPrompt,
       output: null,
       error: null,
       usage: null,
@@ -179,7 +198,7 @@ export class AgentService {
       agentId,
       runId,
       role: "user",
-      content: prompt,
+      content: redactedPrompt,
       createdAt: timestamp,
     };
     const agentAtStart = await this.store.mutate((database) => {
@@ -201,7 +220,8 @@ export class AgentService {
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
-    const execution = this.executeRun(agentAtStart, run);
+    this.traces?.onRunStart(agentAtStart, { id: runId, prompt });
+    const execution = this.executeRun(agentAtStart, run, prompt);
     this.activeExecutions.set(agentId, execution);
     void execution
       .finally(() => {
@@ -232,7 +252,11 @@ export class AgentService {
     };
   }
 
-  private async executeRun(agentAtStart: Agent, run: AgentRun): Promise<void> {
+  private async executeRun(
+    agentAtStart: Agent,
+    run: AgentRun,
+    rawPrompt = run.prompt,
+  ): Promise<void> {
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
       if (storedRun) {
@@ -247,16 +271,18 @@ export class AgentService {
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
-        prompt: run.prompt,
+        prompt: rawPrompt,
         threadId: agentAtStart.codexThreadId,
+        onEvent: (event) => this.traces?.onRunnerEvent(run.id, event),
       });
       const completedAt = now();
+      const safeOutput = this.redact(result.output);
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
         if (!storedRun || !agent) return;
         storedRun.status = "completed";
-        storedRun.output = result.output;
+        storedRun.output = safeOutput;
         storedRun.usage = result.usage;
         storedRun.completedAt = completedAt;
         database.messages.push({
@@ -264,7 +290,7 @@ export class AgentService {
           agentId: agent.id,
           runId: run.id,
           role: "assistant",
-          content: result.output,
+          content: safeOutput,
           createdAt: completedAt,
         });
         agent.status = "ready";
@@ -272,10 +298,13 @@ export class AgentService {
         agent.lastError = null;
         agent.updatedAt = completedAt;
       });
+      this.traces?.onRunEnd(run.id, { status: "completed" });
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
-      const message = error instanceof Error ? error.message : String(error);
+      const message = this.redact(
+        error instanceof Error ? error.message : String(error),
+      );
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find((item) => item.id === agentAtStart.id);
@@ -291,6 +320,10 @@ export class AgentService {
           agent.lastError = cancelled ? null : message;
           agent.updatedAt = completedAt;
         }
+      });
+      this.traces?.onRunEnd(run.id, {
+        status: cancelled ? "cancelled" : "failed",
+        error: message,
       });
     }
   }

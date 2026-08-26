@@ -73,6 +73,9 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  // Streams every parsed Codex JSONL event to the caller while the run is
+  // still in flight (trace middleware binds thread ids through this).
+  onEvent?: ((event: Record<string, unknown>) => void) | undefined;
 }
 
 export interface AgentRunner {

@@ -1,4 +1,13 @@
-import type { Agent, AgentRun, Message, SystemInfo } from "./types";
+import type {
+  Agent,
+  AgentLifecycleEvent,
+  AgentRun,
+  AuditRecord,
+  Message,
+  SystemInfo,
+  TraceRecord,
+  TraceSummary,
+} from "./types";
 
 export class ApiError extends Error {
   constructor(
@@ -6,13 +15,33 @@ export class ApiError extends Error {
     public readonly status: number,
   ) {
     super(message);
+    this.name = "ApiError";
   }
 }
 
+// Structural rather than `instanceof`: react-query re-wraps and clones rejected
+// values, so prototype identity is not reliable by the time a component reads
+// `query.error`.
+export function isApiErrorWithStatus(error: unknown, status: number) {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { status: unknown }).status === status
+  );
+}
+
+// Deliberately in-memory only: the operator token must never reach browser
+// storage. Client-side routing keeps it across the Playground/Traces pages; a
+// hard reload asks for it again.
 let authToken = "";
 
 export function setAuthToken(token: string): void {
   authToken = token.trim();
+}
+
+export function hasAuthToken(): boolean {
+  return authToken.length > 0;
 }
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
@@ -78,4 +107,14 @@ export const api = {
       },
     ),
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
+  agentTraces: (id: string) =>
+    request<{ traces: TraceSummary[]; lifecycle: AgentLifecycleEvent[] }>(
+      "/api/agents/" + id + "/traces",
+    ),
+  trace: (id: string) =>
+    request<{ trace: TraceRecord; audits: AuditRecord[] }>("/api/traces/" + id),
+  exportTrace: (id: string) =>
+    request<{ exportedAt: string; trace: TraceRecord; audits: AuditRecord[] }>(
+      "/api/traces/" + id + "/export",
+    ),
 };

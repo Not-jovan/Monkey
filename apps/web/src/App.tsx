@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router";
 import { api, ApiError, setAuthToken } from "./api";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
@@ -330,6 +331,10 @@ export default function App() {
         >
           <span>＋</span> Create Agent
         </button>
+
+        <Link className="button button-ghost traces-link" to="/traces">
+          <span>◫</span> Traces
+        </Link>
 
         <div className="sidebar-label">
           <span>Your Agents</span>

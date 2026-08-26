@@ -56,6 +56,10 @@ export function buildContainerRunArgs(
     ...(engineName === "podman" ? ["--userns", "keep-id"] : []),
     "--network",
     "bridge",
+    // Lets the Runtime reach the control plane's OTel collector on Linux
+    // engines; Docker Desktop resolves the alias natively and ignores this.
+    "--add-host",
+    "host.docker.internal:host-gateway",
     "--security-opt",
     "no-new-privileges",
     "--cap-drop",
@@ -187,7 +191,7 @@ export class ContainerCodexRunner implements AgentRunner {
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed);
+        for (const line of lines) parseCodexEventLine(line, parsed, request.onEvent);
       } else {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
@@ -208,7 +212,7 @@ export class ContainerCodexRunner implements AgentRunner {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed);
+      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");

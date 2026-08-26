@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "./config.js";
 import {
@@ -33,7 +34,11 @@ describe("Container Codex runner", () => {
     );
     expect(args).toContain("runtime:test");
     expect(args).toContain("type=bind,src=/tmp/agent-workspace,dst=/workspace");
-    expect(args).toContain("type=bind,src=/tmp/codex-home,dst=/codex-home");
+    // CODEX_HOME passes through path.resolve, so the mount source is
+    // platform-shaped (drive-letter prefixed on Windows).
+    expect(args).toContain(
+      "type=bind,src=" + path.resolve("/tmp/codex-home") + ",dst=/codex-home",
+    );
     expect(args).toContain("501:20");
     expect(args).toContain("workspace-write");
     expect(args).toContain("/workspace");
