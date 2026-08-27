@@ -4,6 +4,7 @@ import { Link, useParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
 import type { AuditRecord, TraceRecord, TraceSpan } from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
+import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { TraceCanvas } from "./TraceCanvas";
 
 type TraceDetail = { trace: TraceRecord; audits: AuditRecord[] };
@@ -51,11 +52,27 @@ function AuditCard({ audit }: { audit: AuditRecord }) {
 function SpanDetails({
   span,
   audits,
+  trace,
 }: {
   span: TraceSpan;
   audits: AuditRecord[];
+  trace: TraceRecord;
 }) {
-  const longText = ["prompt", "arguments", "output", "instructions"];
+  const detailOptions = { tracePrompt: trace.prompt, spans: trace.spans };
+  const context = stepContext(span, detailOptions);
+  const returned = stepReturn(span, detailOptions);
+  const returnNote = stepReturnNote(span);
+  const hiddenInPanel = new Set([
+    "context",
+    "output",
+    "result",
+    "arguments",
+    "prompt",
+  ]);
+  const longText = ["instructions"];
+  const attributeEntries = Object.entries(span.attributes).filter(
+    ([key]) => !hiddenInPanel.has(key),
+  );
   return (
     <div className="span-panel">
       <div className="span-panel-head">
@@ -72,9 +89,22 @@ function SpanDetails({
           )}
         </span>
       </div>
+      {context && (
+        <div className="span-context-block">
+          <span className="eyebrow">Context</span>
+          <pre>{context}</pre>
+        </div>
+      )}
+      {returned && (
+        <div className="span-context-block">
+          <span className="eyebrow">Return</span>
+          {returnNote && <p className="muted-cell">{returnNote}</p>}
+          <pre>{returned}</pre>
+        </div>
+      )}
       {span.error && <div className="span-error">{span.error}</div>}
       <div className="span-attributes">
-        {Object.entries(span.attributes).map(([key, value]) =>
+        {attributeEntries.map(([key, value]) =>
           longText.includes(key) ? (
             <div className="span-attribute-block" key={key}>
               <span className="attribute-key">{key}</span>
@@ -87,7 +117,7 @@ function SpanDetails({
             </div>
           ),
         )}
-        {Object.keys(span.attributes).length === 0 && (
+        {attributeEntries.length === 0 && !context && !returned && (
           <span className="muted-cell">No recorded attributes.</span>
         )}
       </div>
@@ -225,8 +255,8 @@ export function TraceDetailPage() {
         />
       )}
 
-      {selectedSpan ? (
-        <SpanDetails audits={selectedAudits} span={selectedSpan} />
+      {trace && selectedSpan ? (
+        <SpanDetails audits={selectedAudits} span={selectedSpan} trace={trace} />
       ) : (
         <div className="span-panel span-panel-hint">
           Select a step in the flow above to inspect its details and audit

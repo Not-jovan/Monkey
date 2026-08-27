@@ -298,7 +298,7 @@ export class AgentService {
         agent.lastError = null;
         agent.updatedAt = completedAt;
       });
-      this.traces?.onRunEnd(run.id, { status: "completed" });
+      this.traces?.onRunEnd(run.id, { status: "completed", output: safeOutput });
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;

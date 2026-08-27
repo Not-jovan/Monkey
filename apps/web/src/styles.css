@@ -1374,6 +1374,25 @@ textarea:focus {
   white-space: pre-wrap;
 }
 
+.span-context-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.span-context-block pre {
+  margin: 0;
+  background: #f2f1ed;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 0.84rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+}
+
 .span-attributes {
   display: flex;
   flex-direction: column;

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { parseCodexEvent } from "./codex-events.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
 import type { Redactor } from "./redaction.js";
@@ -27,14 +28,21 @@ interface RunStartInput {
 interface RunEndInput {
   status: "completed" | "failed" | "cancelled";
   error?: string | null;
+  output?: string | null;
 }
 
 interface RunState {
   agentId: string;
   rootSpanId: string;
   promptSpanId: string;
+  prompt: string;
   turnSpanId: string | null;
   toolSpans: Map<string, string>;
+  subagentStack: string[];
+  modelCallsInTurn: number;
+  toolsSinceLastModelCall: string[];
+  lastToolOutput: string | null;
+  lastModelCallSpanId: string | null;
   completed: boolean;
 }
 
@@ -52,6 +60,83 @@ function preview(text: string, limit = 80) {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat.length <= limit) return flat;
   return flat.slice(0, limit - 1) + "…";
+}
+
+function isSubagentTool(toolName: string) {
+  const normalized = toolName.toLowerCase();
+  if (normalized === "task") return true;
+  if (normalized === "spawn_agent") return true;
+  if (normalized.endsWith("/spawn_agent")) return true;
+  return false;
+}
+
+const subagentArgumentsSchema = z.object({
+  subagent_type: z.string().min(1).optional(),
+  subagentType: z.string().min(1).optional(),
+  agent_type: z.string().min(1).optional(),
+  task_name: z.string().min(1).optional(),
+});
+
+function readSubagentLabel(argumentsJson: string | undefined) {
+  if (!argumentsJson) return null;
+  try {
+    const parsed = subagentArgumentsSchema.safeParse(JSON.parse(argumentsJson));
+    if (!parsed.success) return null;
+    return (
+      parsed.data.subagent_type ??
+      parsed.data.subagentType ??
+      parsed.data.agent_type ??
+      parsed.data.task_name ??
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+const subagentResultPayloadSchema = z.object({
+  timestamp: z.number().optional(),
+});
+
+function extractSimulatedSubagentResults(output: string) {
+  const results: {
+    index: string;
+    payload: string;
+    timestamp: number | null;
+  }[] = [];
+  for (const match of output.matchAll(/Agent-(\d+) returned:\s*(\{[^}]+\})/g)) {
+    let timestamp: number | null = null;
+    try {
+      const parsed = subagentResultPayloadSchema.safeParse(JSON.parse(match[2]!));
+      if (parsed.success && parsed.data.timestamp !== undefined) {
+        timestamp = parsed.data.timestamp;
+      }
+    } catch {
+      // Ignore malformed payload fragments in tool output.
+    }
+    results.push({
+      index: match[1]!,
+      payload: match[2]!,
+      timestamp,
+    });
+  }
+  return results;
+}
+
+function modelCallLabel(state: RunState, attempt: number | undefined) {
+  const prefix = state.subagentStack.length > 0 ? "Subagent model" : "Model";
+  let label: string;
+  if (state.toolsSinceLastModelCall.length === 0) {
+    label = state.modelCallsInTurn === 0 ? prefix + " · plan" : prefix + " · continue";
+  } else {
+    const lastTool =
+      state.toolsSinceLastModelCall[state.toolsSinceLastModelCall.length - 1]!;
+    label = prefix + " · after " + lastTool;
+  }
+  if (attempt !== undefined && attempt > 0) {
+    label += " (retry " + attempt + ")";
+  }
+  return label;
 }
 
 export class TraceService {
@@ -131,8 +216,14 @@ export class TraceService {
       agentId: agent.id,
       rootSpanId,
       promptSpanId,
+      prompt,
       turnSpanId: null,
       toolSpans: new Map(),
+      subagentStack: [],
+      modelCallsInTurn: 0,
+      toolsSinceLastModelCall: [],
+      lastToolOutput: null,
+      lastModelCallSpanId: null,
       completed: false,
     });
     this.activeRunByAgent.set(agent.id, run.id);
@@ -147,7 +238,71 @@ export class TraceService {
         trace.conversationId = event.thread_id as string;
       });
       this.bindConversation(event.thread_id, runId);
+      return;
     }
+
+    const state = this.runs.get(runId);
+    if (!state) return;
+
+    if (event.type !== "item.completed" || !event.item || typeof event.item !== "object") {
+      return;
+    }
+
+    const item = event.item as Record<string, unknown>;
+    if (item.type !== "collab_tool_call" || item.tool !== "spawn_agent") {
+      return;
+    }
+
+    const timestamp = this.now().toISOString();
+    const turnSpanId = this.ensureTurn(runId, state, timestamp);
+    const callId = typeof item.id === "string" ? item.id : randomUUID();
+    const existing = state.toolSpans.get(callId);
+    const receiverThreadIds = Array.isArray(item.receiver_thread_ids)
+      ? item.receiver_thread_ids.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const prompt = typeof item.prompt === "string" ? item.prompt : null;
+    const completed = item.status === "completed";
+
+    if (existing) {
+      this.store.updateSpan(runId, existing, (span) => {
+        span.attributes.subagent = true;
+        if (receiverThreadIds.length > 0) {
+          span.attributes.receiverThreadIds = receiverThreadIds.join(",");
+        }
+        if (prompt) span.attributes.prompt = this.redactor.redactText(prompt);
+        if (completed && span.status === "running") span.status = "ok";
+      });
+      if (completed) this.popSubagentScope(state, existing);
+      return;
+    }
+
+    const spanId = randomUUID();
+    state.toolSpans.set(callId, spanId);
+    const parentId = this.activeParent(state, turnSpanId);
+    this.store.appendSpan(runId, {
+      id: spanId,
+      traceId: runId,
+      parentId,
+      name: "tool.spawn_agent",
+      label: "Subagent task",
+      kind: "tool_call",
+      actor: "agent",
+      status: completed ? "ok" : "running",
+      startedAt: timestamp,
+      endedAt: completed ? timestamp : null,
+      durationMs: completed ? 0 : null,
+      attributes: {
+        toolName: "spawn_agent",
+        callId,
+        subagent: true,
+        ...(receiverThreadIds.length > 0
+          ? { receiverThreadIds: receiverThreadIds.join(",") }
+          : {}),
+        ...(prompt ? { prompt: this.redactor.redactText(prompt) } : {}),
+      },
+      error: null,
+    });
+    if (!completed) state.subagentStack.push(spanId);
   }
 
   onRunEnd(runId: string, outcome: RunEndInput) {
@@ -168,6 +323,19 @@ export class TraceService {
     }
     if (state.turnSpanId) {
       this.closeSpan(runId, state.turnSpanId, endedAt, failed ? "error" : "ok", error);
+    }
+    if (state.lastModelCallSpanId) {
+      this.store.updateSpan(runId, state.lastModelCallSpanId, (span) => {
+        if (span.kind !== "model_call" || span.status !== "ok") return;
+        if (span.attributes.phase !== "after_tool") return;
+        const prefix = span.label.startsWith("Subagent model") ? "Subagent model" : "Model";
+        span.label = prefix + " · reply";
+        if (outcome.output) {
+          span.attributes.context = this.redactor.redactText(
+            clip(outcome.output, OUTPUT_CLIP),
+          );
+        }
+      });
     }
     this.closeSpan(runId, state.rootSpanId, endedAt, failed ? "error" : "ok", error);
 
@@ -320,13 +488,14 @@ export class TraceService {
         const failedRequest =
           event["error.message"] !== undefined ||
           (event["http.response.status_code"] ?? 200) >= 400;
-        this.appendChild(runId, turnSpanId, {
+        const spanId = randomUUID();
+        state.lastModelCallSpanId = spanId;
+        this.store.appendSpan(runId, {
+          id: spanId,
+          traceId: runId,
+          parentId: this.activeParent(state, turnSpanId),
           name: "codex.api_request",
-          label:
-            "Model call" +
-            (event.attempt !== undefined && event.attempt > 0
-              ? " (retry " + event.attempt + ")"
-              : ""),
+          label: modelCallLabel(state, event.attempt),
           kind: "model_call",
           actor: "agent",
           status: failedRequest ? "error" : "ok",
@@ -334,6 +503,21 @@ export class TraceService {
           endedAt: timestamp,
           durationMs: duration,
           attributes: {
+            phase:
+              state.toolsSinceLastModelCall.length === 0
+                ? state.modelCallsInTurn === 0
+                  ? "plan"
+                  : "continue"
+                : "after_tool",
+            ...(state.toolsSinceLastModelCall.length > 0
+              ? { afterTool: state.toolsSinceLastModelCall.at(-1)! }
+              : {}),
+            ...(state.modelCallsInTurn === 0 &&
+            state.toolsSinceLastModelCall.length === 0
+              ? { context: preview(state.prompt, OUTPUT_CLIP) }
+              : state.toolsSinceLastModelCall.length > 0 && state.lastToolOutput
+                ? { context: state.lastToolOutput }
+                : {}),
             ...(event["http.response.status_code"] !== undefined
               ? { statusCode: event["http.response.status_code"] }
               : {}),
@@ -343,6 +527,8 @@ export class TraceService {
             ? this.redactor.redactText(event["error.message"])
             : null,
         });
+        state.modelCallsInTurn += 1;
+        state.toolsSinceLastModelCall = [];
         return;
       }
       case "codex.sse_event": {
@@ -354,8 +540,24 @@ export class TraceService {
             trace.usage.reasoningTokens += event.reasoning_token_count ?? 0;
             trace.usage.toolTokens += event.tool_token_count ?? 0;
           });
+          if (state.lastModelCallSpanId) {
+            this.store.updateSpan(runId, state.lastModelCallSpanId, (span) => {
+              if (event.output_token_count !== undefined) {
+                span.attributes.outputTokens = event.output_token_count;
+              }
+              if (event.reasoning_token_count !== undefined) {
+                span.attributes.reasoningTokens = event.reasoning_token_count;
+              }
+              if (event.cached_token_count !== undefined) {
+                span.attributes.cachedTokens = event.cached_token_count;
+              }
+              if (event.ttft_ms !== undefined) {
+                span.attributes.ttftMs = event.ttft_ms;
+              }
+            });
+          }
         } else if (event["error.message"]) {
-          this.appendChild(runId, turnSpanId, {
+          this.appendChild(runId, this.activeParent(state, turnSpanId), {
             name: "codex.sse_event",
             label: "Stream error (" + event["event.kind"] + ")",
             kind: "system",
@@ -373,12 +575,16 @@ export class TraceService {
       case "codex.tool_decision": {
         const spanId = randomUUID();
         state.toolSpans.set(event.call_id, spanId);
+        const subagent = isSubagentTool(event.tool_name);
+        const parentId = this.activeParent(state, turnSpanId);
         this.store.appendSpan(runId, {
           id: spanId,
           traceId: runId,
-          parentId: turnSpanId,
+          parentId,
           name: "tool." + event.tool_name,
-          label: "Called " + event.tool_name,
+          label: subagent
+            ? "Subagent · task"
+            : "Tool · " + event.tool_name,
           kind: "tool_call",
           actor: "agent",
           status: event.decision === "denied" || event.decision === "abort" ? "error" : "running",
@@ -390,12 +596,16 @@ export class TraceService {
             callId: event.call_id,
             decision: event.decision,
             decisionSource: event.source,
+            ...(subagent ? { subagent: true } : {}),
           },
           error:
             event.decision === "denied" || event.decision === "abort"
               ? "Tool call " + event.decision
               : null,
         });
+        if (subagent && event.decision !== "denied" && event.decision !== "abort") {
+          state.subagentStack.push(spanId);
+        }
         return;
       }
       case "codex.tool_result": {
@@ -420,13 +630,38 @@ export class TraceService {
               if (output) span.attributes.output = output;
               if (event.mcp_server) span.attributes.mcpServer = event.mcp_server;
               span.error = succeeded ? null : clip(output, 400) || "Tool failed";
+              if (isSubagentTool(event.tool_name)) {
+                const subagentLabel = readSubagentLabel(toolArguments);
+                if (subagentLabel) {
+                  span.attributes.subagentType = subagentLabel;
+                  span.label = "Subagent · " + subagentLabel;
+                }
+              }
             },
             { emit: true },
           );
+          if (isSubagentTool(event.tool_name)) {
+            this.popSubagentScope(state, existing);
+          }
+          if (succeeded) {
+            state.toolsSinceLastModelCall.push(event.tool_name);
+            if (output) state.lastToolOutput = clip(output, OUTPUT_CLIP);
+          }
+          if (succeeded && output) {
+            this.synthesizeSubagentResultsFromOutput(
+              runId,
+              existing,
+              timestamp,
+              event.duration_ms,
+              output,
+            );
+          }
         } else {
-          this.appendChild(runId, turnSpanId, {
+          this.appendChild(runId, this.activeParent(state, turnSpanId), {
             name: "tool." + event.tool_name,
-            label: "Called " + event.tool_name,
+            label: isSubagentTool(event.tool_name)
+              ? "Subagent task"
+              : "Called " + event.tool_name,
             kind: "tool_call",
             actor: "agent",
             status: succeeded ? "ok" : "error",
@@ -438,11 +673,16 @@ export class TraceService {
             attributes: {
               toolName: event.tool_name,
               callId,
+              ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
               ...(toolArguments ? { arguments: toolArguments } : {}),
               ...(output ? { output } : {}),
             },
             error: succeeded ? null : clip(output, 400) || "Tool failed",
           });
+          if (succeeded) {
+            state.toolsSinceLastModelCall.push(event.tool_name);
+            if (output) state.lastToolOutput = clip(output, OUTPUT_CLIP);
+          }
         }
         return;
       }
@@ -454,7 +694,7 @@ export class TraceService {
       }
       default: {
         if ("error.message" in event && event["error.message"]) {
-          this.appendChild(runId, turnSpanId, {
+          this.appendChild(runId, this.activeParent(state, turnSpanId), {
             name: event["event.name"],
             label: event["event.name"],
             kind: "system",
@@ -491,6 +731,75 @@ export class TraceService {
       error: null,
     });
     return spanId;
+  }
+
+  private synthesizeSubagentResultsFromOutput(
+    runId: string,
+    parentSpanId: string,
+    endedAt: string,
+    durationMs: number,
+    output: string,
+  ) {
+    let results: ReturnType<typeof extractSimulatedSubagentResults> = [];
+    try {
+      results = extractSimulatedSubagentResults(output);
+    } catch {
+      return;
+    }
+    if (results.length === 0) return;
+
+    const toolStartedAt = new Date(
+      new Date(endedAt).getTime() - durationMs,
+    ).toISOString();
+
+    this.store.updateSpan(runId, parentSpanId, (span) => {
+      span.attributes.spawnsSubagents = true;
+      span.attributes.subagentCount = results.length;
+      const toolName = span.attributes.toolName;
+      if (typeof toolName === "string") {
+        span.label = "Tool · " + toolName + " · spawns ×" + results.length;
+      }
+    });
+
+    for (const result of results) {
+      const resultEndedAt = result.timestamp
+        ? new Date(result.timestamp).toISOString()
+        : endedAt;
+      const resultStartedAt = result.timestamp
+        ? new Date(result.timestamp - 200).toISOString()
+        : toolStartedAt;
+      this.store.appendSpan(runId, {
+        id: randomUUID(),
+        traceId: runId,
+        parentId: parentSpanId,
+        name: "subagent.result",
+        label: "Subagent · " + result.index + " · returned",
+        kind: "system",
+        actor: "agent",
+        status: "ok",
+        startedAt: resultStartedAt,
+        endedAt: resultEndedAt,
+        durationMs:
+          new Date(resultEndedAt).getTime() - new Date(resultStartedAt).getTime(),
+        attributes: {
+          subagentIndex: result.index,
+          result: result.payload,
+          synthesized: true,
+        },
+        error: null,
+      });
+    }
+  }
+
+  private activeParent(state: RunState, turnSpanId: string) {
+    return state.subagentStack[state.subagentStack.length - 1] ?? turnSpanId;
+  }
+
+  private popSubagentScope(state: RunState, spanId: string) {
+    const index = state.subagentStack.indexOf(spanId);
+    if (index >= 0) {
+      state.subagentStack.splice(index);
+    }
   }
 
   private appendChild(
