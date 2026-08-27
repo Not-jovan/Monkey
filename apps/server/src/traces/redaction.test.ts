@@ -62,6 +62,24 @@ describe("createRedactor", () => {
     expect(masked.steps[1]?.note).toBe("clean");
   });
 
+  it("masks the credential shapes the audit pipeline can name", () => {
+    const shapes = [
+      "ghp_exampleexampleexample",
+      "sk_live_exampleexample",
+      "postgres://user:password@example.com/db",
+    ];
+    for (const shape of shapes) {
+      expect(redactor.redactText("value " + shape + " end")).not.toContain(
+        shape,
+      );
+    }
+  });
+
+  it("leaves an ordinary URL with a port intact", () => {
+    const url = "https://example.com:8080/health";
+    expect(redactor.redactText("GET " + url)).toContain(url);
+  });
+
   it("prefers longer secrets so substring secrets cannot break masking", () => {
     const layered = createRedactor(["abcdefgh", "abcdefgh-extended-secret"]);
     const masked = layered.redactText("abcdefgh-extended-secret");

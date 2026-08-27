@@ -1,18 +1,28 @@
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { toAuditTraceSteps } from "../audits/audit-model.js";
 import type { AuditStore } from "../audits/audit-store.js";
+import type { IntentService } from "../intent/intent-service.js";
 import { HttpError } from "../errors.js";
 import type { TraceStore } from "./trace-store.js";
 import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const traceParams = z.object({ id: z.string().min(8).max(64) });
+const intentUpdateParams = z.object({
+  id: z.string().uuid(),
+  updateId: z.string().uuid(),
+});
+const intentDecisionBody = z.object({
+  decision: z.enum(["confirm", "reject"]),
+});
 
 export interface GlassboxDeps {
   traceStore: TraceStore;
   auditStore: AuditStore;
   traceService: TraceService;
+  intentService?: IntentService;
   collectorToken: string;
 }
 
@@ -61,13 +71,49 @@ export function registerGlassboxRoutes(
     return { traces, lifecycle: deps.traceStore.lifecycleFor(id) };
   });
 
+  app.get("/api/agents/:id/intent", async (request) => {
+    const { id } = idParams.parse(request.params);
+    const record = deps.intentService?.record(id) ?? null;
+    return {
+      intent: record
+        ? { objective: record.objective, extended: record.extended }
+        : { objective: "", extended: [] },
+      pending: deps.intentService?.pending(id) ?? [],
+      history: record?.history ?? [],
+      requiresConfirmation:
+        deps.intentService?.requiresConfirmation() ?? false,
+      updatedAt: record?.updatedAt ?? null,
+    };
+  });
+
+  // The user's decision on a proposed change to the specification. Nothing
+  // takes effect until this lands.
+  app.post("/api/agents/:id/intent/:updateId", async (request) => {
+    const { id, updateId } = intentUpdateParams.parse(request.params);
+    const { decision } = intentDecisionBody.parse(request.body);
+    if (!deps.intentService) {
+      throw new HttpError(503, "Intent tracking is not enabled");
+    }
+    const record = deps.intentService.resolve(id, updateId, decision);
+    if (!record) {
+      throw new HttpError(404, "No pending intent update with that id");
+    }
+    return {
+      intent: { objective: record.objective, extended: record.extended },
+      pending: deps.intentService.pending(id),
+    };
+  });
+
   app.get("/api/traces/:id", async (request) => {
     const { id } = traceParams.parse(request.params);
     const trace = deps.traceStore.get(id);
     if (!trace) {
       throw new HttpError(404, "Trace not found");
     }
-    return { trace, audits: deps.auditStore.listByTrace(id) };
+    const audits = deps.auditStore.listByTrace(id);
+    // AUDIT_PLAN's flat output shape, derived rather than stored: one audit can
+    // carry several findings.
+    return { trace, audits, findings: audits.flatMap(toAuditTraceSteps) };
   });
 
   const downloadTrace = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -80,10 +126,12 @@ export function registerGlassboxRoutes(
       "content-disposition",
       'attachment; filename="trace-' + id + '.json"',
     );
+    const audits = deps.auditStore.listByTrace(id);
     return {
       exportedAt: new Date().toISOString(),
       trace,
-      audits: deps.auditStore.listByTrace(id),
+      audits,
+      findings: audits.flatMap(toAuditTraceSteps),
     };
   };
 

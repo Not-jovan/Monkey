@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { parseCodexEvent } from "./codex-events.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
+import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
 import type {
   AgentLifecycleType,
@@ -175,6 +176,14 @@ export class TraceService {
     return this.redactor.redactText(text);
   }
 
+  // Credential detection has to happen before masking: once a value is
+  // replaced by asterisks its shape is gone and the auditor can no longer name
+  // it. Only the names are kept — the values never reach a span.
+  private secretNames(text: string | undefined) {
+    if (!text) return [];
+    return detectSecretBindings(text).map((binding) => binding.secretType);
+  }
+
   private appendModelOutput(
     runId: string,
     spanId: string | null,
@@ -312,14 +321,21 @@ export class TraceService {
     const completed = item.data.status === "completed";
 
     if (existing) {
-      this.store.updateSpan(runId, existing, (span) => {
-        span.attributes.subagent = true;
-        if (receiverThreadIds.length > 0) {
-          span.attributes.receiverThreadIds = receiverThreadIds.join(",");
-        }
-        if (prompt) span.attributes.prompt = this.redactor.redactText(prompt);
-        if (completed && span.status === "running") span.status = "ok";
-      });
+      // Emitted so a subagent that finishes through the runner event stream is
+      // audited like any other completed tool call.
+      this.store.updateSpan(
+        runId,
+        existing,
+        (span) => {
+          span.attributes.subagent = true;
+          if (receiverThreadIds.length > 0) {
+            span.attributes.receiverThreadIds = receiverThreadIds.join(",");
+          }
+          if (prompt) span.attributes.prompt = this.redactor.redactText(prompt);
+          if (completed && span.status === "running") span.status = "ok";
+        },
+        { emit: completed },
+      );
       if (completed) this.popSubagentScope(state, existing);
       return;
     }
@@ -697,6 +713,11 @@ export class TraceService {
         const toolArgumentsRaw = event.arguments
           ? this.redactor.redactText(event.arguments)
           : "";
+        // Arguments are what the agent sent outward; output is what came back.
+        const requestSecrets = this.secretNames(event.arguments);
+        const responseSecrets = this.secretNames(event.output).filter(
+          (name) => !requestSecrets.includes(name),
+        );
         const toolArguments = toolArgumentsRaw
           ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
           : "";
@@ -720,6 +741,12 @@ export class TraceService {
               span.durationMs = event.duration_ms;
               if (toolArguments) span.attributes.arguments = toolArguments;
               if (output) span.attributes.output = output;
+              if (requestSecrets.length > 0) {
+                span.attributes.secretsInRequest = requestSecrets.join(",");
+              }
+              if (responseSecrets.length > 0) {
+                span.attributes.secretsInResponse = responseSecrets.join(",");
+              }
               if (event.mcp_server)
                 span.attributes.mcpServer = event.mcp_server;
               span.error = succeeded
@@ -771,6 +798,12 @@ export class TraceService {
               ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
               ...(toolArguments ? { arguments: toolArguments } : {}),
               ...(output ? { output } : {}),
+              ...(requestSecrets.length > 0
+                ? { secretsInRequest: requestSecrets.join(",") }
+                : {}),
+              ...(responseSecrets.length > 0
+                ? { secretsInResponse: responseSecrets.join(",") }
+                : {}),
             },
             error: succeeded ? null : clip(output, 400) || "Tool failed",
           });

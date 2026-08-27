@@ -1,3 +1,5 @@
+import { globalSecretValuePatterns } from "./secrets.js";
+
 // GitLab-style masking: values of known secret variables are replaced wherever
 // they appear in trace/audit payloads. Long secrets keep the first and last 3
 // characters so operators can still correlate which credential leaked
@@ -6,14 +8,12 @@
 const PARTIAL_REVEAL_MIN_LENGTH = 12;
 const FULL_MASK = "******";
 
-// Value-based masking only works for secrets we know about. These patterns
-// catch obvious credential shapes that reach the runtime from elsewhere
-// (agent-fetched keys, tokens echoed by tools) so they never land on disk.
+// Value-based masking only works for secrets we know about. The shapes come
+// from the same table the audit pipeline detects against, so a credential the
+// auditor can name is a credential the redactor can mask. The Bearer rule is
+// local because it keeps the scheme readable via its capture groups.
 const secretPatterns = [
-  /\bark-[A-Za-z0-9][A-Za-z0-9-]{14,}\b/g,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/g,
-  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
-  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\b/g,
+  ...globalSecretValuePatterns(),
   /\b(Bearer\s+)([A-Za-z0-9._~+/-]{16,}={0,2})/g,
 ];
 

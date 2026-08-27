@@ -593,7 +593,8 @@ textarea:focus {
   border-radius: 17px;
   overflow: hidden;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* topbar · intent panel · messages · composer */
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
 }
 
 .playground-topbar {
@@ -1502,4 +1503,104 @@ textarea:focus {
   display: flex;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+.audit-policy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.audit-policy ul {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.audit-policy li {
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.audit-policy li.audit-prose {
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.intent-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Collapses to nothing when there is neither a specification nor a proposal. */
+.intent-panel:not(:empty) {
+  padding: 10px 24px 0;
+}
+
+.intent-proposal {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #d97706;
+  border-radius: 10px;
+  background: var(--surface, transparent);
+}
+
+.intent-proposal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 240px;
+  flex: 1;
+}
+
+.intent-proposal-body p,
+.intent-detail p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.intent-proposal-body ul,
+.intent-detail ul {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.intent-proposal-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.intent-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+
+.intent-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 8px;
 }

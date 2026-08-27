@@ -18,7 +18,15 @@ export class AuditStore {
         const raw = JSON.parse(
           await readFile(path.join(this.directory, entry), "utf8"),
         ) as AuditRecord;
-        if (raw.version === 1) this.audits.set(raw.id, raw);
+        if (raw.version === 1) {
+          // Records written before the deterministic checks existed have no
+          // arrays; normalise so every consumer can read them the same way.
+          raw.networkViolations = raw.networkViolations ?? [];
+          raw.secretExposures = raw.secretExposures ?? [];
+          raw.notInAlignment = raw.notInAlignment ?? [];
+          raw.newObjectives = raw.newObjectives ?? [];
+          this.audits.set(raw.id, raw);
+        }
       } catch {
         // Ignore unreadable audit files.
       }
@@ -47,10 +55,12 @@ export class AuditStore {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
   }
 
-  countForTrace(traceId: string) {
+  // Only step audits count against the per-trace budget; the single run-level
+  // intent audit must never be crowded out by a long run.
+  countStepsForTrace(traceId: string) {
     let count = 0;
     for (const audit of this.audits.values()) {
-      if (audit.traceId === traceId) count += 1;
+      if (audit.traceId === traceId && audit.phase === "step") count += 1;
     }
     return count;
   }

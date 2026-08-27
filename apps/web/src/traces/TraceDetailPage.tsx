@@ -41,6 +41,74 @@ function AuditCard({ audit }: { audit: AuditRecord }) {
           ))}
         </div>
       )}
+      {(audit.notInAlignment?.length ?? 0) > 0 && (
+        <div className="audit-policy">
+          <span className="eyebrow">Not in alignment with the intent</span>
+          <ul>
+            {audit.notInAlignment?.map((entry) => (
+              <li className="audit-prose" key={entry}>
+                {entry}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(audit.newObjectives?.length ?? 0) > 0 && (
+        <div className="audit-policy">
+          <span className="eyebrow">Objectives the user did not ask for</span>
+          <ul>
+            {audit.newObjectives?.map((objective) => (
+              <li className="audit-prose" key={objective.objective}>
+                {objective.objective}{" "}
+                <span
+                  className={
+                    objective.actedUpon ? "warning-badge" : "muted-cell"
+                  }
+                >
+                  {objective.actedUpon ? "⚠ acted upon" : "not acted upon"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(audit.networkViolations?.length ?? 0) > 0 && (
+        <div className="audit-policy">
+          <span className="eyebrow">Outside the whitelist</span>
+          <ul>
+            {audit.networkViolations?.map((url) => (
+              <li key={url}>{url}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {(audit.secretExposures?.length ?? 0) > 0 && (
+        <div className="audit-policy">
+          <span className="eyebrow">Credentials observed</span>
+          <ul>
+            {audit.secretExposures?.map((exposure) => (
+              <li key={exposure.location + exposure.secretType}>
+                {exposure.secretType}{" "}
+                <span className="muted-cell">
+                  {exposure.location === "request" ? "sent outward" : "received"}
+                </span>{" "}
+                {exposure.relevant === false && (
+                  <span className="warning-badge">⚠ unrelated</span>
+                )}
+                {exposure.relevant === true && (
+                  <span className="muted-cell">relevant</span>
+                )}
+                {exposure.relevant == null && (
+                  <span className="muted-cell">relevance unknown</span>
+                )}
+                {exposure.reason && (
+                  <span className="muted-cell"> — {exposure.reason}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {audit.reason && <p>{audit.reason}</p>}
       {audit.contextSummary && (
         <p className="muted-cell">Context: {audit.contextSummary}</p>

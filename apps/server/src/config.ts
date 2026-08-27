@@ -45,6 +45,13 @@ const envSchema = z.object({
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
   AUDIT_ENABLED: z.enum(["true", "false"]).default("true"),
+  // Comma-separated hostnames the agent may reach. Unset disables the check
+  // entirely; an explicit empty value means deny-all. A leading dot opts a
+  // whole subtree in (".github.com" covers api.github.com).
+  AUDIT_NETWORK_WHITELIST: z.string().optional(),
+  // When true a detected change to the specification waits for the user to
+  // confirm it before it governs later audits.
+  INTENT_CONFIRMATION: z.enum(["true", "false"]).default("false"),
   AUDIT_SECURITY_MODEL: z.string().default("gpt-oss-120b-250805"),
   AUDIT_INTENT_MODEL: z.string().default("deepseek-v4-flash-ga-260731"),
   // Override for setups where the Runtime cannot reach the control plane via
@@ -96,6 +103,13 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     auditEnabled: env.AUDIT_ENABLED === "true",
     auditSecurityModel: env.AUDIT_SECURITY_MODEL.trim(),
     auditIntentModel: env.AUDIT_INTENT_MODEL.trim(),
+    intentConfirmation: env.INTENT_CONFIRMATION === "true",
+    auditNetworkWhitelist:
+      env.AUDIT_NETWORK_WHITELIST === undefined
+        ? null
+        : env.AUDIT_NETWORK_WHITELIST.split(",")
+            .map((entry) => entry.trim().toLowerCase())
+            .filter((entry) => entry.length > 0),
     otelCollectorUrl: env.OTEL_COLLECTOR_URL?.replace(/\/+$/, "") ?? "",
     nodeEnv: env.NODE_ENV,
   };

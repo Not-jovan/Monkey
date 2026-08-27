@@ -29,6 +29,8 @@ Volcengine ECS.
 - Fastify control plane with asynchronous Run state
 - Persistent Agent workspaces and Codex sessions
 - Disposable Docker, Colima, or Podman container for each local turn
+- Glass Box trace and audit middleware: per-step spans, secret masking,
+  intent-alignment and network-policy checks
 - Docker and Terraform deployment paths for Volcengine ECS
 
 ## Requirements
@@ -207,8 +209,12 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
+| `AUDIT_ENABLED` | `true` | Trace and audit middleware. |
+| `AUDIT_NETWORK_WHITELIST` | Unset | Hostnames the Agent may reach; unset disables the check. |
+| `INTENT_CONFIRMATION` | `false` | Hold a detected intent change until the user confirms it. |
 
-See [.env.example](.env.example) for all Runtime and resource-limit options.
+See [.env.example](.env.example) for all Runtime and resource-limit options,
+and [docs/GLASS_BOX.md](docs/GLASS_BOX.md) for the audit middleware options.
 
 ## How it works
 
@@ -221,10 +227,17 @@ flowchart LR
     Runtime -->|ECS profile| Codex["Codex CLI in application container"]
     Container --> Ark["Volcengine Ark Responses API"]
     Codex --> Ark
+    Container -.->|OTLP| Collector["Glass Box collector"]
+    Codex -.->|OTLP| Collector
+    Collector --> Audit["Trace store + auditor"]
+    Audit --> UI
 ```
 
 The first turn uses `codex exec`; later turns resume the stored Codex thread.
 Deleting an Agent archives its workspace under `workspaces/.deleted/`.
+
+Each turn is also recorded as a trace and audited against the user's stated
+intent and a network policy. See [docs/GLASS_BOX.md](docs/GLASS_BOX.md).
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for component and extension
 boundaries.
@@ -237,9 +250,13 @@ terraform fmt -check -recursive deploy/volcengine
 docker compose config
 ```
 
+`npm run eval:intent -w @launchpad/server` scores the intent classifier against
+its dataset. It calls a real model, so it is not part of `npm run check`.
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
+- [Glass Box: trace and audit](docs/GLASS_BOX.md)
 - [Local POC](docs/LOCAL_POC.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Hackathon extension guide](docs/HACKATHON_EXTENSION_GUIDE.md)

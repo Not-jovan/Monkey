@@ -11,6 +11,8 @@ import {
   secretValues,
   writeCodexConfig,
 } from "./config.js";
+import { IntentService } from "./intent/intent-service.js";
+import { IntentStore } from "./intent/intent-store.js";
 import { createRunner } from "./runner-factory.js";
 import { JsonStore } from "./store.js";
 import { createRedactor } from "./traces/redaction.js";
@@ -33,14 +35,29 @@ const traceStore = new TraceStore(path.join(config.dataDirectory, "traces"));
 await traceStore.initialize();
 const auditStore = new AuditStore(path.join(config.dataDirectory, "audits"));
 await auditStore.initialize();
+const intentStore = new IntentStore(path.join(config.dataDirectory, "intent"));
+await intentStore.initialize();
+
+const arkClient = createArkClient(config);
+const auditingAvailable = config.auditEnabled && isArkConfigured(config);
 const traceService = new TraceService(traceStore, redactor);
+const intentService = new IntentService({
+  store: intentStore,
+  client: arkClient,
+  model: config.auditIntentModel,
+  requireConfirmation: config.intentConfirmation,
+  enabled: auditingAvailable,
+  log: (message, error) => console.error(message, error),
+});
 const auditService = new AuditService({
   traceStore,
   auditStore,
-  client: createArkClient(config),
+  client: arkClient,
   securityModel: config.auditSecurityModel,
   intentModel: config.auditIntentModel,
-  enabled: config.auditEnabled && isArkConfigured(config),
+  networkWhitelist: config.auditNetworkWhitelist,
+  intent: intentService,
+  enabled: auditingAvailable,
   log: (message, error) => console.error(message, error),
 });
 auditService.start();
@@ -51,6 +68,7 @@ const service = new AgentService(
   workspaces,
   runner,
   traceService,
+  intentService,
 );
 await service.initialize();
 
@@ -58,6 +76,7 @@ const app = await createApp(config, service, {
   traceStore,
   auditStore,
   traceService,
+  intentService,
   collectorToken,
 });
 
@@ -66,6 +85,7 @@ const shutdown = async (signal: string) => {
   await app.close();
   await traceStore.flush();
   await auditStore.flush();
+  await intentStore.flush();
   process.exit(0);
 };
 

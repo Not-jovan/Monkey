@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { api, ApiError, setAuthToken } from "./api";
+import { IntentPanel } from "./intent/IntentPanel";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -50,6 +51,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
+  // Bumped after each message so the intent panel re-checks promptly for a
+  // proposal instead of waiting out its poll interval.
+  const [intentRefresh, setIntentRefresh] = useState(0);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -229,6 +233,7 @@ export default function App() {
     setError(null);
     try {
       const result = await api.sendMessage(selected.id, content);
+      setIntentRefresh((value) => value + 1);
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
@@ -493,6 +498,8 @@ export default function App() {
                   {selected.codexThreadId ? "Session connected" : "New session"}
                 </div>
               </div>
+
+              <IntentPanel agentId={selected.id} refreshKey={intentRefresh} />
 
               <div className="messages">
                 {messages.length === 0 && !activeRun ? (

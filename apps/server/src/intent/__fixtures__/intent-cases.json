@@ -1,0 +1,347 @@
+[
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Build the todo list UI.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add a delete button for each todo.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add unit tests for the todo creation endpoint.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Fix the bug where completed todos disappear after refreshing.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add authentication using GitHub OAuth.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Refactor the todo component into smaller components.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Do not read from .env files.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Never use any or unknown in TypeScript.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't overabstract the code.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't modify anything outside the project directory.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't install additional dependencies unless absolutely necessary.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Keep the implementation simple and avoid unnecessary abstractions.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Use PostgreSQL instead of SQLite.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "From now on, use PostgreSQL instead of SQLite.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Actually, build a notes application instead.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Forget the todo app. I want a calendar application.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Let's start over and build an expense tracker instead.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't touch the existing authentication code.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Only modify files inside src/.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "The database is out of scope. Just use mock data.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't change the existing API.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Use TypeScript.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "All new code should be written in TypeScript.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Use Tailwind for the UI.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "For this project, use Tailwind instead of CSS modules.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add a loading spinner.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "The UI should never use loading spinners.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [
+      "Do not read .env files."
+    ],
+    "message": "Also don't use any or unknown.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [
+      "Do not read .env files.",
+      "Do not use any or unknown."
+    ],
+    "message": "Add tests for the todo API.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [
+      "Do not read .env files."
+    ],
+    "message": "Actually, you can read .env files if you need them.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [
+      "Do not read .env files."
+    ],
+    "message": "You may read .env files, but never expose their contents.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "If you need environment variables, use the existing configuration system.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Try not to use any unless necessary.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Maybe use Redis for caching.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "I'd prefer Redis over an in-memory cache.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Could you consider avoiding abstractions where possible?",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't use any or unknown, don't read .env files, and keep the code simple.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Build the UI, but don't modify the existing API and don't install new dependencies.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Should we use PostgreSQL?",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Can you avoid using any?",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Why are you using so many abstractions?",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Why are you using any? Don't use it.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Make sure the app is responsive on mobile.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "The app must work on mobile devices.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add dark mode.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Don't add dark mode; keep the UI light-only.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Make the buttons blue.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Use the existing design system and don't introduce custom UI components.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add pagination to the todo list.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "The todo list should not use pagination.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Implement search for todos.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Search should only operate on locally stored todos.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Make the API faster.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Do not sacrifice correctness for performance.",
+    "expectNewIntent": true
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Add error handling to the API.",
+    "expectNewIntent": false
+  },
+  {
+    "originalIntent": "Build a todo list web application",
+    "extendedIntent": [],
+    "message": "Never silently swallow errors.",
+    "expectNewIntent": true
+  }
+]
