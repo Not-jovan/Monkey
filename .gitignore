@@ -12,6 +12,7 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 ruvector.db
+agentdb.rvf*
 deploy/volcengine/.terraform/
 deploy/volcengine/*.tfstate*
 deploy/volcengine/terraform.tfvars
