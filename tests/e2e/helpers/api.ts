@@ -36,26 +36,20 @@ export interface TraceRecord {
   spans: TraceSpan[];
 }
 
-export interface AuditRecord {
+export interface AuditTraceStep {
   id: string;
-  phase: "step" | "run";
-  type: "security" | "intent";
-  status: "completed" | "degraded" | "failed";
-  warning: boolean;
-  findings: string[];
-  reason: string;
-  notInAlignment?: string[];
-  networkViolations?: string[];
+  traceId: string;
+  agentId: string;
+  spanId: string | null;
+  type: "warning" | "error";
+  category: "intent-check" | "security";
+  finding: string;
 }
 
 export interface TraceDetail {
   trace: TraceRecord;
-  audits: AuditRecord[];
-  findings: {
-    type: "warning" | "error";
-    category: "intent-check" | "security";
-    finding: string;
-  }[];
+  findings: AuditTraceStep[];
+  auditComplete: boolean;
 }
 
 export interface IntentUpdate {
@@ -109,8 +103,7 @@ export async function waitForAuditedTrace(
         if (!response.ok()) return `http-${response.status()}`;
         latest = (await response.json()) as TraceDetail;
         const terminal = latest.trace.status !== "running";
-        const runAudit = latest.audits.some((audit) => audit.phase === "run");
-        return terminal && runAudit ? "ready" : "pending";
+        return terminal && latest.auditComplete ? "ready" : "pending";
       },
       { timeout: 12 * 60_000, intervals: [1_000, 2_000, 5_000] },
     )

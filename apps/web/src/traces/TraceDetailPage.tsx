@@ -2,16 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
-import type {
-  AuditRecord,
-  AuditTraceStep,
-  TraceRecord,
-  TraceSpan,
-} from "../types";
+import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { TraceCanvas } from "./TraceCanvas";
-import { FindingsSummary, TraceIntent } from "./TraceIntent";
+import { FindingsSummary, SpanFindings, TraceIntent } from "./TraceIntent";
 import { parseCodexFailure, readCommand } from "./codex-error";
 import { FailureBlock } from "./FailureBlock";
 import { TextBlock } from "./TextBlock";
@@ -19,8 +14,8 @@ import { TraceStepList } from "./TraceStepList";
 
 type TraceDetail = {
   trace: TraceRecord;
-  audits: AuditRecord[];
-  findings?: AuditTraceStep[];
+  findings: AuditTraceStep[];
+  auditComplete: boolean;
 };
 
 function download(fileName: string, data: unknown) {
@@ -35,123 +30,13 @@ function download(fileName: string, data: unknown) {
   URL.revokeObjectURL(url);
 }
 
-function AuditCard({ audit }: { audit: AuditRecord }) {
-  return (
-    <div className={"audit-card " + (audit.warning ? "audit-warning" : "")}>
-      <div className="audit-card-head">
-        <span className={"audit-chip audit-" + audit.type}>{audit.type}</span>
-        <span
-          className={"audit-status audit-status-" + audit.status}
-          title={
-            audit.status === "degraded"
-              ? "The primary audit model was unavailable; this verdict came from the fallback model."
-              : audit.status === "failed"
-                ? "No model could be reached. Deterministic checks below still stand."
-                : "Judged by the configured audit model."
-          }
-        >
-          {audit.status}
-        </span>
-        {audit.status === "degraded" && (
-          <span className="muted-cell">
-            primary model unavailable — judged by the fallback
-          </span>
-        )}
-        {audit.model && <span className="muted-cell">{audit.model}</span>}
-        <span className="muted-cell">{formatDuration(audit.latencyMs)}</span>
-      </div>
-      {audit.findings.length > 0 && (
-        <div className="audit-findings">
-          {audit.findings.map((finding) => (
-            <span className="warning-badge" key={finding}>
-              ⚠ {finding}
-            </span>
-          ))}
-        </div>
-      )}
-      {(audit.notInAlignment?.length ?? 0) > 0 && (
-        <div className="audit-policy">
-          <span className="eyebrow">Not in alignment with the intent</span>
-          <ul>
-            {audit.notInAlignment?.map((entry) => (
-              <li className="audit-prose" key={entry}>
-                {entry}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {(audit.newObjectives?.length ?? 0) > 0 && (
-        <div className="audit-policy">
-          <span className="eyebrow">Objectives the user did not ask for</span>
-          <ul>
-            {audit.newObjectives?.map((objective) => (
-              <li className="audit-prose" key={objective.objective}>
-                {objective.objective}{" "}
-                <span
-                  className={
-                    objective.actedUpon ? "warning-badge" : "muted-cell"
-                  }
-                >
-                  {objective.actedUpon ? "⚠ acted upon" : "not acted upon"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {(audit.networkViolations?.length ?? 0) > 0 && (
-        <div className="audit-policy">
-          <span className="eyebrow">Outside the whitelist</span>
-          <ul>
-            {audit.networkViolations?.map((url) => (
-              <li key={url}>{url}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {(audit.secretExposures?.length ?? 0) > 0 && (
-        <div className="audit-policy">
-          <span className="eyebrow">Credentials observed</span>
-          <ul>
-            {audit.secretExposures?.map((exposure) => (
-              <li key={exposure.location + exposure.secretType}>
-                {exposure.secretType}{" "}
-                <span className="muted-cell">
-                  {exposure.location === "request" ? "sent outward" : "received"}
-                </span>{" "}
-                {exposure.relevant === false && (
-                  <span className="warning-badge">⚠ unrelated</span>
-                )}
-                {exposure.relevant === true && (
-                  <span className="muted-cell">relevant</span>
-                )}
-                {exposure.relevant == null && (
-                  <span className="muted-cell">relevance unknown</span>
-                )}
-                {exposure.reason && (
-                  <span className="muted-cell"> — {exposure.reason}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      {audit.reason && <p>{audit.reason}</p>}
-      {audit.contextSummary && (
-        <p className="muted-cell">Context: {audit.contextSummary}</p>
-      )}
-    </div>
-  );
-}
-
 function SpanDetails({
   span,
-  audits,
+  findings,
   trace,
 }: {
   span: TraceSpan;
-  audits: AuditRecord[];
+  findings: AuditTraceStep[];
   trace: TraceRecord;
 }) {
   const detailOptions = { tracePrompt: trace.prompt, spans: trace.spans };
@@ -228,14 +113,7 @@ function SpanDetails({
           <span className="muted-cell">No recorded attributes.</span>
         )}
       </div>
-      {audits.length > 0 && (
-        <div className="span-audits">
-          <span className="eyebrow">Step audits</span>
-          {audits.map((audit) => (
-            <AuditCard audit={audit} key={audit.id} />
-          ))}
-        </div>
-      )}
+      <SpanFindings findings={findings} />
     </div>
   );
 }
@@ -256,7 +134,6 @@ export function TraceDetailPage() {
   });
 
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
-  const audits: AuditRecord[] = detailQuery.data?.audits ?? [];
   const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
   const [view, setView] = useState<"list" | "flow">(() => {
     try {
@@ -275,20 +152,19 @@ export function TraceDetailPage() {
   }, [view]);
 
   const warningsBySpan = new Map<string, number>();
-  for (const audit of audits) {
-    if (!audit.warning || !audit.spanId) continue;
+  for (const finding of findings) {
+    if (!finding.spanId) continue;
     warningsBySpan.set(
-      audit.spanId,
-      (warningsBySpan.get(audit.spanId) ?? 0) + 1,
+      finding.spanId,
+      (warningsBySpan.get(finding.spanId) ?? 0) + 1,
     );
   }
-  const runAudits = audits.filter((audit) => audit.phase === "run");
-  const warningCount = audits.filter((audit) => audit.warning).length;
+  const warningCount = findings.length;
 
   const selectedSpan =
     trace?.spans.find((span) => span.id === selectedSpanId) ?? null;
-  const selectedAudits = audits.filter(
-    (audit) => audit.spanId === selectedSpanId,
+  const selectedFindings = findings.filter(
+    (finding) => finding.spanId === selectedSpanId,
   );
 
   if (locked || detailQuery.error) {
@@ -371,11 +247,7 @@ export function TraceDetailPage() {
       {trace && <TraceIntent trace={trace} />}
 
       {trace && (
-        <FindingsSummary
-          findings={findings}
-          audits={audits}
-          onSelect={setSelectedSpanId}
-        />
+        <FindingsSummary findings={findings} onSelect={setSelectedSpanId} />
       )}
 
       {trace && (
@@ -425,24 +297,15 @@ export function TraceDetailPage() {
 
       {trace && selectedSpan ? (
         <SpanDetails
-          audits={selectedAudits}
+          findings={selectedFindings}
           span={selectedSpan}
           trace={trace}
         />
       ) : (
         <div className="span-panel span-panel-hint">
-          Select a step in the flow above to inspect its details and audit
-          verdicts. Drag to pan.
+          Select a step in the flow above to inspect its details and findings.
+          Drag to pan.
         </div>
-      )}
-
-      {runAudits.length > 0 && (
-        <section className="run-audits">
-          <span className="eyebrow">Run-level intent audit</span>
-          {runAudits.map((audit) => (
-            <AuditCard audit={audit} key={audit.id} />
-          ))}
-        </section>
       )}
     </div>
   );

@@ -2,7 +2,6 @@ import type {
   Agent,
   AgentLifecycleEvent,
   AgentRun,
-  AuditRecord,
   AuditTraceStep,
   IntentState,
   IntentUpdate,
@@ -117,8 +116,8 @@ export const api = {
   trace: (id: string) =>
     request<{
       trace: TraceRecord;
-      audits: AuditRecord[];
-      findings?: AuditTraceStep[];
+      findings: AuditTraceStep[];
+      auditComplete: boolean;
     }>("/api/traces/" + id),
   intent: (id: string) =>
     request<{
@@ -138,11 +137,19 @@ export const api = {
       { method: "POST", body: JSON.stringify({ decision }) },
     ),
   downloadTrace: (id: string) =>
-    request<{ exportedAt: string; trace: TraceRecord; audits: AuditRecord[] }>(
-      "/api/traces/" + id + "/download",
-    ),
+    request<{
+      exportedAt: string;
+      trace: TraceRecord;
+      findings: AuditTraceStep[];
+      auditComplete: boolean;
+    }>("/api/traces/" + id + "/download"),
   exportTrace: (id: string) =>
-    request<{ exportedAt: string; trace: TraceRecord; audits: AuditRecord[] }>(
+    request<{
+      exportedAt: string;
+      trace: TraceRecord;
+      findings: AuditTraceStep[];
+      auditComplete: boolean;
+    }>(
       "/api/traces/" + id + "/export",
     ),
 };

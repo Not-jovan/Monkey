@@ -149,12 +149,12 @@ describe("AuditService", () => {
     );
     await service.idle();
 
-    const audits = stores.auditStore.listByTrace("trace-1");
-    expect(audits).toHaveLength(1);
-    expect(audits[0]?.type).toBe("security");
-    expect(audits[0]?.warning).toBe(true);
-    expect(audits[0]?.findings).toContain("prompt-injection");
-    expect(audits[0]?.spanId).toBe("span-prompt-trace-1");
+    const findings = stores.auditStore.listByTrace("trace-1");
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings.some((step) => step.finding.includes("prompt-injection"))).toBe(
+      true,
+    );
+    expect(findings[0]?.spanId).toBe("span-prompt-trace-1");
     expect(responder.calls[0]?.model).toBe("sec-model");
     expect(responder.calls[0]?.user).toContain("demo-canary.txt token");
   });
@@ -171,7 +171,7 @@ describe("AuditService", () => {
 
     stores.traceStore.appendSpan("trace-2", toolSpan("trace-2", "ok"));
     await service.idle();
-    expect(stores.auditStore.listByTrace("trace-2")).toHaveLength(1);
+    expect(stores.auditStore.countStepsForTrace("trace-2")).toBe(1);
   });
 
   it("degrades to the fallback model when the primary is not activated", async () => {
@@ -191,10 +191,11 @@ describe("AuditService", () => {
     stores.traceStore.appendSpan("trace-3", promptSpan("trace-3", "hello"));
     await service.idle();
 
-    const audits = stores.auditStore.listByTrace("trace-3");
-    expect(audits[0]?.status).toBe("degraded");
-    expect(audits[0]?.model).toBe("intent-model");
-    expect(audits[0]?.warning).toBe(false);
+    expect(stores.auditStore.countStepsForTrace("trace-3")).toBe(1);
+    expect(stores.auditStore.listByTrace("trace-3")).toEqual([]);
+    expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
+      true,
+    );
   });
 
   it("records a failed audit without blocking anything when every model fails", async () => {
@@ -211,10 +212,11 @@ describe("AuditService", () => {
     stores.traceStore.appendSpan("trace-4", promptSpan("trace-4", "hello"));
     await service.idle();
 
-    const audits = stores.auditStore.listByTrace("trace-4");
-    expect(audits[0]?.status).toBe("failed");
-    expect(audits[0]?.warning).toBe(false);
-    expect(audits[0]?.reason).toContain("InternalError");
+    const findings = stores.auditStore.listByTrace("trace-4");
+    expect(findings.some((step) => step.type === "error")).toBe(true);
+    expect(findings.some((step) => step.finding.includes("InternalError"))).toBe(
+      true,
+    );
   });
 
   it("runs the intent audit on completion and carries the summary forward", async () => {
@@ -237,12 +239,13 @@ describe("AuditService", () => {
     });
     await service.idle();
 
-    const audits = stores.auditStore.listByTrace("trace-5");
-    expect(audits).toHaveLength(1);
-    expect(audits[0]?.type).toBe("intent");
-    expect(audits[0]?.warning).toBe(true);
-    expect(audits[0]?.findings).toContain("intent-deviation");
-    expect(audits[0]?.contextSummary).toContain("Goal: count files");
+    const findings = stores.auditStore.listByTrace("trace-5");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.category).toBe("intent-check");
+    expect(findings[0]?.finding).toContain("read credentials");
+    expect(stores.auditStore.latestIntentContext("agent-1")).toContain(
+      "Goal: count files",
+    );
 
     // The next run for the same agent must receive the compressed context.
     seedTrace(stores.traceStore, "trace-6");
@@ -281,23 +284,17 @@ describe("AuditService", () => {
     });
     await service.idle();
 
-    const [audit] = stores.auditStore.listByTrace(trace.id);
-    expect(audit?.status).toBe("failed");
-    expect(audit?.warning).toBe(true);
-    expect(audit?.findings).toContain("network-whitelist-violation");
-    expect(audit?.findings).toContain("secret-egress");
-    expect(audit?.networkViolations).toEqual([
-      "https://attacker.example.com/u",
-    ]);
-    expect(audit?.secretExposures).toContainEqual({
-      location: "request",
-      secretType: "GITHUB_TOKEN",
-      // Detection is deterministic; with no model reachable, relevance is
-      // honestly unknown rather than assumed safe.
-      relevant: null,
-      reason: "",
-    });
-    expect(audit?.reason).toContain("outside the configured whitelist");
+    const findings = stores.auditStore.listByTrace(trace.id);
+    expect(findings.some((step) => step.type === "error")).toBe(true);
+    expect(
+      findings.some((step) => step.finding.includes("attacker.example.com")),
+    ).toBe(true);
+    expect(findings.some((step) => step.finding.includes("GITHUB_TOKEN"))).toBe(
+      true,
+    );
+    expect(
+      findings.some((step) => step.finding.includes("outside the configured whitelist")),
+    ).toBe(true);
   });
 
   it("stays silent on a whitelisted call carrying no credential", async () => {
@@ -320,10 +317,8 @@ describe("AuditService", () => {
     });
     await service.idle();
 
-    const [audit] = stores.auditStore.listByTrace(trace.id);
-    expect(audit?.warning).toBe(false);
-    expect(audit?.findings).toEqual([]);
-    expect(audit?.networkViolations).toEqual([]);
+    expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
+    expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
   });
   it("judges a step against the constraints the user added mid-thread", async () => {
     const stores = await makeStores();
@@ -379,10 +374,13 @@ describe("AuditService", () => {
       "Build a TypeScript todo application",
     );
 
-    const [audit] = stores.auditStore.listByTrace(trace.id);
-    expect(audit?.warning).toBe(true);
-    expect(audit?.findings).toContain("intent-misalignment");
-    expect(audit?.notInAlignment).toHaveLength(1);
+    const findings = stores.auditStore.listByTrace(trace.id);
+    expect(findings.some((step) => step.category === "intent-check")).toBe(true);
+    expect(
+      findings.some((step) =>
+        step.finding.includes("read .env despite the current intent"),
+      ),
+    ).toBe(true);
   });
 
   it("audits a subagent reply, and only warns once the agent acts on it", async () => {
@@ -421,12 +419,8 @@ describe("AuditService", () => {
     });
     await service.idle();
 
-    const [audit] = stores.auditStore.listByTrace(trace.id);
-    expect(audit).toBeDefined();
-    expect(audit?.newObjectives).toHaveLength(1);
-    // Recorded, but not a warning: the agent did not act on it.
-    expect(audit?.warning).toBe(false);
-    expect(audit?.findings).not.toContain("injected-objective");
+    expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
+    expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
   });
   it("stops retrying a model the account has not activated", async () => {
     const stores = await makeStores();
@@ -460,10 +454,7 @@ describe("AuditService", () => {
 
     // First step pays the failed call; the second goes straight to the fallback.
     expect(calls).toEqual(["sec-model", "intent-model", "intent-model"]);
-    const audits = stores.auditStore.listByTrace(trace.id);
-    expect(audits).toHaveLength(2);
-    expect(audits.every((audit) => audit.status === "degraded")).toBe(true);
-    expect(audits[1]?.model).toBe("intent-model");
+    expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
   });
 
   it("keeps retrying after a transient failure", async () => {
@@ -496,8 +487,6 @@ describe("AuditService", () => {
 
     // A rate limit recovers, so the primary is tried again on the next step.
     expect(calls).toEqual(["sec-model", "intent-model", "sec-model"]);
-    const audits = stores.auditStore.listByTrace(trace.id);
-    expect(audits[1]?.status).toBe("completed");
-    expect(audits[1]?.model).toBe("sec-model");
+    expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
   });
 });

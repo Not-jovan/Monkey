@@ -5,9 +5,10 @@ import type { IntentService } from "../intent/intent-service.js";
 import type { TraceSpan } from "../traces/trace-model.js";
 import type { TraceStore } from "../traces/trace-store.js";
 import { ArkApiError, type ArkClient } from "./ark-client.js";
-import type {
-  AuditStatus,
-  SecretExposureFinding,
+import {
+  auditSteps,
+  emitPolicyFindings,
+  type SecretExposureFinding,
 } from "./audit-model.js";
 import type { AuditStore } from "./audit-store.js";
 import { runDeterministicChecks } from "./deterministic.js";
@@ -199,8 +200,7 @@ export class AuditService {
     // tracking existed, so a step is never judged against an empty spec.
     if (intent.objective.length === 0) intent.objective = trace.prompt;
 
-    const startedAt = Date.now();
-    const { verdict, model, status, failure } = await this.completeWithFallback(
+    const { verdict, status, failure } = await this.completeWithFallback(
       this.deps.securityModel,
       this.deps.intentModel,
       STEP_SYSTEM_PROMPT,
@@ -265,29 +265,41 @@ export class AuditService {
       .filter((part) => part.length > 0)
       .join(" ");
 
-    this.deps.auditStore.add({
-      version: 1,
-      id: randomUUID(),
-      traceId,
-      agentId: trace.agentId,
-      spanId,
-      phase: "step",
-      type: "security",
-      status,
-      warning: findings.length > 0,
-      model,
-      findings,
-      reason: [deterministicReason, verdict?.reason ?? failure ?? ""]
-        .filter((part) => part.length > 0)
-        .join(" · "),
-      notInAlignment,
-      newObjectives,
-      networkViolations: deterministic.networkViolations,
-      secretExposures,
-      contextSummary: null,
-      latencyMs: Date.now() - startedAt,
-      createdAt: new Date().toISOString(),
-    });
+    const reason = [deterministicReason, verdict?.reason ?? failure ?? ""]
+      .filter((part) => part.length > 0)
+      .join(" · ");
+    this.deps.auditStore.noteStep(traceId, spanId);
+    this.deps.auditStore.add(
+      auditSteps(
+        { id: randomUUID(), traceId, agentId: trace.agentId, spanId },
+        (push) => {
+          emitPolicyFindings(push, {
+            notInAlignment,
+            newObjectives,
+            networkViolations: deterministic.networkViolations,
+            secretExposures,
+          });
+          for (const tag of findings) {
+            if (
+              tag === "network-whitelist-violation" ||
+              tag === "secret-egress" ||
+              tag === "intent-misalignment" ||
+              tag === "injected-objective"
+            ) {
+              continue;
+            }
+            push("warning", "security", tag + (reason ? ": " + reason : ""));
+          }
+          if (status === "failed") {
+            push(
+              "error",
+              "security",
+              "The audit could not be completed" + (reason ? ": " + reason : "."),
+            );
+          }
+        },
+      ),
+    );
   }
 
   private async intentAudit(traceId: string) {
@@ -330,8 +342,7 @@ export class AuditService {
       .filter((line) => line.length > 0)
       .join("\n");
 
-    const startedAt = Date.now();
-    const { verdict, model, status, failure } = await this.completeWithFallback(
+    const { verdict, status, failure } = await this.completeWithFallback(
       this.deps.intentModel,
       null,
       INTENT_SYSTEM_PROMPT,
@@ -339,30 +350,34 @@ export class AuditService {
       intentVerdict,
     );
 
-    this.deps.auditStore.add({
-      version: 1,
-      id: randomUUID(),
+    const reason = verdict?.deviation ?? (verdict ? "" : (failure ?? ""));
+    this.deps.auditStore.noteRun(
       traceId,
-      agentId: trace.agentId,
-      spanId: null,
-      phase: "run",
-      type: "intent",
-      status,
-      warning: verdict ? !verdict.aligned : false,
-      model,
-      findings: verdict && !verdict.aligned ? ["intent-deviation"] : [],
-      reason: verdict?.deviation ?? (verdict ? "" : (failure ?? "")),
-      notInAlignment:
-        verdict && !verdict.aligned && verdict.deviation
-          ? [verdict.deviation]
-          : [],
-      newObjectives: [],
-      networkViolations: [],
-      secretExposures: [],
-      contextSummary: verdict?.context_summary ?? null,
-      latencyMs: Date.now() - startedAt,
-      createdAt: new Date().toISOString(),
-    });
+      trace.agentId,
+      verdict?.context_summary ?? null,
+    );
+    this.deps.auditStore.add(
+      auditSteps(
+        {
+          id: randomUUID(),
+          traceId,
+          agentId: trace.agentId,
+          spanId: null,
+        },
+        (push) => {
+          if (verdict && !verdict.aligned && verdict.deviation) {
+            push("warning", "intent-check", verdict.deviation);
+          }
+          if (status === "failed") {
+            push(
+              "error",
+              "intent-check",
+              "The audit could not be completed" + (reason ? ": " + reason : "."),
+            );
+          }
+        },
+      ),
+    );
   }
 
   // Distinguishes "this model does not exist for us" from a transient failure:
@@ -402,14 +417,14 @@ export class AuditService {
         return {
           verdict: await attempt(fallbackModel),
           model: fallbackModel,
-          status: "degraded" as AuditStatus,
+          status: "degraded" as const,
           failure: "Primary audit model " + primaryModel + " is not available",
         };
       } catch (fallbackError) {
         return {
           verdict: null,
           model: fallbackModel,
-          status: "failed" as AuditStatus,
+          status: "failed" as const,
           failure: describeError(fallbackError),
         };
       }
@@ -419,7 +434,7 @@ export class AuditService {
       return {
         verdict: await attempt(primaryModel),
         model: primaryModel,
-        status: "completed" as AuditStatus,
+        status: "completed" as const,
         failure: null,
       };
     } catch (primaryError) {
@@ -438,14 +453,14 @@ export class AuditService {
           return {
             verdict: await attempt(fallbackModel),
             model: fallbackModel,
-            status: "degraded" as AuditStatus,
+            status: "degraded" as const,
             failure: "Primary audit model unavailable: " + primaryFailure,
           };
         } catch (fallbackError) {
           return {
             verdict: null,
             model: fallbackModel,
-            status: "failed" as AuditStatus,
+            status: "failed" as const,
             failure:
               "Primary: " +
               primaryFailure +
@@ -457,7 +472,7 @@ export class AuditService {
       return {
         verdict: null,
         model: primaryModel,
-        status: "failed" as AuditStatus,
+        status: "failed" as const,
         failure: primaryFailure,
       };
     }

@@ -1,7 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { toAuditTraceSteps } from "../audits/audit-model.js";
 import type { AuditStore } from "../audits/audit-store.js";
 import type { IntentService } from "../intent/intent-service.js";
 import { HttpError } from "../errors.js";
@@ -110,10 +109,12 @@ export function registerGlassboxRoutes(
     if (!trace) {
       throw new HttpError(404, "Trace not found");
     }
-    const audits = deps.auditStore.listByTrace(id);
-    // AUDIT_PLAN's flat output shape, derived rather than stored: one audit can
-    // carry several findings.
-    return { trace, audits, findings: audits.flatMap(toAuditTraceSteps) };
+    const findings = deps.auditStore.listByTrace(id);
+    return {
+      trace,
+      findings,
+      auditComplete: deps.auditStore.isRunComplete(id),
+    };
   });
 
   const downloadTrace = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -126,12 +127,12 @@ export function registerGlassboxRoutes(
       "content-disposition",
       'attachment; filename="trace-' + id + '.json"',
     );
-    const audits = deps.auditStore.listByTrace(id);
+    const findings = deps.auditStore.listByTrace(id);
     return {
       exportedAt: new Date().toISOString(),
       trace,
-      audits,
-      findings: audits.flatMap(toAuditTraceSteps),
+      findings,
+      auditComplete: deps.auditStore.isRunComplete(id),
     };
   };
 

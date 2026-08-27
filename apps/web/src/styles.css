@@ -1157,7 +1157,6 @@ textarea:focus {
 .lifecycle-card,
 .trace-canvas,
 .span-panel,
-.run-audits,
 .trace-meta {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -1425,110 +1424,10 @@ textarea:focus {
   overflow: auto;
 }
 
-.span-audits,
-.run-audits {
+.span-audits {
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-
-.run-audits {
-  padding: 16px 18px;
-}
-
-.audit-card {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 10px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  font-size: 0.85rem;
-}
-
-.audit-card p {
-  margin: 0;
-}
-
-.audit-warning {
-  border-color: #eccf9e;
-  background: #fdf8ef;
-}
-
-.audit-card-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.audit-chip {
-  border-radius: 999px;
-  padding: 2px 10px;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.audit-security {
-  background: var(--purple-soft);
-  color: var(--purple-dark);
-}
-
-.audit-intent {
-  background: #e9f4ee;
-  color: var(--green);
-}
-
-.audit-status {
-  font-size: 0.76rem;
-  font-weight: 600;
-}
-
-.audit-status-completed {
-  color: var(--green);
-}
-
-.audit-status-degraded {
-  color: #8a6d1a;
-}
-
-.audit-status-failed {
-  color: var(--red);
-}
-
-.audit-findings {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.audit-policy {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 8px;
-}
-
-.audit-policy ul {
-  margin: 0;
-  padding-left: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.audit-policy li {
-  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.audit-policy li.audit-prose {
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.5;
 }
 
 .intent-panel {

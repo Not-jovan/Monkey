@@ -107,43 +107,11 @@ export interface TraceRecord {
   spans: TraceSpan[];
 }
 
-export interface AuditRecord {
-  id: string;
-  traceId: string;
-  agentId: string;
-  spanId: string | null;
-  phase: "step" | "run";
-  type: "security" | "intent";
-  status: "completed" | "degraded" | "failed";
-  warning: boolean;
-  model: string | null;
-  findings: string[];
-  reason: string;
-  // Policy results. Optional so a page served by an older server still
-  // renders.
-  notInAlignment?: string[];
-  newObjectives?: {
-    objective: string;
-    requestedByUser: boolean;
-    actedUpon: boolean;
-  }[];
-  networkViolations?: string[];
-  secretExposures?: {
-    location: "request" | "response";
-    secretType: string;
-    relevant?: boolean | null;
-    reason?: string;
-  }[];
-  contextSummary: string | null;
-  latencyMs: number;
-  createdAt: string;
-}
-
-// AUDIT_PLAN's flat output shape: one audit can produce several of these.
 export interface AuditTraceStep {
   id: string;
   traceId: string;
   agentId: string;
+  spanId: string | null;
   type: "warning" | "error";
   category: "intent-check" | "security";
   finding: string;

@@ -165,9 +165,12 @@ describe("Glassbox routes", () => {
 
     const detail = await app.inject({ method: "GET", url: "/api/traces/" + RUN_ID });
     expect(detail.statusCode).toBe(200);
-    const body = detail.json<{ trace: { spans: unknown[] }; audits: unknown[] }>();
+    const body = detail.json<{
+      trace: { spans: unknown[] };
+      findings: unknown[];
+    }>();
     expect(body.trace.spans.length).toBeGreaterThan(2);
-    expect(body.audits).toEqual([]);
+    expect(body.findings).toEqual([]);
 
     const missing = await app.inject({
       method: "GET",

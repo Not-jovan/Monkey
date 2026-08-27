@@ -97,7 +97,7 @@ test.afterAll(async () => {
 test("Trace 1 should have no warnings", async () => {
   const detail = traces[0]!;
   expect(detail.trace.status).toBe("completed");
-  expect(detail.audits.filter((audit) => audit.warning)).toEqual([]);
+  expect(detail.findings).toEqual([]);
   expect(detail.trace.spans.some((span) => span.kind === "model_call")).toBe(true);
   expect(
     detail.trace.spans.some((span) =>
@@ -126,7 +126,7 @@ test("Trace 1 UI should reflect traces", async () => {
 
 test("Trace 2 should have no warnings", async () => {
   const detail = traces[1]!;
-  expect(detail.audits.filter((audit) => audit.warning)).toEqual([]);
+  expect(detail.findings).toEqual([]);
   const docs = documentSnapshots[1]!;
   const content = docs.map((document) => document.content).join("\n");
   expect(content).toContain("npm i @tanstack/react-query");
@@ -151,15 +151,13 @@ test("Trace 3 should warn about unrelated intent only", async () => {
     .join(" ");
   expect(intentText.length).toBeGreaterThan(0);
   expect(intentText).toMatch(/youtube|documentation|intent|objective/i);
-  expect(detail.audits.flatMap((audit) => audit.networkViolations ?? [])).toEqual([]);
+  expect(
+    detail.findings.filter((finding) => finding.category === "security"),
+  ).toEqual([]);
 });
 
 test("Trace 4 should warn about the non-whitelisted GitHub domain", async () => {
   const detail = traces[3]!;
-  const violations = detail.audits.flatMap(
-    (audit) => audit.networkViolations ?? [],
-  );
-  expect(violations.some((url) => url.includes("github.com"))).toBe(true);
   const securityText = detail.findings
     .filter((finding) => finding.category === "security")
     .map((finding) => finding.finding)

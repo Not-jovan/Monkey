@@ -1,7 +1,3 @@
-export type AuditType = "security" | "intent";
-export type AuditPhase = "step" | "run";
-export type AuditStatus = "completed" | "degraded" | "failed";
-
 export interface SecretExposureFinding {
   location: "request" | "response";
   secretType: string;
@@ -20,69 +16,66 @@ export interface NewObjectiveFinding {
   actedUpon: boolean;
 }
 
-export interface AuditRecord {
-  version: 1;
-  id: string;
-  traceId: string;
-  agentId: string;
-  // Step audits point at the span they examined; run audits cover the trace.
-  spanId: string | null;
-  phase: AuditPhase;
-  type: AuditType;
-  status: AuditStatus;
-  warning: boolean;
-  model: string | null;
-  findings: string[];
-  reason: string;
-  // Intent policies (AUDIT_PLAN 4.A and 4.B).
-  notInAlignment: string[];
-  newObjectives: NewObjectiveFinding[];
-  // Security policies (AUDIT_PLAN Security A and B). Both start from
-  // deterministic detection so they stand even with no model available.
-  networkViolations: string[];
-  secretExposures: SecretExposureFinding[];
-  // Intent audits carry a compressed summary forward to the next run so the
-  // original goal survives context growth.
-  contextSummary: string | null;
-  latencyMs: number;
-  createdAt: string;
-}
-
-// The flat shape AUDIT_PLAN specifies as the auditor's output. One record can
-// yield several of these, so it is derived rather than stored: the record
-// keeps the evidence, this is the view.
 export interface AuditTraceStep {
   id: string;
   traceId: string;
   agentId: string;
+  // Null on run-level findings; set when the finding belongs to a span.
+  spanId: string | null;
   type: "warning" | "error";
   category: "intent-check" | "security";
   finding: string;
 }
 
-export function toAuditTraceSteps(record: AuditRecord): AuditTraceStep[] {
+export function auditSteps(
+  identity: {
+    id: string;
+    traceId: string;
+    agentId: string;
+    spanId: string | null;
+  },
+  write: (
+    push: (
+      type: AuditTraceStep["type"],
+      category: AuditTraceStep["category"],
+      finding: string,
+    ) => void,
+  ) => void,
+): AuditTraceStep[] {
   const steps: AuditTraceStep[] = [];
   let sequence = 0;
-  const push = (
-    type: AuditTraceStep["type"],
-    category: AuditTraceStep["category"],
-    finding: string,
-  ) => {
+  write((type, category, finding) => {
     sequence += 1;
     steps.push({
-      id: record.id + "#" + sequence,
-      traceId: record.traceId,
-      agentId: record.agentId,
+      id: identity.id + "#" + sequence,
+      traceId: identity.traceId,
+      agentId: identity.agentId,
+      spanId: identity.spanId,
       type,
       category,
       finding,
     });
-  };
+  });
+  return steps;
+}
 
-  for (const entry of record.notInAlignment) {
+export function emitPolicyFindings(
+  push: (
+    type: AuditTraceStep["type"],
+    category: AuditTraceStep["category"],
+    finding: string,
+  ) => void,
+  policies: {
+    notInAlignment: string[];
+    newObjectives: NewObjectiveFinding[];
+    networkViolations: string[];
+    secretExposures: SecretExposureFinding[];
+  },
+) {
+  for (const entry of policies.notInAlignment) {
     push("warning", "intent-check", entry);
   }
-  for (const objective of record.newObjectives) {
+  for (const objective of policies.newObjectives) {
     if (objective.requestedByUser || !objective.actedUpon) continue;
     push(
       "warning",
@@ -91,14 +84,14 @@ export function toAuditTraceSteps(record: AuditRecord): AuditTraceStep[] {
         objective.objective,
     );
   }
-  for (const url of record.networkViolations) {
+  for (const url of policies.networkViolations) {
     push(
       "warning",
       "security",
       "Contacted " + url + ", which is not on the configured whitelist.",
     );
   }
-  for (const exposure of record.secretExposures) {
+  for (const exposure of policies.secretExposures) {
     if (exposure.relevant === true) continue;
     const verb =
       exposure.location === "request" ? "was sent outward" : "was exposed";
@@ -114,23 +107,5 @@ export function toAuditTraceSteps(record: AuditRecord): AuditTraceStep[] {
         (exposure.reason ? " " + exposure.reason : ""),
     );
   }
-  for (const finding of record.findings) {
-    if (
-      finding === "network-whitelist-violation" ||
-      finding === "secret-egress" ||
-      finding === "intent-deviation"
-    ) {
-      continue;
-    }
-    push("warning", "security", finding + (record.reason ? ": " + record.reason : ""));
-  }
-  if (record.status === "failed") {
-    push(
-      "error",
-      record.type === "intent" ? "intent-check" : "security",
-      "The audit could not be completed" +
-        (record.reason ? ": " + record.reason : "."),
-    );
-  }
-  return steps;
 }
+
