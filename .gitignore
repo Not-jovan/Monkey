@@ -8,6 +8,8 @@ data/
 workspaces/
 codex-home/
 coverage/
+playwright-report/
+test-results/
 *.log
 *.tsbuildinfo
 .DS_Store

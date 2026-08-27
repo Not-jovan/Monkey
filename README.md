@@ -250,6 +250,31 @@ terraform fmt -check -recursive deploy/volcengine
 docker compose config
 ```
 
+### Live Playwright pipeline
+
+The opt-in browser suite creates a **Documentation Agent**, runs five real
+multi-turn tasks, and verifies trace rendering, audit findings, conversation
+continuity, the network whitelist, and a human-confirmed intent update. It uses
+an isolated state directory under `/tmp` and is intentionally separate from
+`npm run check` because it requires Ark, internet access, and a running Docker,
+Colima, or Podman engine.
+
+Install Chromium once, then run the suite:
+
+```bash
+npx playwright install chromium
+RUN_LIVE_E2E=true \
+ARK_API_KEY=your-ark-api-key \
+ARK_MODEL=ep-your-endpoint-id \
+npm run test:e2e
+```
+
+The test server automatically enables intent confirmation and configures
+`tanstack.com`, `youtube.com`, and YouTube subdomains as permitted destinations.
+Override `E2E_PORT` if port `3100` is already in use. Failure screenshots,
+videos, and Playwright traces are retained under `test-results/`; the HTML
+report is written to `playwright-report/`.
+
 `npm run eval:intent -w @launchpad/server` scores the intent classifier against
 its dataset. It calls a real model, so it is not part of `npm run check`.
 
