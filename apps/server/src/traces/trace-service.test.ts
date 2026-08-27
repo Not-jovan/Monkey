@@ -100,9 +100,14 @@ describe("TraceService", () => {
     expect(String(tool?.attributes.arguments)).toContain("ls -la");
     expect(String(tool?.attributes.output)).toContain("alpha.txt");
 
-    const model = trace?.spans.find((span) => span.name === "codex.api_request");
+    const model = trace?.spans.find(
+      (span) => span.name === "codex.api_request",
+    );
     expect(model?.label).toBe("Model · plan");
     expect(model?.attributes.phase).toBe("plan");
+    expect(String(model?.attributes.context)).toContain("Count the txt files");
+    expect(String(model?.attributes.output)).toContain("exec_command");
+    expect(String(model?.attributes.output)).toContain("ls -la");
 
     for (const span of trace?.spans ?? []) {
       expect(span.status).not.toBe("running");
@@ -157,7 +162,10 @@ describe("TraceService", () => {
       { id: RUN_ID, prompt: "cleanup" },
     );
     service.ingestLogs(payload);
-    service.onRunEnd(RUN_ID, { status: "failed", error: "Codex exited with code 1" });
+    service.onRunEnd(RUN_ID, {
+      status: "failed",
+      error: "Codex exited with code 1",
+    });
 
     const trace = store.get(RUN_ID);
     const tool = trace?.spans.find((span) => span.name === "tool.exec_command");
@@ -173,9 +181,9 @@ describe("TraceService", () => {
     service.onRunEnd(RUN_ID, { status: "cancelled" });
 
     const trace = store.get(RUN_ID);
-    expect(
-      trace?.spans.some((span) => span.name === "user.intervention"),
-    ).toBe(true);
+    expect(trace?.spans.some((span) => span.name === "user.intervention")).toBe(
+      true,
+    );
     expect(trace?.status).toBe("cancelled");
     expect(service.onUserIntervention(agent.id, "terminate")).toBeNull();
   });
@@ -194,7 +202,10 @@ describe("TraceService", () => {
               logRecords: [
                 {
                   attributes: [
-                    { key: "event.name", value: { stringValue: "codex.brand_new" } },
+                    {
+                      key: "event.name",
+                      value: { stringValue: "codex.brand_new" },
+                    },
                     {
                       key: "conversation.id",
                       value: { stringValue: CONVERSATION_ID },
@@ -264,6 +275,7 @@ describe("TraceService", () => {
           call_id: "tool-1",
           duration_ms: "50",
           success: "true",
+          arguments: '{"cmd":"ls"}',
           output: "done",
         },
         {
@@ -274,14 +286,68 @@ describe("TraceService", () => {
         },
       ]),
     );
-    service.onRunEnd(RUN_ID, { status: "completed" });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "all green" });
 
     const models =
-      store.get(RUN_ID)?.spans.filter((span) => span.name === "codex.api_request") ?? [];
+      store
+        .get(RUN_ID)
+        ?.spans.filter((span) => span.name === "codex.api_request") ?? [];
     expect(models).toHaveLength(2);
     expect(models[0]?.label).toBe("Model · plan");
     expect(models[1]?.label).toBe("Model · reply");
     expect(models[1]?.attributes.afterTool).toBe("exec_command");
+    expect(String(models[0]?.attributes.output)).toContain("exec_command");
+    expect(String(models[0]?.attributes.output)).toContain("ls");
+    expect(models[1]?.attributes.output).toBe("all green");
+    expect(models[1]?.attributes.context).toBe("done");
+  });
+
+  it("stores agent_message jsonl as the last model output", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(
+      { ...agent, codexThreadId: CONVERSATION_ID },
+      { id: RUN_ID, prompt: "say hi" },
+    );
+    service.ingestLogs({
+      resourceLogs: [
+        {
+          scopeLogs: [
+            {
+              logRecords: [
+                {
+                  attributes: [
+                    {
+                      key: "event.name",
+                      value: { stringValue: "codex.api_request" },
+                    },
+                    {
+                      key: "conversation.id",
+                      value: { stringValue: CONVERSATION_ID },
+                    },
+                    {
+                      key: "event.timestamp",
+                      value: { stringValue: "2026-08-26T13:46:40.000Z" },
+                    },
+                    { key: "duration_ms", value: { stringValue: "80" } },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    service.onRunnerEvent(RUN_ID, {
+      type: "item.completed",
+      item: { type: "agent_message", text: "hello there" },
+    });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "hello there" });
+
+    const model = store
+      .get(RUN_ID)
+      ?.spans.find((span) => span.name === "codex.api_request");
+    expect(model?.attributes.context).toContain("say hi");
+    expect(model?.attributes.output).toBe("hello there");
   });
 
   it("synthesizes subagent result spans from exec_command output", async () => {
@@ -328,21 +394,23 @@ describe("TraceService", () => {
           duration_ms: "584",
           success: "true",
           output:
-            "Spawning subagent 0 and subagent 1...\n\nAgent-0 returned: {\"agentIndex\":0,\"timestamp\":1787786213857}\nAgent-1 returned: {\"agentIndex\":1,\"timestamp\":1787786214053}\n",
+            'Spawning subagent 0 and subagent 1...\n\nAgent-0 returned: {"agentIndex":0,"timestamp":1787786213857}\nAgent-1 returned: {"agentIndex":1,"timestamp":1787786214053}\n',
         },
       ]),
     );
 
     const trace = store.get(RUN_ID);
-    const exec = trace?.spans.find((span) => span.attributes.callId === "exec-sim");
-    const results = trace?.spans.filter((span) => span.name === "subagent.result") ?? [];
+    const exec = trace?.spans.find(
+      (span) => span.attributes.callId === "exec-sim",
+    );
+    const results =
+      trace?.spans.filter((span) => span.name === "subagent.result") ?? [];
 
     expect(exec?.attributes.spawnsSubagents).toBe(true);
     expect(results).toHaveLength(2);
-    expect(results.map((span) => span.attributes.subagentIndex).sort()).toEqual([
-      "0",
-      "1",
-    ]);
+    expect(results.map((span) => span.attributes.subagentIndex).sort()).toEqual(
+      ["0", "1"],
+    );
     for (const result of results) {
       expect(result.parentId).toBe(exec?.id);
     }
@@ -431,7 +499,9 @@ describe("TraceService", () => {
     const spawn = trace?.spans.find(
       (span) => span.attributes.callId === "spawn-1",
     );
-    const nestedModel = trace?.spans.find((span) => span.name === "codex.api_request");
+    const nestedModel = trace?.spans.find(
+      (span) => span.name === "codex.api_request",
+    );
 
     expect(spawn?.attributes.subagent).toBe(true);
     expect(spawn?.attributes.subagentType).toBe("worker");

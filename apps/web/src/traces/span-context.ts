@@ -29,6 +29,11 @@ function findLatestToolSpan(
     .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
 }
 
+function storedText(value: string | number | boolean | undefined) {
+  if (typeof value === "string" && value.length > 0) return value;
+  return null;
+}
+
 export function stepContext(
   span: TraceSpan,
   options: StepDetailOptions = {},
@@ -37,66 +42,47 @@ export function stepContext(
   const tracePrompt = options.tracePrompt;
 
   if (span.name === "user.prompt" || span.name === "user.intervention") {
-    const prompt =
-      (typeof span.attributes.prompt === "string" ? span.attributes.prompt : null) ??
-      tracePrompt;
-    return prompt;
+    return storedText(span.attributes.prompt) ?? tracePrompt ?? null;
   }
 
   if (span.kind === "model_call") {
-    const phase = span.attributes.phase;
-    const stored = span.attributes.context;
-
-    if (phase === "plan") {
-      return (
-        (typeof stored === "string" && stored.length > 0 ? stored : null) ??
-        tracePrompt ??
-        (typeof span.attributes.prompt === "string" ? span.attributes.prompt : null)
-      );
+    const stored = storedText(span.attributes.context);
+    const output = storedText(span.attributes.output);
+    if (stored && (output || !span.label.includes("reply"))) {
+      return stored;
     }
 
-    if (phase === "after_tool") {
+    if (span.attributes.phase === "plan") {
+      if (tracePrompt) return tracePrompt;
+      return storedText(span.attributes.prompt);
+    }
+
+    if (span.attributes.phase === "after_tool") {
       const afterTool =
         typeof span.attributes.afterTool === "string"
           ? span.attributes.afterTool
           : undefined;
       const toolSpan = findLatestToolSpan(spans, afterTool, span.startedAt);
-      if (typeof toolSpan?.attributes.output === "string") {
-        return toolSpan.attributes.output;
-      }
-      if (typeof stored === "string" && stored.length > 0 && !span.label.includes("reply")) {
-        return stored;
-      }
+      return storedText(toolSpan?.attributes.output);
     }
 
     return null;
   }
 
   if (span.kind === "tool_call") {
-    const args = span.attributes.arguments;
-    if (typeof args === "string" && args.length > 0) {
-      return formatJson(args);
-    }
-    const prompt = span.attributes.prompt;
-    if (typeof prompt === "string" && prompt.length > 0) {
-      return prompt;
-    }
-    return null;
+    const args = storedText(span.attributes.arguments);
+    if (args) return formatJson(args);
+    return storedText(span.attributes.prompt);
   }
 
   if (span.name === "subagent.result") {
     const parent = spans.find((candidate) => candidate.id === span.parentId);
-    const parentArgs = parent?.attributes.arguments;
-    if (typeof parentArgs === "string" && parentArgs.length > 0) {
-      return formatJson(parentArgs);
-    }
+    const parentArgs = storedText(parent?.attributes.arguments);
+    if (parentArgs) return formatJson(parentArgs);
     return null;
   }
 
-  const prompt = span.attributes.prompt;
-  if (typeof prompt === "string" && prompt.length > 0) return prompt;
-
-  return null;
+  return storedText(span.attributes.prompt);
 }
 
 export function stepReturn(
@@ -106,37 +92,29 @@ export function stepReturn(
   const spans = options.spans ?? [];
 
   if (span.name === "subagent.result") {
-    const result = span.attributes.result;
-    if (typeof result !== "string" || result.length === 0) return null;
+    const result = storedText(span.attributes.result);
+    if (!result) return null;
     return formatJson(result);
   }
 
   if (span.kind === "tool_call") {
-    const output = span.attributes.output;
-    if (typeof output === "string" && output.length > 0) {
-      return output;
-    }
-    return null;
-  }
-
-  if (span.kind === "model_call" && span.label.includes("reply")) {
-    const stored = span.attributes.context;
-    if (typeof stored === "string" && stored.length > 0) {
-      return stored;
-    }
-    return null;
+    return storedText(span.attributes.output);
   }
 
   if (span.kind === "model_call") {
+    const output = storedText(span.attributes.output);
+    if (output) return output;
+    // Older traces stuffed the assistant reply into context on the last model span.
+    if (span.label.includes("reply")) {
+      return storedText(span.attributes.context);
+    }
     return null;
   }
 
-  const output = span.attributes.output;
-  if (typeof output === "string" && output.length > 0) return output;
-
-  const result = span.attributes.result;
-  if (typeof result === "string" && result.length > 0) return formatJson(result);
-
+  const output = storedText(span.attributes.output);
+  if (output) return output;
+  const result = storedText(span.attributes.result);
+  if (result) return formatJson(result);
   return null;
 }
 

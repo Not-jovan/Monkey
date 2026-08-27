@@ -96,7 +96,10 @@ function toolSpan(traceId: string, status: TraceSpan["status"]): TraceSpan {
     startedAt: "2026-08-26T12:00:01.000Z",
     endedAt: status === "running" ? null : "2026-08-26T12:00:02.000Z",
     durationMs: status === "running" ? null : 1_000,
-    attributes: { arguments: '{"cmd":"cat /etc/passwd"}', output: "root:x:0:0" },
+    attributes: {
+      arguments: '{"cmd":"cat /etc/passwd"}',
+      output: "root:x:0:0",
+    },
     error: null,
   };
 }
@@ -241,7 +244,11 @@ describe("AuditService", () => {
       trace.status = "completed";
     });
     await service.idle();
-    const intentCalls = responder.calls.filter((call) => call.model === "intent-model");
-    expect(intentCalls[1]?.user).toContain("Goal: count files. Agent read /etc/passwd.");
+    const intentCalls = responder.calls.filter(
+      (call) => call.model === "intent-model",
+    );
+    expect(intentCalls[1]?.user).toContain(
+      "Goal: count files. Agent read /etc/passwd.",
+    );
   });
 });

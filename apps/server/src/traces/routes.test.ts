@@ -161,6 +161,24 @@ describe("Glassbox routes", () => {
     });
     expect(exported.statusCode).toBe(200);
     expect(exported.headers["content-disposition"]).toContain("trace-" + RUN_ID);
+
+    const downloaded = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID + "/download",
+    });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.headers["content-disposition"]).toContain(
+      "trace-" + RUN_ID,
+    );
+    const downloadedBody = downloaded.json<{
+      trace: { id: string; spans: { kind: string; attributes: Record<string, string | number | boolean> }[] };
+    }>();
+    expect(downloadedBody.trace.id).toBe(RUN_ID);
+    const model = downloadedBody.trace.spans.find(
+      (span) => span.kind === "model_call",
+    );
+    expect(String(model?.attributes.context)).toContain("count files");
+    expect(String(model?.attributes.output)).toContain("exec_command");
     await app.close();
   });
 });

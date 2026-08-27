@@ -29,7 +29,25 @@ const COLORS = {
   red: "#c55353",
   amber: "#b98a2c",
   warning: "#d97706",
+  // Hex stand-in for oklch(93.6% 0.032 17.717); Konva/canvas 2d misses oklch.
+  errorFill: "#fce9e7",
 };
+
+function isErrorStep(span: TraceSpan) {
+  return span.status === "error" || Boolean(span.error);
+}
+
+function isVisibleStep(span: TraceSpan) {
+  if (isErrorStep(span)) return true;
+  return VISIBLE_KINDS.has(span.kind);
+}
+
+function sortTime(span: TraceSpan) {
+  if (span.kind === "turn" || span.kind === "run") {
+    return span.endedAt ?? span.startedAt;
+  }
+  return span.startedAt;
+}
 
 function statusColor(span: TraceSpan) {
   if (span.status === "error") return COLORS.red;
@@ -172,6 +190,8 @@ function trackLabel(
 }
 
 function stepLabel(span: TraceSpan) {
+  if (span.kind === "run" && isErrorStep(span)) return "Run failed";
+  if (span.kind === "turn" && isErrorStep(span)) return "Turn failed";
   if (span.kind === "model_call") return span.label;
 
   if (span.name === "subagent.result") {
@@ -416,8 +436,8 @@ export function TraceCanvas({
 
   const layout = useMemo(() => {
     const steps = spans
-      .filter((span) => VISIBLE_KINDS.has(span.kind))
-      .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
+      .filter(isVisibleStep)
+      .sort((left, right) => sortTime(left).localeCompare(sortTime(right)));
 
     let maxContentDepth = 0;
     for (const step of steps) {
@@ -610,7 +630,8 @@ export function TraceCanvas({
             const warnings = warningsBySpan.get(span.id) ?? 0;
             const selected = span.id === selectedId;
             const failing = span.id === failingSpanId;
-            const stroke = strokeForSpan(span, selected, failing);
+            const errored = isErrorStep(span);
+            const stroke = strokeForSpan(span, selected, failing || errored);
             let durationLabel = "running";
             if (span.status !== "running") {
               durationLabel = formatDuration(
@@ -637,9 +658,9 @@ export function TraceCanvas({
                       x={x + SLOT_WIDTH / 2}
                       y={centerY}
                       radius={26}
-                      fill={COLORS.paper}
+                      fill={errored ? COLORS.errorFill : COLORS.paper}
                       stroke={stroke}
-                      strokeWidth={selected || failing ? 3 : 2}
+                      strokeWidth={selected || failing || errored ? 3 : 2}
                     />
                     <Text
                       text="user"
@@ -670,9 +691,9 @@ export function TraceCanvas({
                       width={SLOT_WIDTH}
                       height={NODE_HEIGHT}
                       cornerRadius={16}
-                      fill={COLORS.paper}
+                      fill={errored ? COLORS.errorFill : COLORS.paper}
                       stroke={stroke}
-                      strokeWidth={selected || failing ? 3 : 2}
+                      strokeWidth={selected || failing || errored ? 3 : 2}
                       shadowColor="rgba(39, 38, 33, 0.18)"
                       shadowBlur={selected ? 12 : 6}
                       shadowOffsetY={3}
@@ -695,7 +716,35 @@ export function TraceCanvas({
                       y={y + NODE_HEIGHT - 18}
                       width={SLOT_WIDTH - 24}
                       fontSize={10}
-                      fill={failing ? COLORS.red : COLORS.muted}
+                      fill={failing || errored ? COLORS.red : COLORS.muted}
+                    />
+                  </>
+                )}
+                {errored && (
+                  <>
+                    <Circle
+                      x={
+                        span.actor === "user"
+                          ? x + SLOT_WIDTH / 2 + 22
+                          : x + SLOT_WIDTH - 6
+                      }
+                      y={span.actor === "user" ? centerY - 22 : y - 2}
+                      radius={11}
+                      fill={COLORS.red}
+                    />
+                    <Text
+                      text="!"
+                      x={
+                        (span.actor === "user"
+                          ? x + SLOT_WIDTH / 2 + 22
+                          : x + SLOT_WIDTH - 6) - 11
+                      }
+                      y={(span.actor === "user" ? centerY - 22 : y - 2) - 6}
+                      width={22}
+                      align="center"
+                      fontSize={13}
+                      fontStyle="bold"
+                      fill="#ffffff"
                     />
                   </>
                 )}
@@ -703,9 +752,9 @@ export function TraceCanvas({
                   <>
                     <Circle
                       x={
-                        span.actor === "user"
+                        (span.actor === "user"
                           ? x + SLOT_WIDTH / 2 + 22
-                          : x + SLOT_WIDTH - 6
+                          : x + SLOT_WIDTH - 6) - (errored ? 24 : 0)
                       }
                       y={span.actor === "user" ? centerY - 22 : y - 2}
                       radius={11}
@@ -716,7 +765,9 @@ export function TraceCanvas({
                       x={
                         (span.actor === "user"
                           ? x + SLOT_WIDTH / 2 + 22
-                          : x + SLOT_WIDTH - 6) - 11
+                          : x + SLOT_WIDTH - 6) -
+                        (errored ? 24 : 0) -
+                        11
                       }
                       y={(span.actor === "user" ? centerY - 22 : y - 2) - 5}
                       width={22}

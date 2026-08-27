@@ -113,6 +113,10 @@ export const api = {
     ),
   trace: (id: string) =>
     request<{ trace: TraceRecord; audits: AuditRecord[] }>("/api/traces/" + id),
+  downloadTrace: (id: string) =>
+    request<{ exportedAt: string; trace: TraceRecord; audits: AuditRecord[] }>(
+      "/api/traces/" + id + "/download",
+    ),
   exportTrace: (id: string) =>
     request<{ exportedAt: string; trace: TraceRecord; audits: AuditRecord[] }>(
       "/api/traces/" + id + "/export",

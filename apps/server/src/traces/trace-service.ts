@@ -53,7 +53,9 @@ const PENDING_CAP = 1_000;
 
 function clip(text: string, limit: number) {
   if (text.length <= limit) return text;
-  return text.slice(0, limit) + " …[truncated " + (text.length - limit) + " chars]";
+  return (
+    text.slice(0, limit) + " …[truncated " + (text.length - limit) + " chars]"
+  );
 }
 
 function preview(text: string, limit = 80) {
@@ -98,6 +100,16 @@ const subagentResultPayloadSchema = z.object({
   timestamp: z.number().optional(),
 });
 
+const runnerCompletedItemSchema = z.object({
+  type: z.string(),
+  tool: z.string().optional(),
+  id: z.string().optional(),
+  status: z.string().optional(),
+  prompt: z.string().optional(),
+  text: z.string().optional(),
+  receiver_thread_ids: z.array(z.string()).optional(),
+});
+
 function extractSimulatedSubagentResults(output: string) {
   const results: {
     index: string;
@@ -107,7 +119,9 @@ function extractSimulatedSubagentResults(output: string) {
   for (const match of output.matchAll(/Agent-(\d+) returned:\s*(\{[^}]+\})/g)) {
     let timestamp: number | null = null;
     try {
-      const parsed = subagentResultPayloadSchema.safeParse(JSON.parse(match[2]!));
+      const parsed = subagentResultPayloadSchema.safeParse(
+        JSON.parse(match[2]!),
+      );
       if (parsed.success && parsed.data.timestamp !== undefined) {
         timestamp = parsed.data.timestamp;
       }
@@ -127,7 +141,10 @@ function modelCallLabel(state: RunState, attempt: number | undefined) {
   const prefix = state.subagentStack.length > 0 ? "Subagent model" : "Model";
   let label: string;
   if (state.toolsSinceLastModelCall.length === 0) {
-    label = state.modelCallsInTurn === 0 ? prefix + " · plan" : prefix + " · continue";
+    label =
+      state.modelCallsInTurn === 0
+        ? prefix + " · plan"
+        : prefix + " · continue";
   } else {
     const lastTool =
       state.toolsSinceLastModelCall[state.toolsSinceLastModelCall.length - 1]!;
@@ -156,6 +173,28 @@ export class TraceService {
 
   redactText(text: string) {
     return this.redactor.redactText(text);
+  }
+
+  private appendModelOutput(
+    runId: string,
+    spanId: string | null,
+    text: string,
+    options: { onlyIfEmpty?: boolean } = {},
+  ) {
+    if (!spanId || text.length === 0) return;
+    const redacted = this.redactor.redactText(text);
+    if (redacted.length === 0) return;
+    this.store.updateSpan(runId, spanId, (span) => {
+      if (span.kind !== "model_call") return;
+      if (span.status === "error") return;
+      const existing = span.attributes.output;
+      if (typeof existing === "string" && existing.length > 0) {
+        if (options.onlyIfEmpty) return;
+        span.attributes.output = existing + "\n" + redacted;
+        return;
+      }
+      span.attributes.output = redacted;
+    });
   }
 
   onRunStart(agent: RunStartAgent, run: RunStartInput) {
@@ -233,35 +272,44 @@ export class TraceService {
   }
 
   onRunnerEvent(runId: string, event: Record<string, unknown>) {
-    if (event.type === "thread.started" && typeof event.thread_id === "string") {
+    if (
+      event.type === "thread.started" &&
+      typeof event.thread_id === "string"
+    ) {
+      const threadId = event.thread_id;
       this.store.updateTrace(runId, (trace) => {
-        trace.conversationId = event.thread_id as string;
+        trace.conversationId = threadId;
       });
-      this.bindConversation(event.thread_id, runId);
+      this.bindConversation(threadId, runId);
       return;
     }
 
     const state = this.runs.get(runId);
     if (!state) return;
 
-    if (event.type !== "item.completed" || !event.item || typeof event.item !== "object") {
+    if (event.type !== "item.completed") return;
+    const item = runnerCompletedItemSchema.safeParse(event.item);
+    if (!item.success) return;
+
+    if (item.data.type === "agent_message" && item.data.text) {
+      this.appendModelOutput(runId, state.lastModelCallSpanId, item.data.text);
       return;
     }
 
-    const item = event.item as Record<string, unknown>;
-    if (item.type !== "collab_tool_call" || item.tool !== "spawn_agent") {
+    if (
+      item.data.type !== "collab_tool_call" ||
+      item.data.tool !== "spawn_agent"
+    ) {
       return;
     }
 
     const timestamp = this.now().toISOString();
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
-    const callId = typeof item.id === "string" ? item.id : randomUUID();
+    const callId = item.data.id ?? randomUUID();
     const existing = state.toolSpans.get(callId);
-    const receiverThreadIds = Array.isArray(item.receiver_thread_ids)
-      ? item.receiver_thread_ids.filter((entry): entry is string => typeof entry === "string")
-      : [];
-    const prompt = typeof item.prompt === "string" ? item.prompt : null;
-    const completed = item.status === "completed";
+    const receiverThreadIds = item.data.receiver_thread_ids ?? [];
+    const prompt = item.data.prompt ?? null;
+    const completed = item.data.status === "completed";
 
     if (existing) {
       this.store.updateSpan(runId, existing, (span) => {
@@ -311,33 +359,53 @@ export class TraceService {
     state.completed = true;
     const endedAt = this.now().toISOString();
     const failed = outcome.status === "failed";
-    const error = outcome.error ? this.redactor.redactText(outcome.error) : null;
+    const error = outcome.error
+      ? this.redactor.redactText(outcome.error)
+      : null;
 
     for (const spanId of state.toolSpans.values()) {
       this.store.updateSpan(runId, spanId, (span) => {
         if (span.status !== "running") return;
         span.status = failed ? "error" : "ok";
         span.endedAt = endedAt;
-        span.error = failed ? "Run ended before the tool reported a result" : null;
+        span.error = failed
+          ? "Run ended before the tool reported a result"
+          : null;
       });
     }
     if (state.turnSpanId) {
-      this.closeSpan(runId, state.turnSpanId, endedAt, failed ? "error" : "ok", error);
+      this.closeSpan(
+        runId,
+        state.turnSpanId,
+        endedAt,
+        failed ? "error" : "ok",
+        error,
+      );
     }
     if (state.lastModelCallSpanId) {
-      this.store.updateSpan(runId, state.lastModelCallSpanId, (span) => {
+      const modelSpanId = state.lastModelCallSpanId;
+      this.store.updateSpan(runId, modelSpanId, (span) => {
         if (span.kind !== "model_call" || span.status !== "ok") return;
-        if (span.attributes.phase !== "after_tool") return;
-        const prefix = span.label.startsWith("Subagent model") ? "Subagent model" : "Model";
-        span.label = prefix + " · reply";
-        if (outcome.output) {
-          span.attributes.context = this.redactor.redactText(
-            clip(outcome.output, OUTPUT_CLIP),
-          );
+        if (span.attributes.phase === "after_tool") {
+          const prefix = span.label.startsWith("Subagent model")
+            ? "Subagent model"
+            : "Model";
+          span.label = prefix + " · reply";
         }
       });
+      if (outcome.output) {
+        this.appendModelOutput(runId, modelSpanId, outcome.output, {
+          onlyIfEmpty: true,
+        });
+      }
     }
-    this.closeSpan(runId, state.rootSpanId, endedAt, failed ? "error" : "ok", error);
+    this.closeSpan(
+      runId,
+      state.rootSpanId,
+      endedAt,
+      failed ? "error" : "ok",
+      error,
+    );
 
     this.store.updateTrace(runId, (trace) => {
       trace.status = outcome.status;
@@ -345,7 +413,9 @@ export class TraceService {
       if (failed) {
         const failing = [...trace.spans]
           .reverse()
-          .find((span) => span.status === "error" && span.id !== state.rootSpanId);
+          .find(
+            (span) => span.status === "error" && span.id !== state.rootSpanId,
+          );
         trace.failingSpanId = failing?.id ?? state.rootSpanId;
       }
     });
@@ -466,8 +536,10 @@ export class TraceService {
         });
         this.store.updateSpan(runId, turnSpanId, (span) => {
           span.attributes.provider = event.provider_name;
-          if (event.approval_policy) span.attributes.approvalPolicy = event.approval_policy;
-          if (event.sandbox_policy) span.attributes.sandboxPolicy = event.sandbox_policy;
+          if (event.approval_policy)
+            span.attributes.approvalPolicy = event.approval_policy;
+          if (event.sandbox_policy)
+            span.attributes.sandboxPolicy = event.sandbox_policy;
           if (event.mcp_servers.length > 0) {
             span.attributes.mcpServers = event.mcp_servers.join(",");
           }
@@ -499,7 +571,9 @@ export class TraceService {
           kind: "model_call",
           actor: "agent",
           status: failedRequest ? "error" : "ok",
-          startedAt: new Date(new Date(timestamp).getTime() - duration).toISOString(),
+          startedAt: new Date(
+            new Date(timestamp).getTime() - duration,
+          ).toISOString(),
           endedAt: timestamp,
           durationMs: duration,
           attributes: {
@@ -582,12 +656,13 @@ export class TraceService {
           traceId: runId,
           parentId,
           name: "tool." + event.tool_name,
-          label: subagent
-            ? "Subagent · task"
-            : "Tool · " + event.tool_name,
+          label: subagent ? "Subagent · task" : "Tool · " + event.tool_name,
           kind: "tool_call",
           actor: "agent",
-          status: event.decision === "denied" || event.decision === "abort" ? "error" : "running",
+          status:
+            event.decision === "denied" || event.decision === "abort"
+              ? "error"
+              : "running",
           startedAt: timestamp,
           endedAt: null,
           durationMs: null,
@@ -603,7 +678,11 @@ export class TraceService {
               ? "Tool call " + event.decision
               : null,
         });
-        if (subagent && event.decision !== "denied" && event.decision !== "abort") {
+        if (
+          subagent &&
+          event.decision !== "denied" &&
+          event.decision !== "abort"
+        ) {
           state.subagentStack.push(spanId);
         }
         return;
@@ -615,9 +694,22 @@ export class TraceService {
         const output = event.output
           ? this.redactor.redactText(clip(event.output, OUTPUT_CLIP))
           : "";
-        const toolArguments = event.arguments
-          ? this.redactor.redactText(clip(event.arguments, ARGUMENT_CLIP))
+        const toolArgumentsRaw = event.arguments
+          ? this.redactor.redactText(event.arguments)
           : "";
+        const toolArguments = toolArgumentsRaw
+          ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
+          : "";
+        if (toolArgumentsRaw && state.lastModelCallSpanId) {
+          this.appendModelOutput(
+            runId,
+            state.lastModelCallSpanId,
+            JSON.stringify({
+              name: event.tool_name,
+              arguments: toolArgumentsRaw,
+            }),
+          );
+        }
         if (existing) {
           this.store.updateSpan(
             runId,
@@ -628,8 +720,11 @@ export class TraceService {
               span.durationMs = event.duration_ms;
               if (toolArguments) span.attributes.arguments = toolArguments;
               if (output) span.attributes.output = output;
-              if (event.mcp_server) span.attributes.mcpServer = event.mcp_server;
-              span.error = succeeded ? null : clip(output, 400) || "Tool failed";
+              if (event.mcp_server)
+                span.attributes.mcpServer = event.mcp_server;
+              span.error = succeeded
+                ? null
+                : clip(output, 400) || "Tool failed";
               if (isSubagentTool(event.tool_name)) {
                 const subagentLabel = readSubagentLabel(toolArguments);
                 if (subagentLabel) {
@@ -780,7 +875,8 @@ export class TraceService {
         startedAt: resultStartedAt,
         endedAt: resultEndedAt,
         durationMs:
-          new Date(resultEndedAt).getTime() - new Date(resultStartedAt).getTime(),
+          new Date(resultEndedAt).getTime() -
+          new Date(resultStartedAt).getTime(),
         attributes: {
           subagentIndex: result.index,
           result: result.payload,

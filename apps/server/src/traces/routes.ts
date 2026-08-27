@@ -1,5 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AuditStore } from "../audits/audit-store.js";
 import { HttpError } from "../errors.js";
@@ -70,7 +70,7 @@ export function registerGlassboxRoutes(
     return { trace, audits: deps.auditStore.listByTrace(id) };
   });
 
-  app.get("/api/traces/:id/export", async (request, reply) => {
+  const downloadTrace = async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = traceParams.parse(request.params);
     const trace = deps.traceStore.get(id);
     if (!trace) {
@@ -85,5 +85,8 @@ export function registerGlassboxRoutes(
       trace,
       audits: deps.auditStore.listByTrace(id),
     };
-  });
+  };
+
+  app.get("/api/traces/:id/download", downloadTrace);
+  app.get("/api/traces/:id/export", downloadTrace);
 }

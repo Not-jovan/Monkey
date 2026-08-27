@@ -59,8 +59,8 @@ function SpanDetails({
   trace: TraceRecord;
 }) {
   const detailOptions = { tracePrompt: trace.prompt, spans: trace.spans };
-  const context = stepContext(span, detailOptions);
-  const returned = stepReturn(span, detailOptions);
+  const input = stepContext(span, detailOptions);
+  const output = stepReturn(span, detailOptions);
   const returnNote = stepReturnNote(span);
   const hiddenInPanel = new Set([
     "context",
@@ -89,20 +89,25 @@ function SpanDetails({
           )}
         </span>
       </div>
-      {context && (
+      {input && (
         <div className="span-context-block">
-          <span className="eyebrow">Context</span>
-          <pre>{context}</pre>
+          <span className="eyebrow">Input</span>
+          <pre>{input}</pre>
         </div>
       )}
-      {returned && (
+      {output && (
         <div className="span-context-block">
-          <span className="eyebrow">Return</span>
+          <span className="eyebrow">Output</span>
           {returnNote && <p className="muted-cell">{returnNote}</p>}
-          <pre>{returned}</pre>
+          <pre>{output}</pre>
         </div>
       )}
-      {span.error && <div className="span-error">{span.error}</div>}
+      {span.error && (
+        <div className="span-context-block">
+          <span className="eyebrow">Error</span>
+          <div className="span-error">{span.error}</div>
+        </div>
+      )}
       <div className="span-attributes">
         {attributeEntries.map(([key, value]) =>
           longText.includes(key) ? (
@@ -117,7 +122,7 @@ function SpanDetails({
             </div>
           ),
         )}
-        {attributeEntries.length === 0 && !context && !returned && (
+        {attributeEntries.length === 0 && !input && !output && (
           <span className="muted-cell">No recorded attributes.</span>
         )}
       </div>
@@ -214,11 +219,11 @@ export function TraceDetailPage() {
           className="button button-primary"
           disabled={!trace}
           onClick={async () => {
-            const payload = await api.exportTrace(traceId);
+            const payload = await api.downloadTrace(traceId);
             download("trace-" + traceId + ".json", payload);
           }}
         >
-          Export trace
+          Download trace
         </button>
       </header>
 
@@ -256,7 +261,11 @@ export function TraceDetailPage() {
       )}
 
       {trace && selectedSpan ? (
-        <SpanDetails audits={selectedAudits} span={selectedSpan} trace={trace} />
+        <SpanDetails
+          audits={selectedAudits}
+          span={selectedSpan}
+          trace={trace}
+        />
       ) : (
         <div className="span-panel span-panel-hint">
           Select a step in the flow above to inspect its details and audit

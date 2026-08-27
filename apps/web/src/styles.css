@@ -1365,7 +1365,7 @@ textarea:focus {
 }
 
 .span-error {
-  background: #f9ecec;
+  background: oklch(93.6% 0.032 17.717);
   border: 1px solid #e3bcbc;
   color: var(--red);
   border-radius: 10px;

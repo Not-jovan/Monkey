@@ -45,7 +45,13 @@ const auditService = new AuditService({
 });
 auditService.start();
 
-const service = new AgentService(config, store, workspaces, runner, traceService);
+const service = new AgentService(
+  config,
+  store,
+  workspaces,
+  runner,
+  traceService,
+);
 await service.initialize();
 
 const app = await createApp(config, service, {
