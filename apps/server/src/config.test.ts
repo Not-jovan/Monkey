@@ -83,3 +83,37 @@ describe("codex config generation", () => {
     expect(secretValues(bare)).toEqual([]);
   });
 });
+
+describe("production auth token guard", () => {
+  const base = {
+    NODE_ENV: "production",
+    HOST: "0.0.0.0",
+    ARK_API_KEY: "x",
+    ARK_MODEL: "ep-x",
+  } as NodeJS.ProcessEnv;
+
+  it("names the placeholder rather than blaming its length", () => {
+    // The .env.example placeholder is 37 characters, so a length-only message
+    // sends the operator hunting for a problem that is not there.
+    expect(() =>
+      loadConfig({ ...base, APP_AUTH_TOKEN: "replace-with-at-least-24-random-chars" }),
+    ).toThrow(/still the placeholder/);
+  });
+
+  it("reports the actual length when the token is too short", () => {
+    expect(() => loadConfig({ ...base, APP_AUTH_TOKEN: "tooshort" })).toThrow(
+      /at least 24 characters.*got 8/s,
+    );
+  });
+
+  it("accepts a real token", () => {
+    const token = "9f1kfoHQywOlBLOiIdCEKW4P7KkoWl1z";
+    expect(loadConfig({ ...base, APP_AUTH_TOKEN: token }).authToken).toBe(token);
+  });
+
+  it("leaves loopback servers alone", () => {
+    expect(
+      loadConfig({ ...base, HOST: "127.0.0.1", APP_AUTH_TOKEN: "" }).authToken,
+    ).toBe("");
+  });
+});

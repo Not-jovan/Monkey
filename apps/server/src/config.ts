@@ -67,9 +67,19 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   const authToken = env.APP_AUTH_TOKEN?.trim() ?? "";
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (env.NODE_ENV === "production" && !loopbackHosts.has(env.HOST)) {
-    if (authToken.length < 24 || authToken.startsWith("replace-")) {
+    // Two distinct rejections. Reporting them separately matters: a bootstrap
+    // placeholder is usually long enough to pass the length check, so a single
+    // message about length sends the operator looking in the wrong place.
+    if (authToken.startsWith("replace-")) {
       throw new Error(
-        "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback production server",
+        "APP_AUTH_TOKEN is still the placeholder from .env.example. Replace it " +
+          "with at least 24 random characters for a non-loopback production server.",
+      );
+    }
+    if (authToken.length < 24) {
+      throw new Error(
+        "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback " +
+          "production server (got " + authToken.length + ").",
       );
     }
   }

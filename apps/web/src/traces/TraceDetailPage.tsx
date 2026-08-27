@@ -1,13 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
-import type { AuditRecord, TraceRecord, TraceSpan } from "../types";
+import type {
+  AuditRecord,
+  AuditTraceStep,
+  TraceRecord,
+  TraceSpan,
+} from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { TraceCanvas } from "./TraceCanvas";
+import { FindingsSummary, TraceIntent } from "./TraceIntent";
+import { parseCodexFailure, readCommand } from "./codex-error";
+import { FailureBlock } from "./FailureBlock";
+import { TextBlock } from "./TextBlock";
+import { TraceStepList } from "./TraceStepList";
 
-type TraceDetail = { trace: TraceRecord; audits: AuditRecord[] };
+type TraceDetail = {
+  trace: TraceRecord;
+  audits: AuditRecord[];
+  findings?: AuditTraceStep[];
+};
 
 function download(fileName: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -26,9 +40,23 @@ function AuditCard({ audit }: { audit: AuditRecord }) {
     <div className={"audit-card " + (audit.warning ? "audit-warning" : "")}>
       <div className="audit-card-head">
         <span className={"audit-chip audit-" + audit.type}>{audit.type}</span>
-        <span className={"audit-status audit-status-" + audit.status}>
+        <span
+          className={"audit-status audit-status-" + audit.status}
+          title={
+            audit.status === "degraded"
+              ? "The primary audit model was unavailable; this verdict came from the fallback model."
+              : audit.status === "failed"
+                ? "No model could be reached. Deterministic checks below still stand."
+                : "Judged by the configured audit model."
+          }
+        >
           {audit.status}
         </span>
+        {audit.status === "degraded" && (
+          <span className="muted-cell">
+            primary model unavailable — judged by the fallback
+          </span>
+        )}
         {audit.model && <span className="muted-cell">{audit.model}</span>}
         <span className="muted-cell">{formatDuration(audit.latencyMs)}</span>
       </div>
@@ -130,6 +158,16 @@ function SpanDetails({
   const input = stepContext(span, detailOptions);
   const output = stepReturn(span, detailOptions);
   const returnNote = stepReturnNote(span);
+  // A shell script inside the arguments keeps its escaped newlines, so show the
+  // command as real text rather than a one-line JSON blob.
+  const command =
+    typeof span.attributes.arguments === "string"
+      ? readCommand(span.attributes.arguments)
+      : null;
+  // The failure envelope repeats itself and escapes its newlines; parsing it
+  // once replaces both the Output and Error blocks with something diagnosable.
+  const failureSource = output || span.error || "";
+  const failure = failureSource ? parseCodexFailure(failureSource) : null;
   const hiddenInPanel = new Set([
     "context",
     "output",
@@ -157,32 +195,28 @@ function SpanDetails({
           )}
         </span>
       </div>
-      {input && (
-        <div className="span-context-block">
-          <span className="eyebrow">Input</span>
-          <pre>{input}</pre>
-        </div>
+      {command ? (
+        <TextBlock label="Command" text={command} />
+      ) : (
+        input && <TextBlock label="Input" text={input} />
       )}
-      {output && (
-        <div className="span-context-block">
-          <span className="eyebrow">Output</span>
-          {returnNote && <p className="muted-cell">{returnNote}</p>}
-          <pre>{output}</pre>
-        </div>
-      )}
-      {span.error && (
-        <div className="span-context-block">
-          <span className="eyebrow">Error</span>
-          <div className="span-error">{span.error}</div>
-        </div>
+      {failure ? (
+        <FailureBlock failure={failure} raw={failureSource} />
+      ) : (
+        <>
+          {output && <TextBlock label="Output" text={output} note={returnNote} />}
+          {span.error && (
+            <div className="span-context-block">
+              <span className="eyebrow">Error</span>
+              <div className="span-error">{span.error}</div>
+            </div>
+          )}
+        </>
       )}
       <div className="span-attributes">
         {attributeEntries.map(([key, value]) =>
           longText.includes(key) ? (
-            <div className="span-attribute-block" key={key}>
-              <span className="attribute-key">{key}</span>
-              <pre>{String(value)}</pre>
-            </div>
+            <TextBlock key={key} label={key} text={String(value)} />
           ) : (
             <div className="span-attribute-row" key={key}>
               <span className="attribute-key">{key}</span>
@@ -223,6 +257,22 @@ export function TraceDetailPage() {
 
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const audits: AuditRecord[] = detailQuery.data?.audits ?? [];
+  const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
+  const [view, setView] = useState<"list" | "flow">(() => {
+    try {
+      return localStorage.getItem("trace-view") === "list" ? "list" : "flow";
+    } catch {
+      // Private windows and blocked site data throw on access.
+      return "list";
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("trace-view", view);
+    } catch {
+      // Remembering the choice is a convenience, never a requirement.
+    }
+  }, [view]);
 
   const warningsBySpan = new Map<string, number>();
   for (const audit of audits) {
@@ -318,14 +368,59 @@ export function TraceDetailPage() {
         </section>
       )}
 
+      {trace && <TraceIntent trace={trace} />}
+
       {trace && (
-        <TraceCanvas
-          spans={trace.spans}
-          selectedId={selectedSpanId}
-          failingSpanId={trace.failingSpanId}
-          warningsBySpan={warningsBySpan}
+        <FindingsSummary
+          findings={findings}
+          audits={audits}
           onSelect={setSelectedSpanId}
         />
+      )}
+
+      {trace && (
+        <section className="trace-steps" aria-labelledby="trace-steps-heading">
+          <div className="trace-steps-head">
+            <h2 className="eyebrow" id="trace-steps-heading">
+              Steps
+            </h2>
+            <div className="view-toggle" role="group" aria-label="Step view">
+              <button
+                type="button"
+                className={view === "flow" ? "is-active" : ""}
+                aria-pressed={view === "flow"}
+                onClick={() => setView("flow")}
+              >
+                Flow
+              </button>
+              <button
+                type="button"
+                className={view === "list" ? "is-active" : ""}
+                aria-pressed={view === "list"}
+                onClick={() => setView("list")}
+              >
+                List
+              </button>
+            </div>
+          </div>
+          {view === "list" ? (
+            <TraceStepList
+              spans={trace.spans}
+              selectedId={selectedSpanId}
+              failingSpanId={trace.failingSpanId}
+              warningsBySpan={warningsBySpan}
+              onSelect={setSelectedSpanId}
+            />
+          ) : (
+            <TraceCanvas
+              spans={trace.spans}
+              selectedId={selectedSpanId}
+              failingSpanId={trace.failingSpanId}
+              warningsBySpan={warningsBySpan}
+              onSelect={setSelectedSpanId}
+            />
+          )}
+        </section>
       )}
 
       {trace && selectedSpan ? (

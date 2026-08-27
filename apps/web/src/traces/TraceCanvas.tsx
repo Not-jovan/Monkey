@@ -1,23 +1,31 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from "react-konva";
-import type { SpanKind, TraceSpan } from "../types";
+import type { TraceSpan } from "../types";
+import {
+  isErrorStep,
+  isSubagentBoundary,
+  isSubagentTask,
+  isVisibleStep,
+  sortTime,
+} from "./steps";
 import { formatDuration, spanDuration } from "./format";
 
-const SLOT_WIDTH = 190;
-const SLOT_GAP = 80;
-const NODE_HEIGHT = 62;
-const ROW_GAP = 96;
+const SLOT_WIDTH = 168;
+const SLOT_GAP = 52;
+const NODE_HEIGHT = 58;
+const ROW_GAP = 78;
+// Vertical space between wrapped bands of the timeline.
+const BAND_GAP = 26;
+// Gaps shorter than this are not worth a label; the arrow matters more.
+const GAP_LABEL_MIN_MS = 1_000;
+// Lifts a gap label clear of the connector it describes.
+const GAP_LABEL_LIFT = 10;
+// How far a wrap connector reaches past the nodes it joins.
+const WRAP_OUT = 26;
 const EDGE_LABEL_GAP = 18;
 const TOP_PADDING = 46;
 const LEFT_PADDING = 40;
 const LABEL_GUTTER = 92;
-
-const VISIBLE_KINDS = new Set<SpanKind>([
-  "user_action",
-  "tool_call",
-  "model_call",
-  "system",
-]);
 
 const COLORS = {
   ink: "#20211f",
@@ -33,53 +41,10 @@ const COLORS = {
   errorFill: "#fce9e7",
 };
 
-function isErrorStep(span: TraceSpan) {
-  return span.status === "error" || Boolean(span.error);
-}
-
-function isVisibleStep(span: TraceSpan) {
-  if (isErrorStep(span)) return true;
-  return VISIBLE_KINDS.has(span.kind);
-}
-
-function sortTime(span: TraceSpan) {
-  if (span.kind === "turn" || span.kind === "run") {
-    return span.endedAt ?? span.startedAt;
-  }
-  return span.startedAt;
-}
-
 function statusColor(span: TraceSpan) {
   if (span.status === "error") return COLORS.red;
   if (span.status === "running") return COLORS.amber;
   return COLORS.green;
-}
-
-function isSubagentToolName(toolName: string) {
-  const normalized = toolName.toLowerCase();
-  if (normalized === "task") return true;
-  if (normalized === "spawn_agent") return true;
-  if (normalized.endsWith("/spawn_agent")) return true;
-  return false;
-}
-
-function isSubagentTask(span: TraceSpan) {
-  if (span.attributes.subagent === true) return true;
-  if (span.kind !== "tool_call") return false;
-  const toolName = span.attributes.toolName;
-  if (typeof toolName === "string" && isSubagentToolName(toolName)) {
-    return true;
-  }
-  const normalizedName = span.name.toLowerCase();
-  if (normalizedName === "tool.task") return true;
-  if (normalizedName === "tool.spawn_agent") return true;
-  return normalizedName.endsWith(".spawn_agent");
-}
-
-function isSubagentBoundary(span: TraceSpan) {
-  if (isSubagentTask(span)) return true;
-  if (span.attributes.spawnsSubagents === true) return true;
-  return false;
 }
 
 function ownContentDepth(span: TraceSpan, spanById: Map<string, TraceSpan>) {
@@ -446,29 +411,87 @@ export function TraceCanvas({
     }
     const subagentLaneCount = maxSubagentLanes(steps);
 
-    const positions = steps.map((span, index) => {
-      const row = rowIndex(span, spanById, subagentLaneCount, maxContentDepth);
-      const y = rowY(row);
-      return {
-        span,
-        row,
-        x: LABEL_GUTTER + LEFT_PADDING + index * (SLOT_WIDTH + SLOT_GAP),
-        y,
-        centerY: y + NODE_HEIGHT / 2,
-      };
+    // The timeline wraps like text: left to right, then down to the next band.
+    // A single unbroken track is unreadable past a handful of steps, because
+    // it grows without bound while the viewport does not.
+    const usable = Math.max(
+      SLOT_WIDTH + SLOT_GAP,
+      width - LABEL_GUTTER - LEFT_PADDING - 16,
+    );
+    const slotsPerBand = Math.max(1, Math.floor(usable / (SLOT_WIDTH + SLOT_GAP)));
+
+    const rowOf = steps.map((span) =>
+      rowIndex(span, spanById, subagentLaneCount, maxContentDepth),
+    );
+    const maxRow = rowOf.length === 0 ? 1 : Math.max(...rowOf);
+    // One unbroken track, sectioned by who is acting. A contiguous run of
+    // steps on the same track is one section with one label; the run wraps
+    // beneath that label instead of restating "user" and "agent" on every
+    // line. The pair only repeats when the user actually acts again.
+    const sections: { row: number; indices: number[] }[] = [];
+    steps.forEach((_span, index) => {
+      const row = rowOf[index]!;
+      const last = sections[sections.length - 1];
+      if (last && last.row === row) last.indices.push(index);
+      else sections.push({ row, indices: [index] });
     });
 
-    const maxRow =
-      positions.length === 0
-        ? 1
-        : Math.max(...positions.map((position) => position.row));
-    const height = rowY(maxRow) + NODE_HEIGHT + 32;
+    type Placed = {
+      span: TraceSpan;
+      row: number;
+      band: number;
+      line: number;
+      column: number;
+      x: number;
+      y: number;
+      centerY: number;
+    };
+    const positions: Placed[] = [];
+    const lanes: { band: number; row: number; label: string; y: number }[] = [];
+    let cursor = 0;
+    let line = 0;
 
-    const rowLabels: string[] = [];
-    for (let row = 0; row <= maxRow; row += 1) {
-      rowLabels.push(
-        trackLabel(row, steps, spanById, subagentLaneCount, maxContentDepth),
-      );
+    sections.forEach((section, sectionIndex) => {
+      const lineCount = Math.max(1, Math.ceil(section.indices.length / slotsPerBand));
+      lanes.push({
+        band: sectionIndex,
+        row: section.row,
+        label: trackLabel(
+          section.row,
+          steps,
+          spanById,
+          subagentLaneCount,
+          maxContentDepth,
+        ),
+        y: cursor + rowY(0),
+      });
+      section.indices.forEach((stepIndex, local) => {
+        const localLine = Math.floor(local / slotsPerBand);
+        const column = local % slotsPerBand;
+        const y = cursor + rowY(localLine);
+        positions.push({
+          span: steps[stepIndex]!,
+          row: section.row,
+          band: sectionIndex,
+          line: line + localLine,
+          column,
+          x: LABEL_GUTTER + LEFT_PADDING + column * (SLOT_WIDTH + SLOT_GAP),
+          y,
+          centerY: y + NODE_HEIGHT / 2,
+        });
+      });
+      cursor += lineCount * ROW_GAP + BAND_GAP;
+      line += lineCount;
+    });
+    const height = cursor + 32;
+
+    // Consecutive steps separated by a line break. The sequence continues, so
+    // the wrap is drawn rather than left to reading order alone.
+    const wraps: { from: Placed; to: Placed }[] = [];
+    for (let index = 0; index + 1 < positions.length; index += 1) {
+      const from = positions[index]!;
+      const to = positions[index + 1]!;
+      if (from.line !== to.line) wraps.push({ from, to });
     }
 
     const positionBySpanId = new Map(
@@ -487,6 +510,7 @@ export function TraceCanvas({
       from: (typeof positions)[number],
       to: (typeof positions)[number],
     ) => {
+      if (from.line !== to.line) return;
       const key = kind + ":" + from.span.id + "->" + to.span.id;
       if (linked.has(key)) return;
       linked.add(key);
@@ -539,20 +563,29 @@ export function TraceCanvas({
       }
     }
 
-    return { steps, positions, maxRow, height, rowLabels, edges };
-  }, [spanById, spans]);
+    return { steps, positions, maxRow, height, lanes, edges, wraps, slotsPerBand };
+  }, [spanById, spans, width]);
+
+  const contentWidth =
+    (layout.positions.at(-1)?.x ?? 0) + SLOT_WIDTH + LEFT_PADDING;
+  const overflows = contentWidth > width + 8;
 
   return (
     <div className="trace-canvas" ref={containerRef}>
       <Stage
         width={width}
         height={layout.height}
-        draggable
+        // Only draggable when there is something off-screen to reach. Now that
+        // the timeline wraps, dragging usually just fights the page scroll.
+        draggable={overflows}
         onMouseEnter={(event) => {
+          if (!overflows) return;
           event.target.getStage()!.container().style.cursor = "grab";
         }}
       >
-        <Layer>
+        {/* Static furniture. listening={false} keeps these shapes out of the
+            hit graph, which is what makes dragging a wide run expensive. */}
+        <Layer listening={false}>
           <Text
             text="◷ time →"
             x={12}
@@ -560,25 +593,25 @@ export function TraceCanvas({
             fontSize={12}
             fill={COLORS.muted}
           />
-          {layout.rowLabels.map((label, row) => (
-            <Group key={"lane-" + row}>
+          {layout.lanes.map((lane) => (
+            <Group key={"lane-" + lane.band + "-" + lane.row}>
               <Line
                 points={[
                   LABEL_GUTTER,
-                  TOP_PADDING + row * ROW_GAP + NODE_HEIGHT + 10,
-                  Math.max(width, layout.positions.at(-1)?.x ?? 0) +
-                    SLOT_WIDTH +
-                    40,
-                  TOP_PADDING + row * ROW_GAP + NODE_HEIGHT + 10,
+                  lane.y + NODE_HEIGHT + 8,
+                  LABEL_GUTTER +
+                    LEFT_PADDING +
+                    layout.slotsPerBand * (SLOT_WIDTH + SLOT_GAP),
+                  lane.y + NODE_HEIGHT + 8,
                 ]}
                 stroke={COLORS.line}
                 strokeWidth={1}
                 dash={[4, 6]}
               />
               <Text
-                text={label}
+                text={lane.label}
                 x={8}
-                y={TOP_PADDING + row * ROW_GAP + 22}
+                y={lane.y + 18}
                 width={LABEL_GUTTER - 12}
                 align="right"
                 fontSize={11}
@@ -588,6 +621,44 @@ export function TraceCanvas({
               />
             </Group>
           ))}
+        </Layer>
+        <Layer>
+          {layout.wraps.map(({ from, to }) => {
+            const startX = from.x + SLOT_WIDTH;
+            const endX = to.x;
+            const midY = (from.centerY + to.centerY) / 2;
+            // Out past the last node, down between the lines, back across and
+            // into the first node of the next line. Tension rounds the four
+            // corners into a single S sweep.
+            return (
+              <Arrow
+                key={"wrap:" + from.span.id + "->" + to.span.id}
+                listening={false}
+                perfectDrawEnabled={false}
+                points={[
+                  startX,
+                  from.centerY,
+                  startX + WRAP_OUT,
+                  from.centerY,
+                  startX + WRAP_OUT,
+                  midY,
+                  endX - WRAP_OUT,
+                  midY,
+                  endX - WRAP_OUT,
+                  to.centerY,
+                  endX,
+                  to.centerY,
+                ]}
+                tension={0.5}
+                stroke={COLORS.line}
+                fill={COLORS.line}
+                strokeWidth={1.5}
+                pointerLength={9}
+                pointerWidth={8}
+                lineJoin="round"
+              />
+            );
+          })}
           {layout.edges.map(({ kind, from, to }) => {
             const gap =
               new Date(to.span.startedAt).getTime() -
@@ -615,6 +686,8 @@ export function TraceCanvas({
                 : selectedId === from.span.id || selectedId === to.span.id;
             return (
               <Arrow
+                listening={false}
+                perfectDrawEnabled={false}
                 key={kind + ":" + from.span.id + "->" + to.span.id}
                 points={points}
                 stroke={stroke}
@@ -797,8 +870,33 @@ export function TraceCanvas({
               bendOffset,
             );
             const box = edgeLabelLayout(kind, label, from.span, to.span, points);
+            // A gap label is just a duration; a semantic one names what the
+            // edge means. Only the latter earns an opaque chip, because a chip
+            // centred on the connector hides the very arrow it annotates.
+            const isGap = label === formatDuration(Math.max(gap, 0));
+            // Sub-second gaps are noise between back-to-back steps: labelling
+            // every "11 ms" buried the arrows without telling anyone anything.
+            if (isGap && gap < GAP_LABEL_MIN_MS) return null;
+            if (isGap) {
+              return (
+                <Text
+                  key={"label:" + kind + ":" + from.span.id + "->" + to.span.id}
+                  listening={false}
+                  text={label}
+                  x={box.x}
+                  y={box.y - GAP_LABEL_LIFT}
+                  width={box.width}
+                  align="center"
+                  fontSize={11}
+                  fill={COLORS.muted}
+                />
+              );
+            }
             return (
-              <Group key={"label:" + kind + ":" + from.span.id + "->" + to.span.id}>
+              <Group
+                key={"label:" + kind + ":" + from.span.id + "->" + to.span.id}
+                listening={false}
+              >
                 <Rect
                   x={box.x - 6}
                   y={box.y - 4}
@@ -808,9 +906,6 @@ export function TraceCanvas({
                   cornerRadius={4}
                   stroke={COLORS.line}
                   strokeWidth={1}
-                  shadowColor="rgba(39, 38, 33, 0.12)"
-                  shadowBlur={4}
-                  shadowOffsetY={1}
                 />
                 <Text
                   text={label}

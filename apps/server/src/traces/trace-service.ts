@@ -722,12 +722,22 @@ export class TraceService {
           ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
           : "";
         if (toolArgumentsRaw && state.lastModelCallSpanId) {
+          // Codex hands arguments over as a JSON string. Embedding it as-is
+          // produced a document whose "arguments" was itself escaped JSON
+          // ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer can
+          // make readable. Parse first so the panel shows one clean object.
+          let toolArguments: unknown = toolArgumentsRaw;
+          try {
+            toolArguments = JSON.parse(toolArgumentsRaw);
+          } catch {
+            // Not JSON: keep the raw string rather than dropping the call.
+          }
           this.appendModelOutput(
             runId,
             state.lastModelCallSpanId,
             JSON.stringify({
               name: event.tool_name,
-              arguments: toolArgumentsRaw,
+              arguments: toolArguments,
             }),
           );
         }
