@@ -2,6 +2,16 @@ export type AuditType = "security" | "intent";
 export type AuditPhase = "step" | "run";
 export type AuditStatus = "completed" | "degraded" | "failed";
 
+export type AuditTraceStep = {
+  id: string;
+  traceId: string;
+  agentId: string;
+  type: "warning" | "error";
+  category: "intent-check" | "security";
+  finding: string;
+};
+
+
 export interface AuditRecord {
   version: 1;
   id: string;

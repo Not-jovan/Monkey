@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -52,5 +52,39 @@ describe("JsonStore", () => {
     expect(store.snapshot().messages.map((message) => message.content)).toEqual([
       "queue recovered",
     ]);
+  });
+
+  it("fills intent for agents saved before intent tracking", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-store-test-"));
+    temporaryDirectories.push(root);
+    const filePath = path.join(root, "db.json");
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        version: 1,
+        agents: [
+          {
+            id: "agent-1",
+            name: "Legacy",
+            description: "",
+            instructions: "Build a todo app",
+            status: "ready",
+            workspacePath: "/tmp/ws",
+            codexThreadId: null,
+            lastError: null,
+            createdAt: "2026-01-01T00:00:00.000Z",
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+        ],
+        messages: [],
+        runs: [],
+      }) + "\n",
+    );
+    const store = new JsonStore(filePath);
+    await store.initialize();
+    expect(store.snapshot().agents[0]?.intent).toEqual({
+      objective: "Build a todo app",
+      extended: [],
+    });
   });
 });

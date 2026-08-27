@@ -1,6 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { Database } from "./types.js";
+import { ensureIntent, type Database } from "./types.js";
 
 const emptyDatabase = (): Database => ({
   version: 1,
@@ -8,6 +8,16 @@ const emptyDatabase = (): Database => ({
   messages: [],
   runs: [],
 });
+
+function migrateDatabase(parsed: Database): Database {
+  return {
+    ...parsed,
+    agents: parsed.agents.map((agent) => ({
+      ...agent,
+      intent: ensureIntent(agent),
+    })),
+  };
+}
 
 export class JsonStore {
   private data: Database = emptyDatabase();
@@ -23,7 +33,7 @@ export class JsonStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.agents)) {
         throw new Error("Unsupported database format");
       }
-      this.data = parsed;
+      this.data = migrateDatabase(parsed);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;

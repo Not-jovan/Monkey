@@ -34,24 +34,35 @@ await traceStore.initialize();
 const auditStore = new AuditStore(path.join(config.dataDirectory, "audits"));
 await auditStore.initialize();
 const traceService = new TraceService(traceStore, redactor);
-const auditService = new AuditService({
-  traceStore,
-  auditStore,
-  client: createArkClient(config),
-  securityModel: config.auditSecurityModel,
-  intentModel: config.auditIntentModel,
-  enabled: config.auditEnabled && isArkConfigured(config),
-  log: (message, error) => console.error(message, error),
-});
-auditService.start();
-
+const arkClient = createArkClient(config);
 const service = new AgentService(
   config,
   store,
   workspaces,
   runner,
   traceService,
+  isArkConfigured(config)
+    ? { client: arkClient, model: config.auditIntentModel }
+    : undefined,
 );
+const auditService = new AuditService({
+  traceStore,
+  auditStore,
+  client: arkClient,
+  securityModel: config.auditSecurityModel,
+  intentModel: config.auditIntentModel,
+  enabled: config.auditEnabled && isArkConfigured(config),
+  whitelist: config.auditNetworkWhitelist,
+  getIntent: (agentId) => {
+    try {
+      return service.getIntent(agentId);
+    } catch {
+      return null;
+    }
+  },
+  log: (message, error) => console.error(message, error),
+});
+auditService.start();
 await service.initialize();
 
 const app = await createApp(config, service, {

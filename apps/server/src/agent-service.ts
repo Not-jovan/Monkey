@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import type { ArkClient } from "./audits/ark-client.js";
+import {
+  applyIntentClassification,
+  classifyIntentScope,
+} from "./intent/classifier.js";
 import { JsonStore } from "./store.js";
 import type { TraceService } from "./traces/trace-service.js";
 import type {
@@ -9,9 +14,11 @@ import type {
   AgentRun,
   AgentRunner,
   CreateAgentInput,
+  IntentState,
   Message,
   UpdateAgentInput,
 } from "./types.js";
+import { emptyIntent } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
@@ -26,6 +33,7 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly traces?: TraceService,
+    private readonly intent?: { client: ArkClient; model: string },
   ) {}
 
   private redact(text: string): string {
@@ -76,6 +84,10 @@ export class AgentService {
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       instructions: input.instructions?.trim() ?? "",
+      intent: {
+        objective: input.instructions?.trim() ?? "",
+        extended: [],
+      },
       status: "ready",
       workspacePath: this.workspaces.workspacePath(id),
       codexThreadId: null,
@@ -112,8 +124,13 @@ export class AgentService {
       if (input.name !== undefined) agent.name = input.name.trim();
       if (input.description !== undefined)
         agent.description = input.description.trim();
-      if (input.instructions !== undefined)
+      if (input.instructions !== undefined) {
         agent.instructions = input.instructions.trim();
+        agent.intent = {
+          ...agent.intent,
+          objective: agent.instructions,
+        };
+      }
       agent.lastError = null;
       agent.updatedAt = now();
       return structuredClone(agent);
@@ -187,6 +204,10 @@ export class AgentService {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
   }
 
+  getIntent(agentId: string): IntentState {
+    return this.getAgent(agentId).intent;
+  }
+
   async sendMessage(
     agentId: string,
     prompt: string,
@@ -202,6 +223,8 @@ export class AgentService {
     // The raw prompt goes to Codex; every stored or returned copy is masked so
     // pasted credentials never persist in the transcript.
     const redactedPrompt = this.redact(prompt);
+    const current = this.getAgent(agentId);
+    const intent = await this.classifyMessage(current, redactedPrompt);
     const run: AgentRun = {
       id: runId,
       agentId,
@@ -235,6 +258,7 @@ export class AgentService {
       }
       database.runs.push(run);
       database.messages.push(message);
+      storedAgent.intent = intent;
       const snapshot = structuredClone(storedAgent);
       storedAgent.status = "busy";
       storedAgent.lastError = null;
@@ -353,6 +377,26 @@ export class AgentService {
         status: cancelled ? "cancelled" : "failed",
         error: message,
       });
+    }
+  }
+
+  private async classifyMessage(agent: Agent, prompt: string) {
+    let intent = agent.intent ?? emptyIntent();
+    if (!intent.objective.trim()) {
+      intent = { objective: prompt, extended: intent.extended };
+    }
+    if (!this.intent) return intent;
+    try {
+      const verdict = await classifyIntentScope({
+        client: this.intent.client,
+        model: this.intent.model,
+        originalIntent: intent.objective,
+        extendedIntent: intent.extended,
+        userMessage: prompt,
+      });
+      return applyIntentClassification(intent, verdict);
+    } catch {
+      return intent;
     }
   }
 

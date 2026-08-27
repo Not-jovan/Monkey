@@ -2,11 +2,44 @@ export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
 
+export interface IntentState {
+  objective: string;
+  extended: string[];
+}
+
+export const emptyIntent = (): IntentState => ({
+  objective: "",
+  extended: [],
+});
+
+export function ensureIntent(agent: {
+  instructions: string;
+  intent?: IntentState;
+}): IntentState {
+  if (
+    agent.intent &&
+    typeof agent.intent.objective === "string" &&
+    Array.isArray(agent.intent.extended)
+  ) {
+    return {
+      objective: agent.intent.objective,
+      extended: agent.intent.extended.filter(
+        (item) => typeof item === "string" && item.trim().length > 0,
+      ),
+    };
+  }
+  return {
+    objective: agent.instructions,
+    extended: [],
+  };
+}
+
 export interface Agent {
   id: string;
   name: string;
   description: string;
   instructions: string;
+  intent: IntentState;
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;

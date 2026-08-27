@@ -106,6 +106,8 @@ function toolSpan(traceId: string, status: TraceSpan["status"]): TraceSpan {
 
 const SAFE_VERDICT =
   '{"dangerous":false,"prompt_injection":false,"tool_misuse":false,"restriction_bypass":false,"reason":"routine"}';
+const STEP_OK =
+  '{"notInAlignment":[],"newObjectives":[],"secretExposures":[]}';
 
 function makeAudit(
   stores: Awaited<ReturnType<typeof makeStores>>,
@@ -155,7 +157,7 @@ describe("AuditService", () => {
 
   it("audits tool calls only once they carry a result", async () => {
     const stores = await makeStores();
-    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const responder: FakeResponder = { calls: [], respond: () => STEP_OK };
     const service = makeAudit(stores, responder);
 
     seedTrace(stores.traceStore, "trace-2");
@@ -165,7 +167,10 @@ describe("AuditService", () => {
 
     stores.traceStore.appendSpan("trace-2", toolSpan("trace-2", "ok"));
     await service.idle();
-    expect(stores.auditStore.listByTrace("trace-2")).toHaveLength(1);
+    expect(stores.auditStore.listByTrace("trace-2")).toHaveLength(2);
+    expect(
+      stores.auditStore.listByTrace("trace-2").map((audit) => audit.type).sort(),
+    ).toEqual(["intent", "security"]);
   });
 
   it("degrades to the fallback model when the primary is not activated", async () => {

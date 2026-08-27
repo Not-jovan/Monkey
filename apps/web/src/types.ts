@@ -11,6 +11,10 @@ export interface Agent {
   name: string;
   description: string;
   instructions: string;
+  intent: {
+    objective: string;
+    extended: string[];
+  };
   status: AgentStatus;
   workspacePath: string;
   codexThreadId: string | null;

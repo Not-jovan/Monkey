@@ -82,4 +82,14 @@ describe("codex config generation", () => {
     const bare = loadConfig({ NODE_ENV: "test" });
     expect(secretValues(bare)).toEqual([]);
   });
+
+  it("treats an unset network whitelist as skipped", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).auditNetworkWhitelist).toBeNull();
+    expect(
+      loadConfig({
+        NODE_ENV: "test",
+        AUDIT_NETWORK_WHITELIST: "api.github.com, api.open-meteo.com",
+      }).auditNetworkWhitelist,
+    ).toEqual(["api.github.com", "api.open-meteo.com"]);
+  });
 });

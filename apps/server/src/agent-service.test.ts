@@ -3,6 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
+import type { ArkClient } from "./audits/ark-client.js";
 import { loadConfig } from "./config.js";
 import { JsonStore } from "./store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
@@ -35,7 +36,10 @@ afterEach(async () => {
   );
 });
 
-async function makeService(runner: AgentRunner = new FakeRunner()): Promise<AgentService> {
+async function makeService(
+  runner: AgentRunner = new FakeRunner(),
+  intentClient?: ArkClient,
+): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -51,6 +55,10 @@ async function makeService(runner: AgentRunner = new FakeRunner()): Promise<Agen
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
+    undefined,
+    intentClient
+      ? { client: intentClient, model: "intent-model" }
+      : undefined,
   );
   await service.initialize();
   return service;
@@ -129,5 +137,57 @@ describe("Agent lifecycle", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("appends standing rules from a user message onto agent intent", async () => {
+    const client: ArkClient = {
+      complete: async () => ({
+        content: JSON.stringify({
+          classification: "INTENT_UPDATE",
+          reason: "standing rule",
+          extendedIntent: ["Do not read from .env files."],
+        }),
+      }),
+    };
+    const service = await makeService(new FakeRunner(), client);
+    const agent = await service.createAgent({
+      name: "Coder",
+      instructions: "Build a todo list web application",
+    });
+    expect(agent.intent).toEqual({
+      objective: "Build a todo list web application",
+      extended: [],
+    });
+    const { run } = await service.sendMessage(
+      agent.id,
+      "Do not read from .env files.",
+    );
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    expect(service.getIntent(agent.id).extended).toEqual([
+      "Do not read from .env files.",
+    ]);
+  });
+
+  it("keeps intent unchanged when the classifier reports NO_CHANGE", async () => {
+    const client: ArkClient = {
+      complete: async () => ({
+        content: JSON.stringify({
+          classification: "NO_CHANGE",
+          reason: "work request",
+          extendedIntent: [],
+        }),
+      }),
+    };
+    const service = await makeService(new FakeRunner(), client);
+    const agent = await service.createAgent({
+      name: "Coder",
+      instructions: "Build a todo list web application",
+    });
+    const { run } = await service.sendMessage(agent.id, "Build the todo list UI.");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+    expect(service.getIntent(agent.id)).toEqual({
+      objective: "Build a todo list web application",
+      extended: [],
+    });
   });
 });
