@@ -68,7 +68,6 @@ const service = new AgentService(
   workspaces,
   runner,
   traceService,
-  intentService,
 );
 await service.initialize();
 

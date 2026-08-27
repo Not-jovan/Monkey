@@ -340,6 +340,8 @@ describe("AuditService", () => {
       id: "u1",
       at: "2026-08-26T11:00:00.000Z",
       message: "Do not read .env files.",
+      messageId: "msg-1",
+      traceId: "trace-constraint",
       reason: "prohibition",
       added: ["Do not read .env files."],
       objectiveBefore: null,

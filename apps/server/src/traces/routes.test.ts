@@ -215,6 +215,8 @@ describe("Glassbox routes", () => {
       id: updateId,
       at: "2026-08-27T00:00:00.000Z",
       message: "Do not read .env files.",
+      messageId: "msg-1",
+      traceId: RUN_ID,
       reason: "prohibition",
       added: ["Do not read .env files."],
       objectiveBefore: null,

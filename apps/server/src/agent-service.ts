@@ -3,7 +3,6 @@ import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
 import { JsonStore } from "./store.js";
-import type { IntentService } from "./intent/intent-service.js";
 import type { TraceService } from "./traces/trace-service.js";
 import type {
   Agent,
@@ -27,7 +26,6 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly traces?: TraceService,
-    private readonly intent?: IntentService,
   ) {}
 
   private redact(text: string): string {
@@ -92,9 +90,6 @@ export class AgentService {
       "created",
       "Agent " + agent.name + " created",
     );
-    // The agent's instructions are the original intent; messages are judged
-    // against them from the first run onward.
-    this.intent?.seed(agent.id, agent.instructions);
     return agent;
   }
 
@@ -148,7 +143,6 @@ export class AgentService {
       "deleted",
       "Agent " + agent.name + " deleted",
     );
-    this.intent?.forget(id);
     return { archivedWorkspace };
   }
 
@@ -203,15 +197,11 @@ export class AgentService {
         "Ark is not configured. Set ARK_API_KEY and ARK_MODEL, then restart.",
       );
     }
-    const agentForIntent = this.getAgent(agentId);
     const timestamp = now();
     const runId = randomUUID();
     // The raw prompt goes to Codex; every stored or returned copy is masked so
     // pasted credentials never persist in the transcript.
     const redactedPrompt = this.redact(prompt);
-    // Queued, not awaited: a slow classifier must never delay the user's
-    // message. The state lands well before the first step audit reads it.
-    this.intent?.observe(agentId, agentForIntent.instructions, redactedPrompt);
     const run: AgentRun = {
       id: runId,
       agentId,

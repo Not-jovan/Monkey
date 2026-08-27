@@ -1,17 +1,32 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import type { AuditTraceStep, IntentState, IntentUpdate, TraceRecord } from "../types";
+import type {
+  AuditTraceStep,
+  IntentSnapshot,
+  IntentState,
+  IntentUpdate,
+  TraceRecord,
+} from "../types";
 import { formatDateTime } from "./format";
+
+function snapshotForTrace(
+  states: IntentSnapshot[],
+  traceId: string,
+): IntentSnapshot | null {
+  if (states.length === 0) return null;
+  const match = states.find((entry) => entry.traces.includes(traceId));
+  return match ?? states[states.length - 1] ?? null;
+}
 
 // A trace on its own does not say what the run was measured against. Without
 // the objective and the standing constraints in force, a finding like "not in
 // alignment" is unreadable — you cannot tell what it failed to align with.
-
 export function TraceIntent({ trace }: { trace: TraceRecord }) {
   const intentQuery = useQuery<{
     intent: IntentState;
     pending: IntentUpdate[];
     history: IntentUpdate[];
+    states: IntentSnapshot[];
     requiresConfirmation: boolean;
     updatedAt: string | null;
   }>({
@@ -22,15 +37,18 @@ export function TraceIntent({ trace }: { trace: TraceRecord }) {
     staleTime: 30_000,
   });
 
-  const intent: IntentState | undefined = intentQuery.data?.intent;
-  const history: IntentUpdate[] = intentQuery.data?.history ?? [];
-
-  // Updates that landed while this run was in flight are the ones that explain
-  // a mid-run change of behaviour.
-  const runStart = trace.startedAt;
-  const runEnd = trace.endedAt ?? new Date().toISOString();
-  const during = history.filter(
-    (entry) => entry.at >= runStart && entry.at <= runEnd,
+  const states: IntentSnapshot[] = intentQuery.data?.states ?? [];
+  const snapshot = snapshotForTrace(states, trace.id);
+  const latest = states[states.length - 1];
+  const intent: IntentState | undefined = snapshot
+    ? { objective: snapshot.objective, extended: snapshot.extended }
+    : intentQuery.data?.intent;
+  const changedHere =
+    snapshot?.lastModifiedBy?.traceId === trace.id
+      ? snapshot
+      : null;
+  const laterUpdates = Boolean(
+    snapshot && latest && snapshot.id !== latest.id,
   );
 
   if (!intent || (intent.objective.length === 0 && intent.extended.length === 0)) {
@@ -40,7 +58,7 @@ export function TraceIntent({ trace }: { trace: TraceRecord }) {
   return (
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
       <h2 className="eyebrow" id="trace-intent-heading">
-        Judged against
+        Spec in force
       </h2>
       <p className="trace-intent-objective">{intent.objective || "(no objective stated)"}</p>
       {intent.extended.length > 0 && (
@@ -53,23 +71,14 @@ export function TraceIntent({ trace }: { trace: TraceRecord }) {
           </ul>
         </>
       )}
-      {during.length > 0 && (
-        <>
-          <h3 className="eyebrow">Changed during this run</h3>
-          <ul className="trace-intent-list">
-            {during.map((entry) => (
-              <li key={entry.id}>
-                <span className={"intent-status intent-status-" + entry.status}>
-                  {entry.status}
-                </span>{" "}
-                {entry.objectiveAfter
-                  ? "objective → " + entry.objectiveAfter
-                  : entry.added.join("; ")}
-                <span className="muted-cell"> · {formatDateTime(entry.at)}</span>
-              </li>
-            ))}
-          </ul>
-        </>
+      {changedHere && (
+        <p className="muted-cell">
+          This chat last modified the spec
+          {changedHere.at ? " · " + formatDateTime(changedHere.at) : ""}
+        </p>
+      )}
+      {laterUpdates && (
+        <p className="muted-cell">Later chats updated this spec.</p>
       )}
     </section>
   );

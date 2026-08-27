@@ -60,10 +60,20 @@ export interface IntentUpdate {
   status: "applied" | "pending" | "rejected";
 }
 
+export interface IntentSnapshot {
+  id: string;
+  objective: string;
+  extended: string[];
+  lastModifiedBy: { messageId: string; traceId: string } | null;
+  traces: string[];
+}
+
 export interface IntentResponse {
   intent: { objective: string; extended: string[] };
+  lastModifiedBy: { messageId: string; traceId: string } | null;
   pending: IntentUpdate[];
   history: IntentUpdate[];
+  states: IntentSnapshot[];
 }
 
 async function json<T>(response: Awaited<ReturnType<APIRequestContext["get"]>>) {

@@ -95,7 +95,9 @@ export async function createApp(
 
   app.delete("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
-    return service.deleteAgent(id);
+    const result = await service.deleteAgent(id);
+    glassbox?.intentService?.forget(id);
+    return result;
   });
 
   app.post("/api/agents/:id/start", async (request) => {
@@ -122,6 +124,13 @@ export async function createApp(
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
     const result = await service.sendMessage(id, body.content);
+    const agent = service.getAgent(id);
+    // Queued inside observe, not awaited: classification must not delay 202.
+    glassbox?.intentService?.observe(id, agent.instructions, {
+      content: result.message.content,
+      messageId: result.message.id,
+      traceId: result.run.id,
+    });
     return reply.code(202).send(result);
   });
 

@@ -11,6 +11,7 @@ import { summarizeTrace } from "./trace-model.js";
 interface TraceStoreEvents {
   span: [{ trace: TraceRecord; span: TraceSpan }];
   "trace-completed": [{ trace: TraceRecord }];
+  lifecycle: [AgentLifecycleEvent];
 }
 
 // Append-oriented persistence: one JSON document per trace under
@@ -130,6 +131,7 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
       agentId: event.agentId,
       events,
     });
+    this.emit("lifecycle", structuredClone(event));
     return event;
   }
 

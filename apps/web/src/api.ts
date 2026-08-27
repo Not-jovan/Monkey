@@ -3,6 +3,8 @@ import type {
   AgentLifecycleEvent,
   AgentRun,
   AuditTraceStep,
+  IntentChatRef,
+  IntentSnapshot,
   IntentState,
   IntentUpdate,
   Message,
@@ -122,8 +124,10 @@ export const api = {
   intent: (id: string) =>
     request<{
       intent: IntentState;
+      lastModifiedBy: IntentChatRef | null;
       pending: IntentUpdate[];
       history: IntentUpdate[];
+      states: IntentSnapshot[];
       requiresConfirmation: boolean;
       updatedAt: string | null;
     }>("/api/agents/" + id + "/intent"),

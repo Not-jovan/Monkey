@@ -77,8 +77,10 @@ export function registerGlassboxRoutes(
       intent: record
         ? { objective: record.objective, extended: record.extended }
         : { objective: "", extended: [] },
+      lastModifiedBy: record?.lastModifiedBy ?? null,
       pending: deps.intentService?.pending(id) ?? [],
       history: record?.history ?? [],
+      states: record?.states ?? [],
       requiresConfirmation:
         deps.intentService?.requiresConfirmation() ?? false,
       updatedAt: record?.updatedAt ?? null,

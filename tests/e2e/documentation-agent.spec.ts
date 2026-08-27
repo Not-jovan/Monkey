@@ -185,8 +185,7 @@ test("Trace 5 should apply the confirmed HTML intent update", async () => {
 
   await page.goto(`/traces/${detail.trace.id}`);
   const traceIntent = page.locator(".trace-intent");
-  await expect(traceIntent).toContainText("Changed during this run");
-  await expect(traceIntent).toContainText("applied");
+  await expect(traceIntent).toContainText("This chat last modified the spec");
   await expect(traceIntent).toContainText(/HTML/i);
 
   await page.goto("/");
