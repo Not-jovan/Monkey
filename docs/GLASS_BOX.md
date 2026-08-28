@@ -157,6 +157,14 @@ under `APP_DATA_DIR`:
 .data/intent/<agentId>.json   insertion-ordered map of intent versions
 ```
 
+A failed Run also leaves a transcript at `.data/run-logs/<runId>.log`. It is
+not part of the trio above and the auditor never reads it: it is written by
+the runner, only on failure, and holds the Runtime's argv plus its raw stdout
+and stderr — the material you need when a Run dies before emitting any
+telemetry. It goes through the same redactor and the same `0600` mode as
+everything else here, so the shape-based masking caveat under Limitations
+applies to it too.
+
 A Run left open by a crash is closed on the next boot, so the UI never shows a
 Run as live when nothing is running.
 

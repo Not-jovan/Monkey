@@ -18,6 +18,10 @@ const envSchema = z.object({
   CLAUDE_CODE_HOME: z.string().default(path.resolve("claude-home")),
   CLAUDE_CODE_BIN: z.string().default("claude"),
   ANTHROPIC_API_KEY: z.string().optional(),
+  // Subscription credential from `claude setup-token`. Claude Code ranks
+  // ANTHROPIC_API_KEY above this, so the two are mutually exclusive in
+  // claudeCodeRuntime.processEnv rather than both being forwarded.
+  CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
   RUNTIME_PROVIDER: z.enum(["local-process", "container"]).default("local-process"),
   CONTAINER_ENGINE: z.string().min(1).default("docker"),
   CONTAINER_RUNTIME_IMAGE: z.string().min(1).default("volc-agent-runtime:local"),
@@ -102,6 +106,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     claudeCodeHome: path.resolve(env.CLAUDE_CODE_HOME),
     claudeCodeBin: env.CLAUDE_CODE_BIN,
     anthropicApiKey: env.ANTHROPIC_API_KEY?.trim() ?? "",
+    claudeCodeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN?.trim() ?? "",
     runtimeProvider: env.RUNTIME_PROVIDER,
     containerEngine: env.CONTAINER_ENGINE,
     containerRuntimeImage: env.CONTAINER_RUNTIME_IMAGE,
@@ -131,9 +136,12 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
 // Values the redaction layer must mask wherever they appear in traces,
 // audits, or chat transcripts.
 export function secretValues(config: AppConfig): string[] {
-  return [config.arkApiKey, config.authToken, config.anthropicApiKey].filter(
-    (value) => value.length > 0,
-  );
+  return [
+    config.arkApiKey,
+    config.authToken,
+    config.anthropicApiKey,
+    config.claudeCodeOauthToken,
+  ].filter((value) => value.length > 0);
 }
 
 export function collectorLogsUrl(config: AppConfig): string {

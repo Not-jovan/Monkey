@@ -2,12 +2,13 @@ ARG NODE_IMAGE=node:22-bookworm-slim
 FROM ${NODE_IMAGE}
 
 ARG CODEX_VERSION=0.111.0
+ARG CLAUDE_CODE_VERSION=2.1.250
 ARG DEBIAN_MIRROR=""
 ARG DEBIAN_SECURITY_MIRROR=""
 ARG RUNTIME_APT_PACKAGES="ca-certificates git ripgrep"
 
 LABEL org.opencontainers.image.title="Volc Agent Runtime"
-LABEL org.opencontainers.image.description="Disposable local Codex CLI runtime for the CodeJam Starter Kit"
+LABEL org.opencontainers.image.description="Disposable local Agent runtime (Codex CLI and Claude Code) for the CodeJam Starter Kit"
 
 RUN if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
       find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
@@ -19,14 +20,19 @@ RUN if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends $RUNTIME_APT_PACKAGES \
-    && npm install --global "@openai/codex@${CODEX_VERSION}" \
+    && npm install --global \
+         "@openai/codex@${CODEX_VERSION}" \
+         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && codex --version \
+    && claude --version \
     && rm -rf /var/lib/apt/lists/*
 
-ENV CODEX_HOME=/codex-home
+# The home directory var is supplied per run by ContainerRuntimeRunner
+# (--env <homeEnvVar>=/runtime-home) for whichever runtime AGENT_RUNTIME
+# selects, so nothing runtime-specific is baked in here.
 ENV HOME=/tmp
 ENV NO_COLOR=1
 
 WORKDIR /workspace
 
-CMD ["codex", "--version"]
+CMD ["sh", "-lc", "codex --version && claude --version"]

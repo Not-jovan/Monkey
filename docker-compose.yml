@@ -18,6 +18,7 @@ services:
       APP_DATA_DIR: /app/data
       AGENT_WORKSPACE_ROOT: /app/workspaces
       CODEX_HOME: /app/codex-home
+      CLAUDE_CODE_HOME: /app/claude-home
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-workspace-write}
     ports:
       - "${PUBLIC_PORT:-3000}:3000"
@@ -25,6 +26,7 @@ services:
       - ./data:/app/data
       - ./workspaces:/app/workspaces
       - ./codex-home:/app/codex-home
+      - ./claude-home:/app/claude-home
     init: true
     security_opt:
       - no-new-privileges:true

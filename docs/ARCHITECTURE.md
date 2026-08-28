@@ -46,6 +46,7 @@ Interrupted Runs become `cancelled` after a restart.
 
 ```text
 data/launchpad.json       Agent, message, and Run metadata
+data/run-logs/RunID.log   Raw Runtime output, written only when a Run fails
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
 codex-home/ or claude-home/   Codex or Claude Code config/session data

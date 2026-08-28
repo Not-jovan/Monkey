@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
 import { api, ApiError, setAuthToken } from "./api";
 import { IntentPanel } from "./intent/IntentPanel";
+import {
+  modelPlaceholder,
+  runtimeCliName,
+  runtimeDisplayName,
+} from "./runtime-label";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -316,9 +321,9 @@ export default function App() {
           <div>
             <strong>Agent Launchpad</strong>
             <span>
-              {system?.runtimeProvider === "container"
-                ? "Local container · Codex CLI"
-                : "ECS / Docker · Codex CLI"}
+              {(system?.runtimeProvider === "container"
+                ? "Local container · "
+                : "ECS / Docker · ") + runtimeCliName(system?.agentRuntime)}
             </span>
           </div>
         </div>
@@ -368,14 +373,14 @@ export default function App() {
           <span className="eyebrow">Runtime</span>
           <strong>{system?.runtime ?? "Checking…"}</strong>
           <span>
-            {system?.arkModel ?? "Ark model not configured"}
+            {system?.agentModel ?? modelPlaceholder(system?.agentRuntime)}
             {system?.containerEngine ? " · " + system.containerEngine : ""}
           </span>
         </div>
       </aside>
 
       <main className="main">
-        {!system?.arkConfigured || !system?.codexAvailable ? (
+        {!system?.arkConfigured || !system?.runtimeAvailable ? (
           <div className="config-banner">
             <span>!</span>
             <div>
@@ -385,7 +390,11 @@ export default function App() {
                   ? "Set ARK_API_KEY and ARK_MODEL in .env before using the Playground."
                   : system.runtimeProvider === "container"
                     ? "The local container engine or Agent Runtime image is unavailable. Rerun npm run poc."
-                    : "Codex CLI was not found. Use the Docker image or install @openai/codex."}
+                    : runtimeCliName(system.agentRuntime) +
+                      " was not found. Use the Docker image or install " +
+                      (system.agentRuntime === "claude-code"
+                        ? "@anthropic-ai/claude-code."
+                        : "@openai/codex.")}
               </p>
             </div>
           </div>
@@ -536,7 +545,8 @@ export default function App() {
                     </div>
                     <div className="thinking-row">
                       <Spinner />
-                      Codex is reading, editing, or running commands…
+                      {runtimeDisplayName(system?.agentRuntime)} is reading,
+                      editing, or running commands…
                     </div>
                   </article>
                 )}
@@ -573,7 +583,10 @@ export default function App() {
                 />
                 <div className="composer-footer">
                   <span>
-                    Enter to send · Shift + Enter for newline · {system?.codexSandboxMode ?? "checking sandbox"}
+                    Enter to send · Shift + Enter for newline
+                    {system?.agentRuntime === "codex"
+                      ? " · " + (system.codexSandboxMode ?? "checking sandbox")
+                      : ""}
                   </span>
                   <button
                     className="send-button"

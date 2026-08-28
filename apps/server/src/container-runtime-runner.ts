@@ -1,7 +1,8 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { RunCancelledError } from "./errors.js";
+import { RunCancelledError, runFailureDetail } from "./errors.js";
+import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
 import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner, RunUsage, RunnerRequest, RunnerResult } from "./types.js";
 
@@ -154,15 +155,18 @@ export class ContainerRuntimeRunner implements AgentRunner {
       );
     }
 
-    const child = spawn(
-      this.config.containerEngine,
-      buildContainerRunArgs(request, this.config, this.runtime, this.collectorToken),
-      {
-        cwd: request.workspacePath,
-        env: this.childEnvironment(),
-        stdio: ["ignore", "pipe", "pipe"],
-      },
+    const argv = buildContainerRunArgs(
+      request,
+      this.config,
+      this.runtime,
+      this.collectorToken,
     );
+    const transcript = new RunTranscript();
+    const child = spawn(this.config.containerEngine, argv, {
+      cwd: request.workspacePath,
+      env: this.childEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const settled = new Promise<void>((resolve) => {
       child.once("close", () => resolve());
       child.once("error", () => resolve());
@@ -183,6 +187,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
       threadId: request.threadId,
       usage: null as RunUsage | null,
       errors: [],
+      model: null,
     };
     let stdout = "";
     let stderr = "";
@@ -196,6 +201,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
+        transcript.recordStdout(chunk.toString("utf8"));
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
@@ -203,6 +209,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
           this.runtime.parseEventLine(line, parsed, request.onEvent);
         }
       } else {
+        transcript.recordStderr(chunk.toString("utf8"));
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
       }
@@ -231,7 +238,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
         throw new Error("Runtime output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail = runFailureDetail(parsed.errors, stderr);
         throw new Error(
           this.config.containerEngine +
             " Runtime exited with code " +
@@ -241,8 +248,35 @@ export class ContainerRuntimeRunner implements AgentRunner {
         );
       }
       const output = parsed.messages.at(-1)?.trim();
-      if (!output) throw new Error("Runtime completed without an agent message");
-      return { output, threadId: parsed.threadId, usage: parsed.usage };
+      if (!output) {
+        // A runtime can report a failure and still exit 0 (Claude Code sets
+        // is_error on the result event), so prefer the reported reason over
+        // the generic "no message" wording.
+        if (parsed.errors.length > 0) {
+          throw new Error(
+            this.runtime.id + " failed: " + runFailureDetail(parsed.errors, stderr),
+          );
+        }
+        throw new Error("Runtime completed without an agent message");
+      }
+      return {
+        output,
+        threadId: parsed.threadId,
+        usage: parsed.usage,
+        model: parsed.model,
+      };
+    } catch (error) {
+      // A cancellation is a user action, not a fault worth a transcript.
+      if (!(error instanceof RunCancelledError)) {
+        await attachFailureTranscript(transcript, error, {
+          dataDirectory: this.config.dataDirectory,
+          runtimeId: this.runtime.id,
+          argv,
+          runId: request.runId,
+          redact: request.redact,
+        });
+      }
+      throw error;
     } finally {
       clearTimeout(timeout);
       this.active.delete(request.agentId);

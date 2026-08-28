@@ -29,6 +29,10 @@ interface RunEndInput {
   status: "completed" | "failed" | "cancelled";
   error?: string | null;
   output?: string | null;
+  // Reported by runtimes that resolve their model at run time (Claude Code).
+  // Applied only when the trace has no model yet, so Codex's authoritative
+  // conversation_starts value is never overwritten.
+  model?: string | null;
 }
 
 interface ConversationScope {
@@ -417,6 +421,12 @@ export class TraceService {
     const error = outcome.error
       ? this.redactor.redactText(outcome.error)
       : null;
+
+    if (outcome.model) {
+      this.store.updateTrace(runId, (trace) => {
+        trace.model = trace.model ?? outcome.model ?? null;
+      });
+    }
 
     for (const spanId of state.toolSpans.values()) {
       this.store.updateSpan(runId, spanId, (span) => {

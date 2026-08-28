@@ -13,11 +13,15 @@ import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
 class FakeRunner implements AgentRunner {
+  // Runtimes that resolve their model at run time report it here; Codex
+  // leaves it null.
+  constructor(private readonly model: string | null = null) {}
   async run(request: RunnerRequest): Promise<RunnerResult> {
     return {
       output: "Completed: " + request.prompt,
       threadId: request.threadId ?? "fake-thread",
       usage: { inputTokens: 12, outputTokens: 5 },
+      model: this.model,
     };
   }
   async cancel(): Promise<boolean> {
@@ -42,6 +46,7 @@ afterEach(async () => {
 async function makeService(
   runner: AgentRunner = new FakeRunner(),
   traces?: TraceService,
+  envOverrides: Record<string, string> = {},
 ): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
@@ -52,6 +57,7 @@ async function makeService(
     CODEX_HOME: path.join(root, "codex"),
     ARK_API_KEY: "test-key",
     ARK_MODEL: "ep-test",
+    ...envOverrides,
   });
   const service = new AgentService(
     config,
@@ -110,7 +116,7 @@ describe("Agent lifecycle", () => {
     expect(rejected).toMatchObject({ reason: { statusCode: 409 } });
     expect(service.getMessages(agent.id)).toHaveLength(1);
 
-    finish({ output: "done", threadId: "thread", usage: null });
+    finish({ output: "done", threadId: "thread", usage: null, model: null });
     const accepted = attempts.find((attempt) => attempt.status === "fulfilled");
     if (accepted?.status === "fulfilled") {
       await expect.poll(() => service.getRun(accepted.value.run.id).status).toBe("completed");
@@ -135,7 +141,7 @@ describe("Agent lifecycle", () => {
       statusCode: 409,
     });
 
-    finish({ output: "done", threadId: "thread", usage: null });
+    finish({ output: "done", threadId: "thread", usage: null, model: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
   });
 
@@ -160,5 +166,83 @@ describe("Agent lifecycle", () => {
       trace?.spans.find((span) => span.name === "user.intervention")?.attributes
         .action,
     ).toBe("terminate");
+  });
+});
+
+// The sidebar reads agentModel to say what the Agent is actually running on.
+// It is not simply arkModel: Ark powers the audit models for every runtime,
+// but only Codex's Agent.
+describe("systemInfo agentModel", () => {
+  it("reports the configured Ark model for codex", async () => {
+    const service = await makeService();
+    const info = await service.systemInfo();
+    expect(info.agentRuntime).toBe("codex");
+    expect(info.agentModel).toBe("ep-test");
+  });
+
+  it("reports no model for claude-code until a run has named one", async () => {
+    const service = await makeService(new FakeRunner(), undefined, {
+      AGENT_RUNTIME: "claude-code",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+    });
+    const info = await service.systemInfo();
+    expect(info.agentRuntime).toBe("claude-code");
+    // Never the Ark endpoint — that runtime never calls it.
+    expect(info.agentModel).toBeNull();
+    expect(info.arkModel).toBe("ep-test");
+  });
+
+  it("reports the model a claude-code run observed", async () => {
+    const service = await makeService(new FakeRunner("claude-opus-5[1m]"), undefined, {
+      AGENT_RUNTIME: "claude-code",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+    });
+    const agent = await service.createAgent({ name: "Builder" });
+    const { run } = await service.sendMessage(agent.id, "build something");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    const info = await service.systemInfo();
+    expect(info.agentModel).toBe("claude-opus-5[1m]");
+  });
+});
+
+// trace.model drives UsageBars on the trace detail page. Codex fills it from
+// the OTLP conversation_starts event; Claude Code has no such event, so
+// without the run-end handoff its traces showed no model at all.
+describe("trace model handoff", () => {
+  it("stamps a claude-code run's model onto its trace", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
+    temporaryDirectories.push(root);
+    const store = new TraceStore(path.join(root, "data", "traces"));
+    await store.initialize();
+    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const service = await makeService(new FakeRunner("claude-opus-5[1m]"), traces, {
+      AGENT_RUNTIME: "claude-code",
+      ANTHROPIC_API_KEY: "sk-ant-test",
+    });
+    const agent = await service.createAgent({ name: "Traced" });
+    const { run } = await service.sendMessage(agent.id, "write hello");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(store.get(run.id)?.model).toBe("claude-opus-5[1m]");
+  });
+
+  it("leaves a model the trace already resolved alone", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
+    temporaryDirectories.push(root);
+    const store = new TraceStore(path.join(root, "data", "traces"));
+    await store.initialize();
+    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const service = await makeService(new FakeRunner("late-model"), traces);
+    const agent = await service.createAgent({ name: "Traced" });
+    const { run } = await service.sendMessage(agent.id, "write hello");
+    // Stands in for Codex's authoritative conversation_starts value, which
+    // arrives mid-run and must win over anything reported at the end.
+    store.updateTrace(run.id, (trace) => {
+      trace.model = "ep-authoritative";
+    });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(store.get(run.id)?.model).toBe("ep-authoritative");
   });
 });

@@ -18,11 +18,47 @@ export function buildClaudeCodeArgs(request: {
   return args;
 }
 
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+// Builds the most specific failure description the event actually carries.
+// Verified against a live failing run (Claude Code 2.1.250): an auth failure
+// arrives as `subtype: "success"` with `is_error: true`, `terminal_reason:
+// "api_error"` and the message in `result` — so `subtype` alone is not a
+// reliable failure signal, and `result` is not the only place the reason
+// lives.
+function describeResultFailure(event: Record<string, unknown>): string {
+  const parts: string[] = [];
+  // `result`/`error` are human-readable messages; when one is present it says
+  // everything the machine codes would, so appending them is just noise.
+  const human = asNonEmptyString(event.result) ?? asNonEmptyString(event.error);
+  if (human) {
+    parts.push(human);
+  } else {
+    // Otherwise every code we have is worth keeping — each is a different
+    // slice of why it stopped.
+    const reason = asNonEmptyString(event.terminal_reason);
+    if (reason) parts.push(reason);
+    const subtype = asNonEmptyString(event.subtype);
+    if (subtype && subtype !== "success") parts.push("subtype=" + subtype);
+  }
+
+  const status = event.api_error_status;
+  if (typeof status === "number" || asNonEmptyString(status)) {
+    parts.push("api_error_status=" + String(status));
+  }
+
+  return parts.length > 0
+    ? parts.join(" · ")
+    : "Claude Code reported a failure with no error detail";
+}
+
 // Parses one line of `claude -p --output-format stream-json` stdout.
-// `session_id`, `type: "result"`, `subtype: "success"`, `result`, and
-// `usage.{input_tokens,output_tokens,cache_read_input_tokens}` all verified
-// against a live run. `subtype.startsWith("error")` and the error `result`
-// text are still unverified — no failing run was captured live.
+// `session_id`, `type: "result"`, `result`, `is_error`, `terminal_reason`,
+// the `system`/`api_retry` shape, and
+// `usage.{input_tokens,output_tokens,cache_read_input_tokens}` are all
+// verified against live successful and failing runs (2026-08-28).
 export function parseClaudeCodeEventLine(
   line: string,
   parsed: ParsedEvents,
@@ -41,16 +77,58 @@ export function parseClaudeCodeEventLine(
     parsed.threadId = event.session_id;
   }
 
-  if (event.type !== "result") return;
+  // The init event names the model this session actually runs on — Claude
+  // Code resolves it from the account, so it isn't knowable from config.
+  // Deliberately not read from api_request events: background calls (session
+  // titles) run on a different, smaller model, so those would intermittently
+  // report the wrong one.
+  if (event.type === "system" && event.subtype === "init") {
+    const model = asNonEmptyString(event.model);
+    if (model) parsed.model = model;
+  }
 
-  if (event.subtype === "success" && typeof event.result === "string") {
+  // Retries carry the clearest diagnostic Claude Code emits (HTTP status plus
+  // an error slug) and are the only signal at all when the process is killed
+  // before it ever produces a result event.
+  if (event.type === "system" && event.subtype === "api_retry") {
+    const reason = asNonEmptyString(event.error) ?? "request failed";
+    const status = event.error_status;
+    const attempt = event.attempt;
+    parsed.errors.push(
+      "Claude Code API retry" +
+        (typeof attempt === "number" ? " " + attempt : "") +
+        (typeof event.max_retries === "number" ? "/" + event.max_retries : "") +
+        ": " +
+        reason +
+        (typeof status === "number" ? " (HTTP " + status + ")" : ""),
+    );
+    return;
+  }
+
+  // Any event can carry the real reason — an auth failure surfaces as an
+  // `assistant` event with `error: "authentication_failed"` well before the
+  // result event, which may then report only a generic subtype. Capture it
+  // wherever it appears rather than guessing which event type owns it.
+  if (event.type !== "result") {
+    const embedded = asNonEmptyString(event.error);
+    if (embedded) {
+      const kind = asNonEmptyString(event.type) ?? "event";
+      parsed.errors.push(kind + " error: " + embedded);
+    }
+    return;
+  }
+
+  // `is_error` is authoritative; `subtype` is not. Checking subtype alone let
+  // an auth failure ("Not logged in · Please run /login") be recorded as the
+  // agent's successful reply.
+  const failed =
+    event.is_error === true ||
+    (typeof event.subtype === "string" && event.subtype.startsWith("error"));
+
+  if (failed) {
+    parsed.errors.push(describeResultFailure(event));
+  } else if (typeof event.result === "string") {
     parsed.messages.push(event.result);
-  } else if (typeof event.subtype === "string" && event.subtype.startsWith("error")) {
-    const message =
-      typeof event.result === "string"
-        ? event.result
-        : "Claude Code reported an unknown error";
-    parsed.errors.push(message);
   }
 
   if (event.usage && typeof event.usage === "object") {
@@ -164,7 +242,15 @@ export const claudeCodeRuntime: RuntimeDefinition = {
 
   processEnv: (config, collectorToken) => ({
     CLAUDE_CONFIG_DIR: config.claudeCodeHome,
-    ANTHROPIC_API_KEY: config.anthropicApiKey,
+    // Exactly one credential, never both: Claude Code ranks
+    // ANTHROPIC_API_KEY (a Console key, billed against Console credit)
+    // above CLAUDE_CODE_OAUTH_TOKEN (a subscription token from
+    // `claude setup-token`), and under headless `-p` an API key that is
+    // present is always used. Forwarding both — even with the key empty —
+    // would silently keep billing the Console balance.
+    ...(config.claudeCodeOauthToken
+      ? { CLAUDE_CODE_OAUTH_TOKEN: config.claudeCodeOauthToken }
+      : { ANTHROPIC_API_KEY: config.anthropicApiKey }),
     CLAUDE_CODE_ENABLE_TELEMETRY: "1",
     OTEL_LOGS_EXPORTER: "otlp",
     OTEL_METRICS_EXPORTER: "none",

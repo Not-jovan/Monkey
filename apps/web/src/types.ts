@@ -132,7 +132,11 @@ export interface SystemInfo {
   arkConfigured: boolean;
   arkBaseUrl: string;
   arkModel: string | null;
-  codexAvailable: boolean;
+  agentRuntime: "codex" | "claude-code";
+  // The model the Agent runtime itself runs on. Null until a Claude Code run
+  // has reported one; for Codex this is the configured Ark model.
+  agentModel: string | null;
+  runtimeAvailable: boolean;
   codexSandboxMode: string;
   runtimeProvider: "local-process" | "container";
   containerEngine: string | null;

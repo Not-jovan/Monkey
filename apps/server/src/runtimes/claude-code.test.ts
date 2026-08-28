@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { loadConfig, secretValues } from "../config.js";
 import { buildClaudeCodeArgs, claudeCodeRuntime, parseClaudeCodeEventLine } from "./claude-code.js";
 
 describe("Claude Code runtime protocol", () => {
@@ -34,6 +35,7 @@ describe("Claude Code runtime protocol", () => {
         outputTokens?: number;
       } | null,
       errors: [] as string[],
+      model: null as string | null,
     };
     parseClaudeCodeEventLine(
       JSON.stringify({ type: "system", subtype: "init", session_id: "session-123" }),
@@ -64,6 +66,7 @@ describe("Claude Code runtime protocol", () => {
       threadId: null as string | null,
       usage: null,
       errors: [] as string[],
+      model: null as string | null,
     };
     parseClaudeCodeEventLine(
       JSON.stringify({
@@ -74,6 +77,168 @@ describe("Claude Code runtime protocol", () => {
       parsed,
     );
     expect(parsed.errors).toEqual(["Hit the turn limit"]);
+  });
+
+  // Captured verbatim from a live failing run (Claude Code 2.1.250 in the
+  // Runtime container with no usable credential). The trap is that `subtype`
+  // says "success" while `is_error` says otherwise — keying off subtype alone
+  // recorded this auth failure as the agent's reply.
+  const liveAuthFailureResult = {
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    terminal_reason: "api_error",
+    api_error_status: null,
+    result: "Not logged in · Please run /login",
+    session_id: "326d362f-7087-4e8e-b313-c945ce0d68bb",
+    duration_ms: 104,
+  };
+
+  it("treats is_error as failure even when subtype says success", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(JSON.stringify(liveAuthFailureResult), parsed);
+
+    expect(parsed.errors).toEqual(["Not logged in · Please run /login"]);
+    // The critical part: the failure text must never be mistaken for output.
+    expect(parsed.messages).toEqual([]);
+  });
+
+  it("falls back through error and terminal_reason when result is absent", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(
+      JSON.stringify({
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "api_error",
+        api_error_status: 429,
+      }),
+      parsed,
+    );
+
+    expect(parsed.errors).toHaveLength(1);
+    expect(parsed.errors[0]).toContain("api_error");
+    expect(parsed.errors[0]).toContain("429");
+    expect(parsed.errors[0]).toContain("error_during_execution");
+  });
+
+  it("surfaces the bare subtype when it is the only thing reported", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(
+      JSON.stringify({ type: "result", subtype: "error_during_execution" }),
+      parsed,
+    );
+    // Still thin, but naming the subtype beats a generic "unknown error" —
+    // that generic string is what made the original failure undiagnosable.
+    expect(parsed.errors[0]).toBe("subtype=error_during_execution");
+  });
+
+  it("never reports an empty detail when a failure carries nothing at all", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(JSON.stringify({ type: "result", is_error: true }), parsed);
+    expect(parsed.errors[0]).toBe(
+      "Claude Code reported a failure with no error detail",
+    );
+  });
+
+  it("captures api_retry diagnostics, the only signal on a killed run", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(
+      JSON.stringify({
+        type: "system",
+        subtype: "api_retry",
+        attempt: 3,
+        max_retries: 10,
+        error_status: 401,
+        error: "authentication_failed",
+        session_id: "s-1",
+      }),
+      parsed,
+    );
+
+    expect(parsed.errors).toEqual([
+      "Claude Code API retry 3/10: authentication_failed (HTTP 401)",
+    ]);
+    expect(parsed.messages).toEqual([]);
+  });
+
+  // Claude Code resolves its model from the account, so config cannot know
+  // it; the init event is the only authoritative report of what the session
+  // actually runs on.
+  it("reads the session model from the init event", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(
+      JSON.stringify({
+        type: "system",
+        subtype: "init",
+        session_id: "s-1",
+        model: "claude-opus-5[1m]",
+        apiKeySource: "ANTHROPIC_API_KEY",
+      }),
+      parsed,
+    );
+    expect(parsed.model).toBe("claude-opus-5[1m]");
+  });
+
+  // Background work (session titles) runs on a smaller model, so taking the
+  // model off api_request events would intermittently report the wrong one.
+  it("ignores models named by any event other than init", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseClaudeCodeEventLine(
+      JSON.stringify({
+        type: "assistant",
+        model: "claude-haiku-4-5-20251001",
+        session_id: "s-1",
+      }),
+      parsed,
+    );
+    parseClaudeCodeEventLine(
+      JSON.stringify({ type: "result", subtype: "success", result: "done" }),
+      parsed,
+    );
+    expect(parsed.model).toBeNull();
   });
 });
 
@@ -199,5 +364,56 @@ describe("Claude Code trace normalization", () => {
 
   it("correlates on session.id, not conversation.id", () => {
     expect(claudeCodeRuntime.trace.correlationAttribute).toBe("session.id");
+  });
+});
+
+// Claude Code ranks ANTHROPIC_API_KEY above CLAUDE_CODE_OAUTH_TOKEN, and under
+// headless `-p` a present API key is always used. Forwarding both would
+// silently bill the Console credit balance instead of the subscription, so
+// exactly one must ever reach the process.
+describe("Claude Code credential selection", () => {
+  const baseEnv = {
+    NODE_ENV: "test",
+    AGENT_RUNTIME: "claude-code",
+    ARK_API_KEY: "ark-key",
+    ARK_MODEL: "ep-test",
+  } as const;
+
+  it("forwards the API key when only that is configured", () => {
+    const env = claudeCodeRuntime.processEnv(
+      loadConfig({ ...baseEnv, ANTHROPIC_API_KEY: "sk-ant-key" }),
+      "collector-token",
+    );
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-key");
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it("forwards the subscription token when only that is configured", () => {
+    const env = claudeCodeRuntime.processEnv(
+      loadConfig({ ...baseEnv, CLAUDE_CODE_OAUTH_TOKEN: "oauth-token" }),
+      "collector-token",
+    );
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-token");
+    expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+  });
+
+  it("omits the API key entirely when both are set, rather than emptying it", () => {
+    const env = claudeCodeRuntime.processEnv(
+      loadConfig({
+        ...baseEnv,
+        ANTHROPIC_API_KEY: "sk-ant-key",
+        CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
+      }),
+      "collector-token",
+    );
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("oauth-token");
+    // An empty-string ANTHROPIC_API_KEY still counts as "set" to the
+    // container --env passthrough, so the key must be absent, not blank.
+    expect(env).not.toHaveProperty("ANTHROPIC_API_KEY");
+  });
+
+  it("masks the subscription token wherever it appears", () => {
+    const config = loadConfig({ ...baseEnv, CLAUDE_CODE_OAUTH_TOKEN: "oauth-token" });
+    expect(secretValues(config)).toContain("oauth-token");
   });
 });

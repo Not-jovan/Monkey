@@ -94,6 +94,7 @@ describe("Codex runtime protocol", () => {
         outputTokens?: number;
       } | null,
       errors: [] as string[],
+      model: null as string | null,
     };
     parseCodexEventLine(
       JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
@@ -116,5 +117,8 @@ describe("Codex runtime protocol", () => {
     expect(parsed.threadId).toBe("thread-123");
     expect(parsed.messages).toEqual(["Done."]);
     expect(parsed.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
+    // Codex leaves the model to config and to the OTLP conversation_starts
+    // event; the stdout stream never sets it.
+    expect(parsed.model).toBeNull();
   });
 });

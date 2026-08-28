@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { RunCancelledError } from "./errors.js";
+import { RunCancelledError, runFailureDetail } from "./errors.js";
+import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
 import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 
@@ -59,6 +60,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
     }
 
     const args = this.runtime.buildArgs(request, request.workspacePath, this.config);
+    const transcript = new RunTranscript();
     const child = spawn(this.runtime.bin(this.config), args, {
       cwd: request.workspacePath,
       env: this.childEnvironment(),
@@ -83,6 +85,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
       threadId: request.threadId,
       usage: null,
       errors: [],
+      model: null,
     };
     let stdout = "";
     let stderr = "";
@@ -96,6 +99,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
+        transcript.recordStdout(chunk.toString("utf8"));
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
@@ -103,6 +107,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
           this.runtime.parseEventLine(line, parsed, request.onEvent);
         }
       } else {
+        transcript.recordStderr(chunk.toString("utf8"));
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) {
           stderr = stderr.slice(-16_384);
@@ -141,20 +146,41 @@ export class ProcessRuntimeRunner implements AgentRunner {
         );
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
+        const detail = runFailureDetail(parsed.errors, stderr);
         throw new Error(
           this.runtime.id + " exited with code " + exitCode + ": " + detail,
         );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
+        // A runtime can report a failure and still exit 0 (Claude Code sets
+        // is_error on the result event), so prefer the reported reason over
+        // the generic "no message" wording.
+        if (parsed.errors.length > 0) {
+          throw new Error(
+            this.runtime.id + " failed: " + runFailureDetail(parsed.errors, stderr),
+          );
+        }
         throw new Error(this.runtime.id + " completed without an agent message");
       }
       return {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
+        model: parsed.model,
       };
+    } catch (error) {
+      // A cancellation is a user action, not a fault worth a transcript.
+      if (!(error instanceof RunCancelledError)) {
+        await attachFailureTranscript(transcript, error, {
+          dataDirectory: this.config.dataDirectory,
+          runtimeId: this.runtime.id,
+          argv: [this.runtime.bin(this.config), ...args],
+          runId: request.runId,
+          redact: request.redact,
+        });
+      }
+      throw error;
     } finally {
       clearTimeout(timeout);
       if (active.forceKillTimer) clearTimeout(active.forceKillTimer);

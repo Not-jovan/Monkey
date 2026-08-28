@@ -7,6 +7,10 @@ export interface ParsedEvents {
   threadId: string | null;
   usage: RunUsage | null;
   errors: string[];
+  // The model the runtime reported for this session. Only runtimes that
+  // resolve their model at run time need to fill this in — Codex leaves it
+  // null because its model is known from config and from OTLP.
+  model: string | null;
 }
 
 // Everything that differs between Agent runtimes (Codex, Claude Code, ...).

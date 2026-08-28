@@ -66,6 +66,9 @@ export interface RunnerResult {
   output: string;
   threadId: string | null;
   usage: RunUsage | null;
+  // Null when the runtime never reported one (Codex, whose model comes from
+  // config and the OTLP trace instead).
+  model: string | null;
 }
 
 export interface RunnerRequest {
@@ -73,6 +76,12 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  // Names the failure transcript written when a run fails. Optional so tests
+  // and any caller that does not need post-mortem logs can omit it.
+  runId?: string | undefined;
+  // Applied to the transcript before it touches disk, so a debug artifact
+  // never becomes the one place a credential survives unmasked.
+  redact?: ((text: string) => string) | undefined;
   // Streams every parsed Codex JSONL event to the caller while the run is
   // still in flight (trace middleware binds thread ids through this).
   onEvent?: ((event: Record<string, unknown>) => void) | undefined;
