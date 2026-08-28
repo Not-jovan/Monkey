@@ -130,7 +130,7 @@ later audits.
 | `GET /api/agents/:id/traces` | Trace list rows with warning counts. |
 | `GET /api/agents/:id/intent` | Current objective, standing constraints, version map, and current intentId. |
 | `GET /api/traces/:id` | One trace with its audits and derived findings. |
-| `GET /api/traces/:id/export` | The same payload as a download. |
+| `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
 
 Everything under `/api` is covered by the operator bearer token when
 `APP_AUTH_TOKEN` is set. The collector route is not, and uses its own per-boot

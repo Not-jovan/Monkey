@@ -123,5 +123,4 @@ export function registerGlassboxRoutes(
   };
 
   app.get("/api/traces/:id/download", downloadTrace);
-  app.get("/api/traces/:id/export", downloadTrace);
 }

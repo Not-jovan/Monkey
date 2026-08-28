@@ -178,13 +178,6 @@ describe("Glassbox routes", () => {
     });
     expect(missing.statusCode).toBe(404);
 
-    const exported = await app.inject({
-      method: "GET",
-      url: "/api/traces/" + RUN_ID + "/export",
-    });
-    expect(exported.statusCode).toBe(200);
-    expect(exported.headers["content-disposition"]).toContain("trace-" + RUN_ID);
-
     const downloaded = await app.inject({
       method: "GET",
       url: "/api/traces/" + RUN_ID + "/download",

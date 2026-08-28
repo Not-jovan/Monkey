@@ -131,14 +131,4 @@ export const api = {
       auditComplete: boolean;
       intentId: string | null;
     }>("/api/traces/" + id + "/download"),
-  exportTrace: (id: string) =>
-    request<{
-      exportedAt: string;
-      trace: TraceRecord;
-      findings: AuditTraceStep[];
-      auditComplete: boolean;
-      intentId: string | null;
-    }>(
-      "/api/traces/" + id + "/export",
-    ),
 };
