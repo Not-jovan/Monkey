@@ -1207,14 +1207,19 @@ textarea:focus {
   cursor: default;
 }
 
-.trace-status {
+.trace-status,
+.warning-badge {
   display: inline-block;
   padding: 3px 10px;
   border-radius: 999px;
   font-size: 0.74rem;
   font-weight: 600;
-  text-transform: capitalize;
   border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.trace-status {
+  text-transform: capitalize;
   color: var(--muted);
 }
 
@@ -1244,22 +1249,9 @@ textarea:focus {
 }
 
 .warning-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
   color: #8a4b06;
   background: #fdf0dd;
-  border: 1px solid #eccf9e;
-  border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 0.74rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.warning-badge-large {
-  font-size: 0.85rem;
-  padding: 5px 12px;
+  border-color: #eccf9e;
 }
 
 .muted-cell {
@@ -1727,7 +1719,6 @@ textarea:focus {
 }
 
 .text-block-action:focus-visible,
-.finding-link:focus-visible,
 .view-toggle button:focus-visible {
   outline: 2px solid var(--purple, #6954d9);
   outline-offset: 2px;
@@ -1751,8 +1742,7 @@ textarea:focus {
   background: #eeede8;
 }
 
-.trace-intent,
-.trace-findings {
+.trace-intent {
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -1762,8 +1752,7 @@ textarea:focus {
   gap: 6px;
 }
 
-.trace-intent h3,
-.trace-findings h3 {
+.trace-intent h3 {
   margin: 6px 0 0;
 }
 
@@ -1772,8 +1761,7 @@ textarea:focus {
   font-size: 0.95rem;
 }
 
-.trace-intent-list,
-.trace-findings-list {
+.trace-intent-list {
   margin: 0;
   padding-left: 18px;
   display: flex;
@@ -1796,7 +1784,6 @@ textarea:focus {
 
 .finding-type {
   display: inline-block;
-  min-width: 4.5em;
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1805,23 +1792,36 @@ textarea:focus {
 .finding-type-warning { color: #d97706; }
 .finding-type-error { color: #c55353; }
 
-/* A finding is a jump target: it must be reachable by keyboard, so it is a
-   button rather than a styled span. */
-.finding-link {
-  border: 0;
-  background: none;
-  padding: 0;
-  font: inherit;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-  text-decoration: underline;
-  text-decoration-color: var(--line);
-  text-underline-offset: 3px;
+.findings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
 }
 
-.finding-link:hover {
-  text-decoration-color: currentColor;
+.findings-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 6px 10px 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.findings-table td {
+  padding: 8px 10px 8px 0;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+}
+
+.findings-table tr:last-child td {
+  border-bottom: none;
+}
+
+.findings-table td:last-child,
+.findings-table th:last-child {
+  padding-right: 0;
 }
 
 .failure-block {

@@ -7,7 +7,7 @@ import { formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { stepHeadline } from "./steps";
 import { TraceCanvas } from "./TraceCanvas";
-import { FindingsSummary, SpanFindings, TraceIntent } from "./TraceIntent";
+import { SpanFindings, TraceIntent } from "./TraceIntent";
 import { parseCodexFailure, readCommand } from "./codex-error";
 import { FailureBlock } from "./FailureBlock";
 import { TextBlock } from "./TextBlock";
@@ -286,10 +286,6 @@ export function TraceDetailPage() {
           trace={trace}
           intentId={detailQuery.data?.intentId ?? null}
         />
-      )}
-
-      {trace && (
-        <FindingsSummary findings={findings} onSelect={setSelectedSpanId} />
       )}
 
       {trace && (

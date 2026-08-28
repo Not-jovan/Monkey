@@ -46,73 +46,11 @@ export function TraceIntent({
   );
 }
 
-function FindingList({
-  findings,
-  onSelect,
-}: {
-  findings: AuditTraceStep[];
-  onSelect?: (spanId: string) => void;
-}) {
-  return (
-    <ul className="trace-findings-list">
-      {findings.map((finding) => {
-        const spanId = finding.spanId;
-        return (
-          <li key={finding.id}>
-            <span className={"finding-type finding-type-" + finding.type}>
-              {finding.type}
-            </span>
-            {onSelect && spanId ? (
-              <button
-                type="button"
-                className="finding-link"
-                onClick={() => onSelect(spanId)}
-              >
-                {finding.finding}
-              </button>
-            ) : (
-              <span>{finding.finding}</span>
-            )}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-// Grouped so the two questions the auditor answers — did it follow the intent,
-// was it safe — read separately.
-export function FindingsSummary({
-  findings,
-  onSelect,
-}: {
-  findings: AuditTraceStep[];
-  onSelect: (spanId: string) => void;
-}) {
-  if (findings.length === 0) return null;
-
-  const groups: { key: AuditTraceStep["category"]; title: string }[] = [
-    { key: "intent-check", title: "Intent" },
-    { key: "security", title: "Security" },
-  ];
-
-  return (
-    <section className="trace-findings" aria-labelledby="trace-findings-heading">
-      <h2 className="eyebrow" id="trace-findings-heading">
-        Findings ({findings.length})
-      </h2>
-      {groups.map((group) => {
-        const rows = findings.filter((finding) => finding.category === group.key);
-        if (rows.length === 0) return null;
-        return (
-          <div key={group.key}>
-            <h3 className="eyebrow">{group.title}</h3>
-            <FindingList findings={rows} onSelect={onSelect} />
-          </div>
-        );
-      })}
-    </section>
-  );
+function findingTypeLabel(category: AuditTraceStep["category"]) {
+  if (category === "intent-check") return "Intent";
+  if (category === "security") return "Security";
+  const _exhaustive: never = category;
+  return _exhaustive;
 }
 
 export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
@@ -120,7 +58,28 @@ export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
   return (
     <div className="span-audits">
       <span className="eyebrow">Findings</span>
-      <FindingList findings={findings} />
+      <table className="findings-table">
+        <thead>
+          <tr>
+            <th>Severity</th>
+            <th>Type</th>
+            <th>Finding</th>
+          </tr>
+        </thead>
+        <tbody>
+          {findings.map((finding) => (
+            <tr key={finding.id}>
+              <td>
+                <span className={"finding-type finding-type-" + finding.type}>
+                  {finding.type}
+                </span>
+              </td>
+              <td>{findingTypeLabel(finding.category)}</td>
+              <td>{finding.finding}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
