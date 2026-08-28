@@ -31,6 +31,12 @@ Volcengine ECS.
 - Disposable Docker, Colima, or Podman container for each local turn
 - Glass Box trace and audit middleware: per-step spans, secret masking,
   intent-alignment and network-policy checks
+- Failure attribution that says whether a failed Run is the Agent's fault, with
+  a remedy and a link from the failing step to the model call that planned it
+- A versioned intent timeline showing what changed the Agent's specification,
+  when, and why — with one-click revert
+- Prior-run context carried between Runs on the same session, established from
+  the trace itself so it survives an unavailable audit model
 - Docker and Terraform deployment paths for Volcengine ECS
 
 ## Requirements

@@ -11,6 +11,8 @@ import {
   secretValues,
   writeCodexConfig,
 } from "./config.js";
+import { ContextService } from "./context/context-service.js";
+import { ContextStore } from "./context/context-store.js";
 import { IntentService } from "./intent/intent-service.js";
 import { IntentStore } from "./intent/intent-store.js";
 import { createRunner } from "./runner-factory.js";
@@ -37,6 +39,10 @@ const auditStore = new AuditStore(path.join(config.dataDirectory, "audits"));
 await auditStore.initialize();
 const intentStore = new IntentStore(path.join(config.dataDirectory, "intent"));
 await intentStore.initialize();
+const contextStore = new ContextStore(
+  path.join(config.dataDirectory, "context"),
+);
+await contextStore.initialize();
 
 const arkClient = createArkClient(config);
 const auditingAvailable = config.auditEnabled && isArkConfigured(config);
@@ -48,9 +54,18 @@ const intentService = new IntentService({
   enabled: auditingAvailable,
   log: (message, error) => console.error(message, error),
 });
+// Started before the auditor so a run's own context record exists by the time
+// the run-level audit looks for what came before it.
+const contextService = new ContextService({
+  traceStore,
+  store: contextStore,
+});
+contextService.start();
+
 const auditService = new AuditService({
   traceStore,
   auditStore,
+  context: contextStore,
   client: arkClient,
   securityModel: config.auditSecurityModel,
   intentModel: config.auditIntentModel,
@@ -75,6 +90,7 @@ const app = await createApp(config, service, {
   auditStore,
   traceService,
   intentService,
+  contextService,
   collectorToken,
 });
 
@@ -84,6 +100,7 @@ const shutdown = async (signal: string) => {
   await traceStore.flush();
   await auditStore.flush();
   await intentStore.flush();
+  await contextStore.flush();
   process.exit(0);
 };
 

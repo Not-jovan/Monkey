@@ -36,6 +36,9 @@ function trace(spans: TraceSpan[]): TraceRecord {
     model: null,
     usage: emptyUsage(),
     failingSpanId: null,
+    failure: null,
+    recoveredErrorCount: 0,
+    evidenceComplete: true,
     unrecognizedEvents: 0,
     spans,
   };

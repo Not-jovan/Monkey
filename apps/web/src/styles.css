@@ -2095,3 +2095,359 @@ textarea:focus {
     grid-template-columns: 64px minmax(0, 1fr);
   }
 }
+/* --- Failure attribution -------------------------------------------------
+   Colour carries the one distinction that decides what a reader does next:
+   whether the agent is at fault. Never the only cue — every chip also says its
+   layer in words, and the blame note spells it out underneath. */
+
+.failure-summary {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--red);
+  border-radius: 16px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.failure-summary.failure-blame-environment {
+  border-left-color: #b8860b;
+}
+
+.failure-summary h2 {
+  margin: 0;
+  font-size: 1.02rem;
+}
+
+.failure-summary-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.failure-layer,
+.failure-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: #fbefed;
+  color: #9e4545;
+  border: 1px solid #f0d8d4;
+  white-space: nowrap;
+}
+
+.failure-blame-environment .failure-layer,
+.failure-chip.failure-blame-environment {
+  background: #fdf6e3;
+  color: #8a6a12;
+  border-color: #eadfbe;
+}
+
+.failure-retry,
+.failure-partial {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.failure-partial {
+  color: #8a6a12;
+  border: 1px dashed #eadfbe;
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.failure-attribution {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.failure-remedy {
+  margin: 0;
+  font-size: 0.86rem;
+}
+
+.failure-jumps {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.failure-raw,
+.failure-raw-view pre {
+  margin: 0;
+  background: #fbfaf7;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.failure-raw-note {
+  margin: 0 0 6px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.audit-health-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.recovered-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #fdf6e3;
+  border: 1px solid #eadfbe;
+  color: #8a6a12;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+
+.run-error-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.run-error-blame {
+  opacity: 0.85;
+}
+
+.run-error .button {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+
+/* --- Prior context ------------------------------------------------------- */
+
+.trace-context {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.trace-context-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.trace-context-head h2 {
+  margin: 0;
+}
+
+.context-links {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.context-panels {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.context-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-panel-head h3 {
+  margin: 0;
+}
+
+.context-summary {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+/* Provenance is stated because a derived digest and a model summary are not
+   the same kind of claim, and a reader acting on one should know which. */
+.context-source {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 0.7rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.context-source-model {
+  background: var(--purple-soft);
+  border-color: #ddd7fb;
+  color: var(--purple-dark);
+}
+
+/* --- Intent history ------------------------------------------------------
+   Reuses the shape of the old proposal card. Added and removed constraints
+   carry a +/− sign as well as colour, so the diff still reads without it. */
+
+.intent-version {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--purple-soft);
+  color: var(--purple-dark);
+  font-size: 0.7rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.intent-history-toggle {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-size: 12px;
+  color: var(--purple-dark);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.intent-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.intent-change {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, var(--line));
+  border-left: 3px solid var(--line);
+  border-radius: 10px;
+}
+
+.intent-change.is-current {
+  border-left-color: var(--purple);
+}
+
+.intent-change-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
+.intent-change-head .button {
+  margin-left: auto;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+
+.intent-current-flag {
+  margin-left: auto;
+  font-size: 0.7rem;
+  color: var(--purple-dark);
+}
+
+.intent-change-trigger,
+.intent-change-objective {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.intent-change-list {
+  margin: 2px 0 0;
+  padding-left: 4px;
+  list-style: none;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.intent-added {
+  color: var(--green);
+}
+
+.intent-removed {
+  color: var(--red);
+  text-decoration: line-through;
+}
+
+.intent-change-error {
+  margin: 0;
+  font-size: 12px;
+  color: var(--red);
+}
+
+.trace-intent-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* The acknowledgement that a message rewrote the rules the agent is judged
+   against. Without it the change happened silently. */
+.message-spec-change {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--purple-soft);
+  color: var(--purple-dark);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* A run that absorbed a denial and carried on. Muted rather than red: nothing
+   failed in the end, but something was worth noticing and used to be silent. */
+.failure-summary.failure-recovered {
+  border-left-color: var(--muted);
+}
+
+.failure-outcome {
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px dashed var(--line);
+  font-size: 0.72rem;
+  color: var(--muted);
+  white-space: nowrap;
+}

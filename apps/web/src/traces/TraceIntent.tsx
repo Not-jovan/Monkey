@@ -15,22 +15,36 @@ export function TraceIntent({
     staleTime: 30_000,
   });
 
-  let intent: IntentState | undefined = intentQuery.data?.intent;
-  if (intentId) {
-    const pinned = intentQuery.data?.versions[intentId];
-    if (pinned) {
-      intent = pinned;
-    }
-  }
+  const versions = intentQuery.data?.versions ?? [];
+  const pinnedIndex = intentId
+    ? versions.findIndex((entry) => entry.id === intentId)
+    : -1;
+  const pinned = pinnedIndex >= 0 ? versions[pinnedIndex] : undefined;
+  const intent: IntentState | undefined = pinned ?? intentQuery.data?.intent;
   if (!intent || (intent.objective.length === 0 && intent.extended.length === 0)) {
     return null;
   }
+  const isStale = pinnedIndex >= 0 && pinnedIndex < versions.length - 1;
 
   return (
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
-      <h2 className="eyebrow" id="trace-intent-heading">
-        Spec in force
-      </h2>
+      <div className="trace-intent-head">
+        <h2 className="eyebrow" id="trace-intent-heading">
+          Spec in force
+        </h2>
+        {pinnedIndex >= 0 && (
+          <span className="intent-version">
+            v{pinnedIndex + 1} of {versions.length}
+          </span>
+        )}
+        {/* Classification runs after the message is sent, so a run can be
+            judged against the version that preceded its own correction. */}
+        {isStale && (
+          <span className="muted-cell">
+            The spec has moved on since this run
+          </span>
+        )}
+      </div>
       <p className="trace-intent-objective">{intent.objective || "(no objective stated)"}</p>
       {intent.extended.length > 0 && (
         <>
@@ -46,9 +60,15 @@ export function TraceIntent({
   );
 }
 
+// The exhaustiveness check below is deliberate: adding a category without
+// giving it a label here is a compile error rather than a blank table cell.
 function findingTypeLabel(category: AuditTraceStep["category"]) {
   if (category === "intent-check") return "Intent";
   if (category === "security") return "Security";
+  if (category === "reliability") return "Reliability";
+  // A claim about the auditor rather than about the agent. It is filtered out
+  // before it reaches this table, but the union still has to be covered.
+  if (category === "audit-health") return "Audit";
   const _exhaustive: never = category;
   return _exhaustive;
 }

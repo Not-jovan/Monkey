@@ -97,6 +97,7 @@ export async function createApp(
     const { id } = agentIdParams.parse(request.params);
     const result = await service.deleteAgent(id);
     glassbox?.intentService?.forget(id);
+    glassbox?.contextService?.forget(id);
     return result;
   });
 

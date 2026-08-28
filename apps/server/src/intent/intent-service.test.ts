@@ -139,7 +139,7 @@ describe("IntentService", () => {
     });
     const view = service.view(AGENT);
     expect(view.intentId).toBeTruthy();
-    expect(view.versions[view.intentId ?? ""]?.update).toBeUndefined();
+    expect(view.versions.at(-1)?.update).toBeUndefined();
   });
 
   it("uses the first message as the objective when there are no instructions", async () => {
@@ -155,7 +155,7 @@ describe("IntentService", () => {
       "Build a todo list web application",
     );
     expect(calls).toHaveLength(0);
-    expect(service.view(AGENT).versions[service.currentId(AGENT)]?.update).toBeUndefined();
+    expect(service.view(AGENT).versions.at(-1)?.update).toBeUndefined();
   });
 
   it("leaves the specification alone on NO_CHANGE", async () => {
@@ -171,7 +171,7 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).extended).toEqual([]);
-    expect(Object.keys(service.view(AGENT).versions)).toHaveLength(1);
+    expect(service.view(AGENT).versions).toHaveLength(1);
   });
 
   it("appends a new version with logs when the classifier updates the spec", async () => {
@@ -188,13 +188,24 @@ describe("IntentService", () => {
     await service.idle();
     expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
     const view = service.view(AGENT);
-    expect(Object.keys(view.versions)).toHaveLength(2);
-    const latest = view.intentId ? view.versions[view.intentId] : undefined;
+    expect(view.versions).toHaveLength(2);
+    const latest = view.versions.at(-1);
+    expect(latest?.id).toBe(view.intentId);
     expect(latest?.update?.logs).toContain("Do not read from .env files.");
     expect(latest?.update?.logs).toContain("prohibition");
     expect(latest?.update?.logs).toContain(
       "Added constraint: Do not read .env files.",
     );
+    // The structured form the timeline reads, rather than the prose in logs.
+    expect(latest?.update?.kind).toBe("classified");
+    expect(latest?.update?.addedConstraints).toEqual([
+      "Do not read .env files.",
+    ]);
+    expect(latest?.update?.message).toBe("Do not read from .env files.");
+    // The trace id was already being handed to observe() and dropped; carrying
+    // it is what lets the Playground mark the message that moved the spec.
+    expect(latest?.update?.traceId).toBe("trace-1");
+    expect(latest?.createdAt).toBeTruthy();
   });
 
   it("does not add the same constraint twice", async () => {
@@ -216,7 +227,7 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
-    expect(Object.keys(service.view(AGENT).versions)).toHaveLength(2);
+    expect(service.view(AGENT).versions).toHaveLength(2);
   });
 
   it("replaces the objective on a full pivot and keeps the previous version", async () => {
@@ -234,11 +245,14 @@ describe("IntentService", () => {
     await service.idle();
     expect(service.state(AGENT).objective).toBe("Build a calendar application");
     const view = service.view(AGENT);
-    expect(view.versions[seedId]?.objective).toBe(OBJECTIVE);
-    const latest = view.intentId ? view.versions[view.intentId] : undefined;
+    expect(view.versions.find((entry) => entry.id === seedId)?.objective).toBe(
+      OBJECTIVE,
+    );
+    const latest = view.versions.at(-1);
     expect(latest?.update?.logs).toContain(
       "Objective changed from " + OBJECTIVE + " to Build a calendar application",
     );
+    expect(latest?.update?.previousObjective).toBe(OBJECTIVE);
   });
 
   it("never throws when the classifier gives up", async () => {
@@ -281,14 +295,57 @@ describe("IntentService", () => {
 
     const reopened = new IntentStore(path.join(directory, "intent"));
     await reopened.initialize();
-    const loaded = reopened.get(AGENT);
-    expect(loaded).not.toBeNull();
-    if (!loaded) return;
+    const loaded = reopened.list(AGENT);
+    expect(loaded).toHaveLength(2);
     expect(reopened.latest(AGENT)?.intentId).toBe(updateId);
     expect(reopened.latest(AGENT)?.version.extended).toEqual([
       "Use TypeScript everywhere.",
     ]);
     expect(reopened.latest(AGENT)?.version.objective).toBe(OBJECTIVE);
-    expect([...loaded.keys()]).toEqual([seedId, updateId]);
+    expect(loaded.map((entry) => entry.id)).toEqual([seedId, updateId]);
+  });
+
+  // Revert appends rather than rewinding. Anything else would strand every
+  // audit that pinned the version being reverted away from.
+  it("reverts by appending a version that restores an earlier one", async () => {
+    const { store } = await makeStore();
+    const { service } = makeService(store, [
+      '{"classification":"INTENT_UPDATE","reason":"rule","extendedIntent":["Use HTML, not Markdown."]}',
+    ]);
+    service.seed(AGENT, OBJECTIVE);
+    const seedId = service.currentId(AGENT);
+    service.observe(AGENT, OBJECTIVE, {
+      content: "From now on, use HTML instead of Markdown.",
+      messageId: "msg-1",
+      traceId: "trace-1",
+    });
+    await service.idle();
+    const updatedId = service.currentId(AGENT);
+    expect(service.state(AGENT).extended).toEqual(["Use HTML, not Markdown."]);
+
+    const { created, view } = service.revert(AGENT, seedId);
+    expect(created).toBeTruthy();
+    expect(view.versions).toHaveLength(3);
+    expect(service.state(AGENT).extended).toEqual([]);
+
+    const reverted = view.versions.at(-1);
+    expect(reverted?.update?.kind).toBe("revert");
+    expect(reverted?.update?.revertedFrom).toBe(seedId);
+
+    // Both superseded versions stay readable, which is what keeps an older
+    // trace's "spec in force" resolvable.
+    expect(view.versions.find((entry) => entry.id === seedId)).toBeTruthy();
+    expect(
+      view.versions.find((entry) => entry.id === updatedId)?.extended,
+    ).toEqual(["Use HTML, not Markdown."]);
+  });
+
+  it("refuses to revert to the version already in force, or to an unknown one", () => {
+    return makeStore().then(async ({ store }) => {
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+      expect(service.revert(AGENT, service.currentId(AGENT)).created).toBeNull();
+      expect(service.revert(AGENT, "not-a-version").created).toBeNull();
+    });
   });
 });

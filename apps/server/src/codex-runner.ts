@@ -3,6 +3,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
+import {
+  classifyRunFailure,
+  noAgentMessageFailure,
+  RunFailureError,
+} from "./failures.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -39,6 +44,49 @@ export function buildCodexArgs(
     args.push(request.prompt);
   }
   return args;
+}
+
+// Codex reports its own failures on the event stream, and those are far more
+// specific than stderr. Falls through to stderr, then to an explicit placeholder
+// — the previous `errors.at(-1) ?? stderr.trim() ?? "No error detail"` could
+// never reach its last arm, because .trim() returns "" rather than nullish, so
+// an empty stderr produced a message that trailed off after the colon.
+export function errorEvidence(errors: string[], stderr: string): string {
+  const reported = errors.at(-1)?.trim();
+  if (reported) return reported;
+  const tail = stderr.trim();
+  if (tail) return tail;
+  return "The Runtime exited without reporting a reason.";
+}
+
+// What counts as Codex reporting a failure on its own event stream.
+//
+// Defined once and shared with the trace service. They previously disagreed —
+// this side collected only `error`, the trace side also counted `turn.failed` —
+// so the same run could report two different error counts, and the failure
+// classifier could miss the one event that said what actually went wrong.
+export function readStreamError(
+  event: Record<string, unknown>,
+): string | null {
+  if (event.type === "error") {
+    if (typeof event.message === "string" && event.message.length > 0) {
+      return event.message;
+    }
+    if (typeof event.error === "string" && event.error.length > 0) {
+      return event.error;
+    }
+    return "Codex reported an unknown error";
+  }
+  if (event.type === "turn.failed") {
+    const detail = event.error;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+    if (detail !== null && typeof detail === "object" && "message" in detail) {
+      const message = (detail as { message?: unknown }).message;
+      if (typeof message === "string" && message.length > 0) return message;
+    }
+    return "The Codex turn failed";
+  }
+  return null;
 }
 
 export function parseCodexEventLine(
@@ -81,14 +129,9 @@ export function parseCodexEventLine(
     };
   }
 
-  if (event.type === "error") {
-    const message =
-      typeof event.message === "string"
-        ? event.message
-        : typeof event.error === "string"
-          ? event.error
-          : "Codex reported an unknown error";
-    parsed.errors.push(message);
+  const streamError = readStreamError(event);
+  if (streamError !== null) {
+    parsed.errors.push(streamError);
   }
 }
 
@@ -198,7 +241,13 @@ export class CodexRunner implements AgentRunner {
 
     try {
       const exitCode = await new Promise<number>((resolve, reject) => {
-        child.once("error", reject);
+        child.once("error", (error: Error) =>
+          reject(
+            new RunFailureError(
+              classifyRunFailure(error.message, { spawnFailed: true }),
+            ),
+          ),
+        );
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
@@ -208,18 +257,34 @@ export class CodexRunner implements AgentRunner {
         throw new RunCancelledError();
       }
       if (active.timedOut) {
-        throw new Error("Codex timed out after " + this.config.codexTimeoutMs + " ms");
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            timedOut: true,
+            timeoutMs: this.config.codexTimeoutMs,
+            exitCode,
+          }),
+        );
       }
       if (active.outputExceeded) {
-        throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            outputExceeded: true,
+            maxOutputBytes: this.config.codexMaxOutputBytes,
+            exitCode,
+          }),
+        );
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
-        throw new Error("Codex exited with code " + exitCode + ": " + detail);
+        throw new RunFailureError(
+          classifyRunFailure(errorEvidence(parsed.errors, stderr), {
+            exitCode,
+            source: "process-exit",
+          }),
+        );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
-        throw new Error("Codex completed without an agent message");
+        throw new RunFailureError(noAgentMessageFailure());
       }
       return {
         output,

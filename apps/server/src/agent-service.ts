@@ -2,6 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { AppConfig } from "./config.js";
 import { isArkConfigured } from "./config.js";
 import { HttpError, RunCancelledError } from "./errors.js";
+import {
+  classifyRunFailure,
+  RunFailureError,
+  type RunFailure,
+} from "./failures.js";
 import { JsonStore } from "./store.js";
 import type { TraceService } from "./traces/trace-service.js";
 import type {
@@ -30,6 +35,19 @@ export class AgentService {
 
   private redact(text: string): string {
     return this.traces?.redactText(text) ?? text;
+  }
+
+  // Attribution before presentation. A sandbox denial, an unactivated Ark model
+  // and a broken shell command all end a run, but only the last one says the
+  // agent is what needs improving — so the layer is decided here rather than
+  // left for a reader to infer from prose.
+  private attribute(error: unknown, cancelled: boolean): RunFailure {
+    const raw = error instanceof Error ? error.message : String(error);
+    const failure =
+      error instanceof RunFailureError
+        ? error.failure
+        : classifyRunFailure(raw, { cancelled });
+    return { ...failure, detail: this.redact(failure.detail) };
   }
 
   async initialize(): Promise<void> {
@@ -190,6 +208,7 @@ export class AgentService {
       prompt: redactedPrompt,
       output: null,
       error: null,
+      failure: null,
       usage: null,
       startedAt: null,
       completedAt: null,
@@ -309,6 +328,7 @@ export class AgentService {
     } catch (error) {
       const completedAt = now();
       const cancelled = error instanceof RunCancelledError;
+      const failure = this.attribute(error, cancelled);
       const message = this.redact(
         error instanceof Error ? error.message : String(error),
       );
@@ -320,6 +340,7 @@ export class AgentService {
         if (storedRun) {
           storedRun.status = cancelled ? "cancelled" : "failed";
           storedRun.error = message;
+          storedRun.failure = failure;
           storedRun.completedAt = completedAt;
         }
         if (agent) {
@@ -333,6 +354,7 @@ export class AgentService {
       this.traces?.onRunEnd(run.id, {
         status: cancelled ? "cancelled" : "failed",
         error: message,
+        failure,
       });
     }
   }

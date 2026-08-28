@@ -1,3 +1,4 @@
+import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import { classifySecretValue, detectSecretBindings } from "../traces/secrets.js";
 import { hostOf, type StepActivity } from "./step-activity.js";
 
@@ -128,6 +129,63 @@ export function checkSecretExposure(activity: StepActivity): SecretExposure[] {
     exposures.push({ location, secretType, hint: "******" });
   }
   return exposures;
+}
+
+export interface RepeatedFailure {
+  toolName: string;
+  attempt: string;
+  count: number;
+}
+
+// A NUL can occur in neither a tool name nor JSON arguments, so splitting the
+// signature on it is unambiguous.
+const SIGNATURE_SEPARATOR = "\u0000";
+
+// What was attempted, normalised, so the same command retried under a new call
+// id is recognised as the same attempt.
+function attemptSignature(span: TraceSpan): string | null {
+  if (span.kind !== "tool_call" || span.status !== "error") return null;
+  const toolName =
+    typeof span.attributes.toolName === "string"
+      ? span.attributes.toolName
+      : span.name.startsWith("tool.")
+        ? span.name.slice("tool.".length)
+        : span.name;
+  const args =
+    typeof span.attributes.arguments === "string"
+      ? span.attributes.arguments
+      : "";
+  const normalized = args.split(/\s+/).join(" ").trim().slice(0, 400);
+  return toolName + SIGNATURE_SEPARATOR + normalized;
+}
+
+// An agent that retries a denied command four times has a defect that no model
+// is needed to see, and one that stays visible when Ark is unreachable. Kept
+// here beside the other checks for exactly that reason.
+export function findRepeatedFailures(
+  trace: TraceRecord,
+  threshold = 2,
+): RepeatedFailure[] {
+  const counts = new Map<string, { span: TraceSpan; count: number }>();
+  for (const span of trace.spans) {
+    const signature = attemptSignature(span);
+    if (signature === null) continue;
+    const existing = counts.get(signature);
+    if (existing) existing.count += 1;
+    else counts.set(signature, { span, count: 1 });
+  }
+
+  const repeated: RepeatedFailure[] = [];
+  for (const [signature, entry] of counts) {
+    if (entry.count < threshold) continue;
+    const [toolName = "", attempt = ""] = signature.split(SIGNATURE_SEPARATOR);
+    repeated.push({
+      toolName,
+      attempt: attempt.slice(0, 160),
+      count: entry.count,
+    });
+  }
+  return repeated.sort((left, right) => right.count - left.count);
 }
 
 export function runDeterministicChecks(

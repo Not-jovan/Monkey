@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { runFailureSchema } from "../failures.js";
 
 export const spanKindSchema = z.enum([
   "run",
@@ -62,6 +63,15 @@ export const traceRecordSchema = z.object({
   model: z.string().nullable(),
   usage: traceUsageSchema,
   failingSpanId: z.string().nullable(),
+  // Attribution for a failed run: which layer is at fault, and what to do.
+  // Defaulted so traces written before the taxonomy existed still parse.
+  failure: runFailureSchema.nullable().default(null),
+  // Errors the agent hit and then recovered from. A run that succeeded after
+  // five failures is a different quality signal from a clean one.
+  recoveredErrorCount: z.number().default(0),
+  // False once the output cap truncated the stream. A diagnosis must never
+  // silently rest on evidence the platform knows it discarded.
+  evidenceComplete: z.boolean().default(true),
   unrecognizedEvents: z.number(),
   spans: z.array(traceSpanSchema),
 });

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
-import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
+import { api, hasAuthToken, isApiErrorWithStatus, type TraceDetail } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
@@ -9,20 +9,18 @@ import { stepHeadline } from "./steps";
 import { TraceCanvas } from "./TraceCanvas";
 import { SpanFindings, TraceIntent } from "./TraceIntent";
 import { parseCodexFailure, readCommand } from "./codex-error";
+import { buildDiagnosis, recoveryNote } from "./failure";
 import { FailureBlock } from "./FailureBlock";
+import { FailureSummary } from "./FailureSummary";
 import { TextBlock } from "./TextBlock";
+import { TraceContext } from "./TraceContext";
 import { TraceStepList } from "./TraceStepList";
 import { TraceTimeline } from "./TraceTimeline";
 import { UsageBars } from "./UsageBars";
 import { spanUsage } from "./usage";
 
-type TraceDetail = {
-  trace: TraceRecord;
-  findings: AuditTraceStep[];
-  auditComplete: boolean;
-  intentId: string | null;
-};
-
+// TraceDetail now comes from the API client, so the response shape is declared
+// once: it carries auditHealth and the carried-in/out context as well.
 type StepView = "graph" | "list" | "timeline";
 
 function download(fileName: string, data: unknown) {
@@ -177,15 +175,24 @@ export function TraceDetailPage() {
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
 
+  // Findings about the agent only. An auditor that could not run is reported
+  // separately, because counting the two together made every model outage look
+  // like the agent had misbehaved.
+  const agentFindings = findings.filter(
+    (finding) => finding.category !== "audit-health",
+  );
   const warningsBySpan = new Map<string, number>();
-  for (const finding of findings) {
+  for (const finding of agentFindings) {
     if (!finding.spanId) continue;
     warningsBySpan.set(
       finding.spanId,
       (warningsBySpan.get(finding.spanId) ?? 0) + 1,
     );
   }
-  const warningCount = findings.length;
+  const warningCount = agentFindings.length;
+  const auditHealth = detailQuery.data?.auditHealth ?? "ok";
+  const diagnosis = trace ? buildDiagnosis(trace) : null;
+  const recovered = trace ? recoveryNote(trace) : null;
 
   const selectedSpan =
     trace?.spans.find((span) => span.id === selectedSpanId) ?? null;
@@ -275,11 +282,38 @@ export function TraceDetailPage() {
                 {warningCount} Warning{warningCount === 1 ? "" : "s"}
               </span>
             )}
+            {/* Kept visibly apart from the warning count: an auditor that could
+                not run is a limitation of the middleware, never a claim about
+                the agent. */}
+            {auditHealth !== "ok" && (
+              <span className="audit-health-badge">
+                audit {auditHealth}
+                <span className="sr-only">
+                  {" "}
+                  — a limitation of the auditor, not a finding about the agent
+                </span>
+              </span>
+            )}
+            {recovered && <span className="recovered-badge">↺ {recovered}</span>}
+            {!trace.evidenceComplete && (
+              <span
+                className="failure-partial"
+                title="The output cap truncated this run's stream, so some evidence was discarded"
+              >
+                partial evidence
+              </span>
+            )}
             <span className="trace-duration">{durationLabel}</span>
           </div>
           <UsageBars model={trace.model} usage={trace.usage} />
         </>
       )}
+
+      {diagnosis && (
+        <FailureSummary diagnosis={diagnosis} onSelect={setSelectedSpanId} />
+      )}
+
+      {trace && <TraceContext context={detailQuery.data?.context ?? null} />}
 
       {trace && (
         <TraceIntent

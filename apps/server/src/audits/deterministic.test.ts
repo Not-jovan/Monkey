@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import cases from "./__fixtures__/audit-cases.json" with { type: "json" };
-import { runDeterministicChecks } from "./deterministic.js";
+import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js";
+import { filesWrittenBy } from "./step-activity.js";
 import { activityFromDatasetCase, activityFromSpan } from "./step-activity.js";
 import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import { emptyUsage } from "../traces/trace-model.js";
@@ -149,6 +150,9 @@ const trace: TraceRecord = {
   model: null,
   usage: emptyUsage(),
   failingSpanId: null,
+  failure: null,
+  recoveredErrorCount: 0,
+  evidenceComplete: true,
   unrecognizedEvents: 0,
   spans: [],
 };
@@ -199,5 +203,110 @@ describe("activityFromSpan", () => {
     const activity = activityFromSpan(makeSpan({ toolName: "shell" }), trace);
     expect(activity.input).toBe("Fetch the repository metadata.");
     expect(activity.networkCalls).toEqual([]);
+  });
+});
+
+// Needs no model, so it keeps reporting when Ark is unreachable — the same
+// reason the whitelist and secret checks live here.
+// A shell command names the file it writes inside the command text, not in any
+// argument, so a run that created server.js with `cat > server.js` reported no
+// files touched at all — under-stating both the carry-forward digest and the
+// secret-exposure check, which reads file content.
+describe("filesWrittenBy", () => {
+  const paths = (command: string) =>
+    filesWrittenBy(command).map((file) => file.path);
+
+  it("sees the usual ways a command writes a file", () => {
+    expect(paths("echo hello > /etc/probe.txt")).toEqual(["/etc/probe.txt"]);
+    expect(paths("ls -la >> listing.txt")).toEqual(["listing.txt"]);
+    expect(paths("cat config | tee /tmp/copy.conf")).toEqual([
+      "/tmp/copy.conf",
+    ]);
+    expect(paths("touch .keep")).toEqual([".keep"]);
+  });
+
+  it("keeps heredoc content, so a secret written to disk is still visible", () => {
+    const command =
+      "cat > .env << 'EOF'\nARK_API_KEY=sk-not-a-real-key\nEOF";
+    const files = filesWrittenBy(command);
+    expect(files.map((file) => file.path)).toEqual([".env"]);
+    expect(files[0]?.content.join("\n")).toContain("ARK_API_KEY=");
+  });
+
+  // A redirection that is not a write must not be reported as one.
+  it("ignores descriptor redirection and /dev targets", () => {
+    expect(paths("node server.js 2>&1")).toEqual([]);
+    expect(paths("curl -s https://x.test > /dev/null")).toEqual([]);
+    expect(paths("grep foo bar.txt")).toEqual([]);
+    // The real write is still found alongside a descriptor redirect.
+    expect(paths("npm test > out.log 2>&1")).toEqual(["out.log"]);
+  });
+});
+
+describe("findRepeatedFailures", () => {
+  const failing = (
+    id: string,
+    args: string,
+    overrides: Partial<TraceSpan> = {},
+  ): TraceSpan => ({
+    ...makeSpan({ toolName: "exec_command", arguments: args }),
+    id,
+    status: "error",
+    error: "SandboxDenied",
+    ...overrides,
+  });
+
+  const withSpans = (spans: TraceSpan[]): TraceRecord => ({ ...trace, spans });
+
+  it("reports a command the agent kept retrying after it failed", () => {
+    const repeated = findRepeatedFailures(
+      withSpans([
+        failing("a", '{"cmd":"python -m http.server 8080"}'),
+        failing("b", '{"cmd":"python -m http.server 8080"}'),
+        failing("c", '{"cmd":"python -m http.server 8080"}'),
+      ]),
+    );
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0]?.count).toBe(3);
+    expect(repeated[0]?.toolName).toBe("exec_command");
+    expect(repeated[0]?.attempt).toContain("http.server 8080");
+  });
+
+  // Whitespace is normalised, so the same command reformatted is still the same
+  // attempt. A broken normaliser would silently stop matching anything.
+  it("sees through reformatting", () => {
+    const repeated = findRepeatedFailures(
+      withSpans([
+        failing("a", '{"cmd": "npm   run   build"}'),
+        failing("b", '{"cmd": "npm run build"}'),
+      ]),
+    );
+    expect(repeated).toHaveLength(1);
+    expect(repeated[0]?.count).toBe(2);
+  });
+
+  it("says nothing about a single failure, or about calls that succeeded", () => {
+    expect(
+      findRepeatedFailures(withSpans([failing("a", '{"cmd":"ls"}')])),
+    ).toEqual([]);
+    expect(
+      findRepeatedFailures(
+        withSpans([
+          { ...failing("a", '{"cmd":"ls"}'), status: "ok", error: null },
+          { ...failing("b", '{"cmd":"ls"}'), status: "ok", error: null },
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not merge different commands", () => {
+    expect(
+      findRepeatedFailures(
+        withSpans([
+          failing("a", '{"cmd":"ls /etc"}'),
+          failing("b", '{"cmd":"ls /tmp"}'),
+        ]),
+      ),
+    ).toEqual([]);
   });
 });
