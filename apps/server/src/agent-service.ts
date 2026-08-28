@@ -137,8 +137,8 @@ export class AgentService {
 
   async stopAgent(id: string): Promise<Agent> {
     this.getAgent(id);
-    // Record the intervention while the run is still active so the span lands
-    // inside the trace it interrupts.
+    // Record before cancel so an in-flight chat still has an active run to
+    // attach to. Idle stop falls through to that agent's latest chat.
     this.traces?.onUserIntervention(id, "terminate");
     await this.cancelExecution(id);
     return this.setStatus(id, "stopped");

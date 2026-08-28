@@ -165,8 +165,11 @@ export class AuditService {
   private shouldAuditStep(span: TraceSpan) {
     if (span.kind === "user_action" && span.name === "user.prompt") return true;
     // A subagent's reply is external content that can carry an injected
-    // objective, so it is audited like any other tool result.
-    if (span.kind === "system" && span.name === "subagent.result") return true;
+    // objective, so it is audited like any other tool result. A synthesized
+    // projection of exec_command output is already covered by that tool span.
+    if (span.kind === "system" && span.name === "subagent.result") {
+      return span.attributes.synthesized !== true;
+    }
     return span.kind === "tool_call" && span.status !== "running";
   }
 

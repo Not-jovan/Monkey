@@ -30,6 +30,12 @@ export class ArkApiError extends Error {
   }
 }
 
+function isAbortError(error: unknown) {
+  if (typeof error !== "object" || error === null) return false;
+  if (!("name" in error)) return false;
+  return error.name === "AbortError";
+}
+
 interface ArkClientConfig {
   arkBaseUrl: string;
   arkApiKey: string;
@@ -75,6 +81,13 @@ export function createArkClient(config: ArkClientConfig, timeoutMs = 60_000) {
       }
       const parsed = completionResponse.parse(body);
       return { content: parsed.choices[0]?.message.content ?? "" };
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new Error(
+          "Audit model timed out after " + timeoutMs / 1000 + "s",
+        );
+      }
+      throw error;
     } finally {
       clearTimeout(timer);
     }

@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import { JsonStore } from "./store.js";
+import { createRedactor } from "./traces/redaction.js";
+import { TraceService } from "./traces/trace-service.js";
+import { TraceStore } from "./traces/trace-store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 
@@ -35,7 +38,10 @@ afterEach(async () => {
   );
 });
 
-async function makeService(runner: AgentRunner = new FakeRunner()): Promise<AgentService> {
+async function makeService(
+  runner: AgentRunner = new FakeRunner(),
+  traces?: TraceService,
+): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
   const config = loadConfig({
@@ -51,6 +57,7 @@ async function makeService(runner: AgentRunner = new FakeRunner()): Promise<Agen
     new JsonStore(path.join(root, "data", "db.json")),
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
+    traces,
   );
   await service.initialize();
   return service;
@@ -129,5 +136,28 @@ describe("Agent lifecycle", () => {
 
     finish({ output: "done", threadId: "thread", usage: null });
     await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
+  it("writes a terminate span onto the chat being stopped", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
+    temporaryDirectories.push(root);
+    const store = new TraceStore(path.join(root, "data", "traces"));
+    await store.initialize();
+    const traces = new TraceService(store, createRedactor([]));
+    const service = await makeService(new FakeRunner(), traces);
+    const agent = await service.createAgent({ name: "Stoppable" });
+    const { run } = await service.sendMessage(agent.id, "write hello");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    await service.stopAgent(agent.id);
+
+    const trace = store.get(run.id);
+    expect(trace?.spans.some((span) => span.name === "user.intervention")).toBe(
+      true,
+    );
+    expect(
+      trace?.spans.find((span) => span.name === "user.intervention")?.attributes
+        .action,
+    ).toBe("terminate");
   });
 });

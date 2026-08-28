@@ -31,19 +31,37 @@ interface RunEndInput {
   output?: string | null;
 }
 
-interface RunState {
-  agentId: string;
-  rootSpanId: string;
-  promptSpanId: string;
-  prompt: string;
-  turnSpanId: string | null;
-  toolSpans: Map<string, string>;
+interface ConversationScope {
+  spawnSpanId: string | null;
   subagentStack: string[];
   modelCallsInTurn: number;
   toolsSinceLastModelCall: string[];
   lastToolOutput: string | null;
   lastModelCallSpanId: string | null;
+}
+
+interface RunState {
+  agentId: string;
+  rootSpanId: string;
+  promptSpanId: string;
+  prompt: string;
+  rootConversationId: string | null;
+  turnSpanId: string | null;
+  toolSpans: Map<string, string>;
+  scopes: Map<string, ConversationScope>;
+  conversationSpawn: Map<string, string>;
   completed: boolean;
+}
+
+function emptyConversationScope(spawnSpanId: string | null): ConversationScope {
+  return {
+    spawnSpanId,
+    subagentStack: spawnSpanId ? [spawnSpanId] : [],
+    modelCallsInTurn: 0,
+    toolsSinceLastModelCall: [],
+    lastToolOutput: null,
+    lastModelCallSpanId: null,
+  };
 }
 
 const OUTPUT_CLIP = 4_000;
@@ -72,33 +90,60 @@ function isSubagentTool(toolName: string) {
   return false;
 }
 
+function isSameThreadSubagentTool(toolName: string) {
+  return toolName.toLowerCase() === "task";
+}
+
 const subagentArgumentsSchema = z.object({
   subagent_type: z.string().min(1).optional(),
   subagentType: z.string().min(1).optional(),
   agent_type: z.string().min(1).optional(),
   task_name: z.string().min(1).optional(),
+  receiver_thread_ids: z.array(z.string()).optional(),
+  receiverThreadIds: z.array(z.string()).optional(),
+  thread_ids: z.array(z.string()).optional(),
+  thread_id: z.string().min(1).optional(),
+  threadId: z.string().min(1).optional(),
 });
 
-function readSubagentLabel(argumentsJson: string | undefined) {
+function parseSubagentArguments(argumentsJson: string | undefined) {
   if (!argumentsJson) return null;
   try {
     const parsed = subagentArgumentsSchema.safeParse(JSON.parse(argumentsJson));
     if (!parsed.success) return null;
-    return (
-      parsed.data.subagent_type ??
-      parsed.data.subagentType ??
-      parsed.data.agent_type ??
-      parsed.data.task_name ??
-      null
-    );
+    return parsed.data;
   } catch {
     return null;
   }
 }
 
-const subagentResultPayloadSchema = z.object({
-  timestamp: z.number().optional(),
-});
+function readSubagentLabel(argumentsJson: string | undefined) {
+  const parsed = parseSubagentArguments(argumentsJson);
+  if (!parsed) return null;
+  return (
+    parsed.subagent_type ??
+    parsed.subagentType ??
+    parsed.agent_type ??
+    parsed.task_name ??
+    null
+  );
+}
+
+function readChildThreadIds(
+  argumentsJson: string | undefined,
+  extra: string[] = [],
+) {
+  const parsed = parseSubagentArguments(argumentsJson);
+  const ids = [
+    ...extra,
+    ...(parsed?.receiver_thread_ids ?? []),
+    ...(parsed?.receiverThreadIds ?? []),
+    ...(parsed?.thread_ids ?? []),
+  ];
+  if (parsed?.thread_id) ids.push(parsed.thread_id);
+  if (parsed?.threadId) ids.push(parsed.threadId);
+  return [...new Set(ids.filter((id) => id.length > 0))];
+}
 
 const runnerCompletedItemSchema = z.object({
   type: z.string(),
@@ -110,44 +155,19 @@ const runnerCompletedItemSchema = z.object({
   receiver_thread_ids: z.array(z.string()).optional(),
 });
 
-function extractSimulatedSubagentResults(output: string) {
-  const results: {
-    index: string;
-    payload: string;
-    timestamp: number | null;
-  }[] = [];
-  for (const match of output.matchAll(/Agent-(\d+) returned:\s*(\{[^}]+\})/g)) {
-    let timestamp: number | null = null;
-    try {
-      const parsed = subagentResultPayloadSchema.safeParse(
-        JSON.parse(match[2]!),
-      );
-      if (parsed.success && parsed.data.timestamp !== undefined) {
-        timestamp = parsed.data.timestamp;
-      }
-    } catch {
-      // Ignore malformed payload fragments in tool output.
-    }
-    results.push({
-      index: match[1]!,
-      payload: match[2]!,
-      timestamp,
-    });
-  }
-  return results;
-}
-
-function modelCallLabel(state: RunState, attempt: number | undefined) {
-  const prefix = state.subagentStack.length > 0 ? "Subagent model" : "Model";
+function modelCallLabel(scope: ConversationScope, attempt: number | undefined) {
+  const nested =
+    scope.spawnSpanId !== null || scope.subagentStack.length > 0;
+  const prefix = nested ? "Subagent model" : "Model";
   let label: string;
-  if (state.toolsSinceLastModelCall.length === 0) {
+  if (scope.toolsSinceLastModelCall.length === 0) {
     label =
-      state.modelCallsInTurn === 0
+      scope.modelCallsInTurn === 0
         ? prefix + " · plan"
         : prefix + " · continue";
   } else {
     const lastTool =
-      state.toolsSinceLastModelCall[state.toolsSinceLastModelCall.length - 1]!;
+      scope.toolsSinceLastModelCall[scope.toolsSinceLastModelCall.length - 1]!;
     label = prefix + " · after " + lastTool;
   }
   if (attempt !== undefined && attempt > 0) {
@@ -264,13 +284,11 @@ export class TraceService {
       rootSpanId,
       promptSpanId,
       prompt,
+      rootConversationId: agent.codexThreadId,
       turnSpanId: null,
       toolSpans: new Map(),
-      subagentStack: [],
-      modelCallsInTurn: 0,
-      toolsSinceLastModelCall: [],
-      lastToolOutput: null,
-      lastModelCallSpanId: null,
+      scopes: new Map(),
+      conversationSpawn: new Map(),
       completed: false,
     });
     this.activeRunByAgent.set(agent.id, run.id);
@@ -285,6 +303,8 @@ export class TraceService {
       typeof event.thread_id === "string"
     ) {
       const threadId = event.thread_id;
+      const state = this.runs.get(runId);
+      if (state) state.rootConversationId = threadId;
       this.store.updateTrace(runId, (trace) => {
         trace.conversationId = threadId;
       });
@@ -300,7 +320,11 @@ export class TraceService {
     if (!item.success) return;
 
     if (item.data.type === "agent_message" && item.data.text) {
-      this.appendModelOutput(runId, state.lastModelCallSpanId, item.data.text);
+      this.appendModelOutput(
+        runId,
+        this.rootScope(state).lastModelCallSpanId,
+        item.data.text,
+      );
       return;
     }
 
@@ -313,6 +337,7 @@ export class TraceService {
 
     const timestamp = this.now().toISOString();
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
+    const caller = this.rootScope(state);
     const callId = item.data.id ?? randomUUID();
     const existing = state.toolSpans.get(callId);
     const receiverThreadIds = item.data.receiver_thread_ids ?? [];
@@ -335,13 +360,20 @@ export class TraceService {
         },
         { emit: completed },
       );
-      if (completed) this.popSubagentScope(state, existing);
+      this.attachChildConversations(
+        runId,
+        state,
+        existing,
+        receiverThreadIds,
+        caller,
+      );
+      if (completed) this.popSubagentScope(caller, existing);
       return;
     }
 
     const spanId = randomUUID();
     state.toolSpans.set(callId, spanId);
-    const parentId = this.activeParent(state, turnSpanId);
+    const parentId = this.activeParent(caller, turnSpanId);
     this.store.appendSpan(runId, {
       id: spanId,
       traceId: runId,
@@ -358,6 +390,7 @@ export class TraceService {
         toolName: "spawn_agent",
         callId,
         subagent: true,
+        laneId: this.laneIdFor(caller, true),
         ...(receiverThreadIds.length > 0
           ? { receiverThreadIds: receiverThreadIds.join(",") }
           : {}),
@@ -365,7 +398,13 @@ export class TraceService {
       },
       error: null,
     });
-    if (!completed) state.subagentStack.push(spanId);
+    this.attachChildConversations(
+      runId,
+      state,
+      spanId,
+      receiverThreadIds,
+      caller,
+    );
   }
 
   onRunEnd(runId: string, outcome: RunEndInput) {
@@ -397,8 +436,9 @@ export class TraceService {
         error,
       );
     }
-    if (state.lastModelCallSpanId) {
-      const modelSpanId = state.lastModelCallSpanId;
+    const rootScope = this.rootScope(state);
+    if (rootScope.lastModelCallSpanId) {
+      const modelSpanId = rootScope.lastModelCallSpanId;
       this.store.updateSpan(runId, modelSpanId, (span) => {
         if (span.kind !== "model_call" || span.status !== "ok") return;
         if (span.attributes.phase === "after_tool") {
@@ -440,15 +480,19 @@ export class TraceService {
   }
 
   onUserIntervention(agentId: string, action: "terminate") {
-    const runId = this.activeRunByAgent.get(agentId);
+    const runId =
+      this.activeRunByAgent.get(agentId) ??
+      this.store.listByAgent(agentId)[0]?.id;
     if (!runId) return null;
-    const state = this.runs.get(runId);
-    if (!state) return null;
+    const trace = this.store.get(runId);
+    if (!trace) return null;
+    const parentId =
+      trace.spans.find((span) => span.name === "agent.run")?.id ?? null;
     const at = this.now().toISOString();
     return this.store.appendSpan(runId, {
       id: randomUUID(),
       traceId: runId,
-      parentId: state.rootSpanId,
+      parentId,
       name: "user.intervention",
       label: 'User "Terminated"',
       kind: "user_action",
@@ -532,10 +576,17 @@ export class TraceService {
       return;
     }
     const { event, common } = parsed;
+    const conversationId = common["conversation.id"];
+    if (typeof conversationId !== "string" || conversationId.length === 0) {
+      return;
+    }
+    const scope = this.scopeFor(state, conversationId);
+    const isRootScope = scope.spawnSpanId === null;
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
 
     switch (event["event.name"]) {
       case "codex.conversation_starts": {
+        if (!isRootScope) return;
         this.store.updateTrace(runId, (trace) => {
           trace.model = common.model ?? trace.model;
         });
@@ -552,6 +603,7 @@ export class TraceService {
         return;
       }
       case "codex.user_prompt": {
+        if (!isRootScope) return;
         this.store.updateSpan(runId, state.promptSpanId, (span) => {
           span.attributes.promptLength = event.prompt_length;
           if (event.prompt) {
@@ -566,13 +618,16 @@ export class TraceService {
           event["error.message"] !== undefined ||
           (event["http.response.status_code"] ?? 200) >= 400;
         const spanId = randomUUID();
-        state.lastModelCallSpanId = spanId;
+        scope.lastModelCallSpanId = spanId;
+        const firstInScope =
+          scope.modelCallsInTurn === 0 &&
+          scope.toolsSinceLastModelCall.length === 0;
         this.store.appendSpan(runId, {
           id: spanId,
           traceId: runId,
-          parentId: this.activeParent(state, turnSpanId),
+          parentId: this.activeParent(scope, turnSpanId),
           name: "codex.api_request",
-          label: modelCallLabel(state, event.attempt),
+          label: modelCallLabel(scope, event.attempt),
           kind: "model_call",
           actor: "agent",
           status: failedRequest ? "error" : "ok",
@@ -582,20 +637,20 @@ export class TraceService {
           endedAt: timestamp,
           durationMs: duration,
           attributes: {
+            laneId: this.laneIdFor(scope, false),
             phase:
-              state.toolsSinceLastModelCall.length === 0
-                ? state.modelCallsInTurn === 0
+              scope.toolsSinceLastModelCall.length === 0
+                ? scope.modelCallsInTurn === 0
                   ? "plan"
                   : "continue"
                 : "after_tool",
-            ...(state.toolsSinceLastModelCall.length > 0
-              ? { afterTool: state.toolsSinceLastModelCall.at(-1)! }
+            ...(scope.toolsSinceLastModelCall.length > 0
+              ? { afterTool: scope.toolsSinceLastModelCall.at(-1)! }
               : {}),
-            ...(state.modelCallsInTurn === 0 &&
-            state.toolsSinceLastModelCall.length === 0
+            ...(firstInScope && isRootScope
               ? { context: preview(state.prompt, OUTPUT_CLIP) }
-              : state.toolsSinceLastModelCall.length > 0 && state.lastToolOutput
-                ? { context: state.lastToolOutput }
+              : scope.toolsSinceLastModelCall.length > 0 && scope.lastToolOutput
+                ? { context: scope.lastToolOutput }
                 : {}),
             ...(event["http.response.status_code"] !== undefined
               ? { statusCode: event["http.response.status_code"] }
@@ -606,8 +661,8 @@ export class TraceService {
             ? this.redactor.redactText(event["error.message"])
             : null,
         });
-        state.modelCallsInTurn += 1;
-        state.toolsSinceLastModelCall = [];
+        scope.modelCallsInTurn += 1;
+        scope.toolsSinceLastModelCall = [];
         return;
       }
       case "codex.sse_event": {
@@ -619,8 +674,8 @@ export class TraceService {
             trace.usage.reasoningTokens += event.reasoning_token_count ?? 0;
             trace.usage.toolTokens += event.tool_token_count ?? 0;
           });
-          if (state.lastModelCallSpanId) {
-            this.store.updateSpan(runId, state.lastModelCallSpanId, (span) => {
+          if (scope.lastModelCallSpanId) {
+            this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
               if (event.output_token_count !== undefined) {
                 span.attributes.outputTokens = event.output_token_count;
               }
@@ -636,7 +691,7 @@ export class TraceService {
             });
           }
         } else if (event["error.message"]) {
-          this.appendChild(runId, this.activeParent(state, turnSpanId), {
+          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
             name: "codex.sse_event",
             label: "Stream error (" + event["event.kind"] + ")",
             kind: "system",
@@ -645,7 +700,10 @@ export class TraceService {
             startedAt: timestamp,
             endedAt: timestamp,
             durationMs: event.duration_ms ?? 0,
-            attributes: { kind: event["event.kind"] },
+            attributes: {
+              kind: event["event.kind"],
+              laneId: this.laneIdFor(scope, false),
+            },
             error: this.redactor.redactText(event["error.message"]),
           });
         }
@@ -655,7 +713,7 @@ export class TraceService {
         const spanId = randomUUID();
         state.toolSpans.set(event.call_id, spanId);
         const subagent = isSubagentTool(event.tool_name);
-        const parentId = this.activeParent(state, turnSpanId);
+        const parentId = this.activeParent(scope, turnSpanId);
         this.store.appendSpan(runId, {
           id: spanId,
           traceId: runId,
@@ -676,6 +734,7 @@ export class TraceService {
             callId: event.call_id,
             decision: event.decision,
             decisionSource: event.source,
+            laneId: this.laneIdFor(scope, subagent),
             ...(subagent ? { subagent: true } : {}),
           },
           error:
@@ -684,11 +743,11 @@ export class TraceService {
               : null,
         });
         if (
-          subagent &&
+          isSameThreadSubagentTool(event.tool_name) &&
           event.decision !== "denied" &&
           event.decision !== "abort"
         ) {
-          state.subagentStack.push(spanId);
+          scope.subagentStack.push(spanId);
         }
         return;
       }
@@ -710,26 +769,27 @@ export class TraceService {
         const toolArguments = toolArgumentsRaw
           ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
           : "";
-        if (toolArgumentsRaw && state.lastModelCallSpanId) {
+        if (toolArgumentsRaw && scope.lastModelCallSpanId) {
           // Codex hands arguments over as a JSON string. Embedding it as-is
           // produced a document whose "arguments" was itself escaped JSON
           // ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer can
           // make readable. Parse first so the panel shows one clean object.
-          let toolArguments: unknown = toolArgumentsRaw;
+          let parsedArguments: unknown = toolArgumentsRaw;
           try {
-            toolArguments = JSON.parse(toolArgumentsRaw);
+            parsedArguments = JSON.parse(toolArgumentsRaw);
           } catch {
             // Not JSON: keep the raw string rather than dropping the call.
           }
           this.appendModelOutput(
             runId,
-            state.lastModelCallSpanId,
+            scope.lastModelCallSpanId,
             JSON.stringify({
               name: event.tool_name,
-              arguments: toolArguments,
+              arguments: parsedArguments,
             }),
           );
         }
+        const childThreadIds = readChildThreadIds(event.arguments);
         if (existing) {
           this.store.updateSpan(
             runId,
@@ -757,63 +817,70 @@ export class TraceService {
                   span.attributes.subagentType = subagentLabel;
                   span.label = "Subagent · " + subagentLabel;
                 }
+                if (childThreadIds.length > 0) {
+                  span.attributes.receiverThreadIds = childThreadIds.join(",");
+                }
               }
             },
             { emit: true },
           );
           if (isSubagentTool(event.tool_name)) {
-            this.popSubagentScope(state, existing);
+            this.attachChildConversations(
+              runId,
+              state,
+              existing,
+              childThreadIds,
+              scope,
+            );
+            this.popSubagentScope(scope, existing);
           }
           if (succeeded) {
-            state.toolsSinceLastModelCall.push(event.tool_name);
-            if (output) state.lastToolOutput = clip(output, OUTPUT_CLIP);
-          }
-          if (succeeded && output) {
-            this.synthesizeSubagentResultsFromOutput(
-              runId,
-              existing,
-              timestamp,
-              event.duration_ms,
-              output,
-            );
+            scope.toolsSinceLastModelCall.push(event.tool_name);
+            if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         } else {
-          this.appendChild(runId, this.activeParent(state, turnSpanId), {
-            name: "tool." + event.tool_name,
-            label: isSubagentTool(event.tool_name)
-              ? "Subagent task"
-              : "Called " + event.tool_name,
-            kind: "tool_call",
-            actor: "agent",
-            status: succeeded ? "ok" : "error",
-            startedAt: new Date(
-              new Date(timestamp).getTime() - event.duration_ms,
-            ).toISOString(),
-            endedAt: timestamp,
-            durationMs: event.duration_ms,
-            attributes: {
-              toolName: event.tool_name,
-              callId,
-              ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
-              ...(toolArguments ? { arguments: toolArguments } : {}),
-              ...(output ? { output } : {}),
-              ...(requestSecrets.length > 0
-                ? { secretsInRequest: requestSecrets.join(",") }
-                : {}),
-              ...(responseSecrets.length > 0
-                ? { secretsInResponse: responseSecrets.join(",") }
-                : {}),
+          this.appendChild(
+            runId,
+            this.activeParent(scope, turnSpanId),
+            {
+              name: "tool." + event.tool_name,
+              label: isSubagentTool(event.tool_name)
+                ? "Subagent task"
+                : "Called " + event.tool_name,
+              kind: "tool_call",
+              actor: "agent",
+              status: succeeded ? "ok" : "error",
+              startedAt: new Date(
+                new Date(timestamp).getTime() - event.duration_ms,
+              ).toISOString(),
+              endedAt: timestamp,
+              durationMs: event.duration_ms,
+              attributes: {
+                toolName: event.tool_name,
+                callId,
+                laneId: this.laneIdFor(scope, isSubagentTool(event.tool_name)),
+                ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
+                ...(toolArguments ? { arguments: toolArguments } : {}),
+                ...(output ? { output } : {}),
+                ...(requestSecrets.length > 0
+                  ? { secretsInRequest: requestSecrets.join(",") }
+                  : {}),
+                ...(responseSecrets.length > 0
+                  ? { secretsInResponse: responseSecrets.join(",") }
+                  : {}),
+              },
+              error: succeeded ? null : clip(output, 400) || "Tool failed",
             },
-            error: succeeded ? null : clip(output, 400) || "Tool failed",
-          });
+          );
           if (succeeded) {
-            state.toolsSinceLastModelCall.push(event.tool_name);
-            if (output) state.lastToolOutput = clip(output, OUTPUT_CLIP);
+            scope.toolsSinceLastModelCall.push(event.tool_name);
+            if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         }
         return;
       }
       case "codex.turn_ttft": {
+        if (!isRootScope) return;
         this.store.updateSpan(runId, turnSpanId, (span) => {
           span.attributes.ttftMs = event.duration_ms;
         });
@@ -821,7 +888,7 @@ export class TraceService {
       }
       default: {
         if ("error.message" in event && event["error.message"]) {
-          this.appendChild(runId, this.activeParent(state, turnSpanId), {
+          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
             name: event["event.name"],
             label: event["event.name"],
             kind: "system",
@@ -830,7 +897,7 @@ export class TraceService {
             startedAt: timestamp,
             endedAt: timestamp,
             durationMs: 0,
-            attributes: {},
+            attributes: { laneId: this.laneIdFor(scope, false) },
             error: this.redactor.redactText(event["error.message"]),
           });
         }
@@ -860,73 +927,79 @@ export class TraceService {
     return spanId;
   }
 
-  private synthesizeSubagentResultsFromOutput(
-    runId: string,
-    parentSpanId: string,
-    endedAt: string,
-    durationMs: number,
-    output: string,
-  ) {
-    let results: ReturnType<typeof extractSimulatedSubagentResults> = [];
-    try {
-      results = extractSimulatedSubagentResults(output);
-    } catch {
-      return;
+  private scopeFor(state: RunState, conversationId: string) {
+    const existing = state.scopes.get(conversationId);
+    if (existing) return existing;
+    const spawnSpanId = state.conversationSpawn.get(conversationId) ?? null;
+    const scope = emptyConversationScope(spawnSpanId);
+    state.scopes.set(conversationId, scope);
+    return scope;
+  }
+
+  private rootScope(state: RunState) {
+    if (state.rootConversationId) {
+      return this.scopeFor(state, state.rootConversationId);
     }
-    if (results.length === 0) return;
-
-    const toolStartedAt = new Date(
-      new Date(endedAt).getTime() - durationMs,
-    ).toISOString();
-
-    this.store.updateSpan(runId, parentSpanId, (span) => {
-      span.attributes.spawnsSubagents = true;
-      span.attributes.subagentCount = results.length;
-      const toolName = span.attributes.toolName;
-      if (typeof toolName === "string") {
-        span.label = "Tool · " + toolName + " · spawns ×" + results.length;
+    for (const [conversationId, scope] of state.scopes) {
+      if (
+        scope.spawnSpanId === null &&
+        !state.conversationSpawn.has(conversationId)
+      ) {
+        return scope;
       }
-    });
-
-    for (const result of results) {
-      const resultEndedAt = result.timestamp
-        ? new Date(result.timestamp).toISOString()
-        : endedAt;
-      const resultStartedAt = result.timestamp
-        ? new Date(result.timestamp - 200).toISOString()
-        : toolStartedAt;
-      this.store.appendSpan(runId, {
-        id: randomUUID(),
-        traceId: runId,
-        parentId: parentSpanId,
-        name: "subagent.result",
-        label: "Subagent · " + result.index + " · returned",
-        kind: "system",
-        actor: "agent",
-        status: "ok",
-        startedAt: resultStartedAt,
-        endedAt: resultEndedAt,
-        durationMs:
-          new Date(resultEndedAt).getTime() -
-          new Date(resultStartedAt).getTime(),
-        attributes: {
-          subagentIndex: result.index,
-          result: result.payload,
-          synthesized: true,
-        },
-        error: null,
-      });
     }
+    const scope = emptyConversationScope(null);
+    state.scopes.set("", scope);
+    return scope;
   }
 
-  private activeParent(state: RunState, turnSpanId: string) {
-    return state.subagentStack[state.subagentStack.length - 1] ?? turnSpanId;
+  private laneIdFor(scope: ConversationScope, isSpawnNode: boolean) {
+    if (isSpawnNode) {
+      const caller = scope.subagentStack[scope.subagentStack.length - 1];
+      if (caller && caller !== scope.spawnSpanId) return caller;
+      return scope.spawnSpanId ?? "root";
+    }
+    return (
+      scope.subagentStack[scope.subagentStack.length - 1] ??
+      scope.spawnSpanId ??
+      "root"
+    );
   }
 
-  private popSubagentScope(state: RunState, spanId: string) {
-    const index = state.subagentStack.indexOf(spanId);
+  private attachChildConversations(
+    runId: string,
+    state: RunState,
+    spawnSpanId: string,
+    threadIds: string[],
+    caller: ConversationScope,
+  ) {
+    const childIds = threadIds.filter((threadId) => {
+      if (threadId.length === 0) return false;
+      if (state.rootConversationId === threadId) return false;
+      return true;
+    });
+    if (childIds.length === 0) return;
+    for (const threadId of childIds) {
+      state.conversationSpawn.set(threadId, spawnSpanId);
+      this.bindConversation(threadId, runId);
+    }
+    // Child work is on its own conversation, so this spawn must not keep
+    // swallowing events on the caller's thread.
+    this.popSubagentScope(caller, spawnSpanId);
+  }
+
+  private activeParent(scope: ConversationScope, turnSpanId: string) {
+    return (
+      scope.subagentStack[scope.subagentStack.length - 1] ??
+      scope.spawnSpanId ??
+      turnSpanId
+    );
+  }
+
+  private popSubagentScope(scope: ConversationScope, spanId: string) {
+    const index = scope.subagentStack.indexOf(spanId);
     if (index >= 0) {
-      state.subagentStack.splice(index);
+      scope.subagentStack.splice(index, 1);
     }
   }
 
@@ -946,12 +1019,14 @@ export class TraceService {
       error: string | null;
     },
   ) {
+    const id = randomUUID();
     this.store.appendSpan(runId, {
-      id: randomUUID(),
+      id,
       traceId: runId,
       parentId,
       ...span,
     });
+    return id;
   }
 
   private closeSpan(

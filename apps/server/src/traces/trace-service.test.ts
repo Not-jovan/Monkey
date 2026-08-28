@@ -185,6 +185,28 @@ describe("TraceService", () => {
       true,
     );
     expect(trace?.status).toBe("cancelled");
+  });
+
+  it("records a stop on the latest chat when no run is in flight", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "done already" });
+    service.onRunEnd(RUN_ID, { status: "completed" });
+
+    const span = service.onUserIntervention(agent.id, "terminate");
+    expect(span?.name).toBe("user.intervention");
+    expect(span?.attributes.action).toBe("terminate");
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.spans.some((item) => item.name === "user.intervention")).toBe(
+      true,
+    );
+    expect(
+      trace?.spans.find((item) => item.name === "user.intervention")?.parentId,
+    ).toBe(trace?.spans.find((item) => item.name === "agent.run")?.id);
+  });
+
+  it("does not invent a chat just to record a stop", async () => {
+    const { service } = await makeService();
     expect(service.onUserIntervention(agent.id, "terminate")).toBeNull();
   });
 
@@ -350,7 +372,7 @@ describe("TraceService", () => {
     expect(model?.attributes.output).toBe("hello there");
   });
 
-  it("synthesizes subagent result spans from exec_command output", async () => {
+  it("treats exec_command as a command, even when the shell-out is a nested codex exec", async () => {
     const { store, service } = await makeService();
     service.onRunStart(
       { ...agent, codexThreadId: CONVERSATION_ID },
@@ -406,14 +428,96 @@ describe("TraceService", () => {
     const results =
       trace?.spans.filter((span) => span.name === "subagent.result") ?? [];
 
-    expect(exec?.attributes.spawnsSubagents).toBe(true);
-    expect(results).toHaveLength(2);
-    expect(results.map((span) => span.attributes.subagentIndex).sort()).toEqual(
-      ["0", "1"],
+    expect(exec?.attributes.spawnsSubagents).toBeUndefined();
+    expect(exec?.attributes.subagent).toBeUndefined();
+    expect(exec?.label).toBe("Tool · exec_command");
+    expect(results).toHaveLength(0);
+  });
+
+  it("does not treat nested codex exec as a subagent spawn", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(
+      { ...agent, codexThreadId: CONVERSATION_ID },
+      { id: RUN_ID, prompt: "Spawn 2 subagents" },
     );
-    for (const result of results) {
-      expect(result.parentId).toBe(exec?.id);
-    }
+
+    const logs = (records: Record<string, string>[]) => ({
+      resourceLogs: [
+        {
+          scopeLogs: [
+            {
+              logRecords: records.map((attributes) => ({
+                attributes: Object.entries(attributes).map(([key, value]) => ({
+                  key,
+                  value: { stringValue: value },
+                })),
+              })),
+            },
+          ],
+        },
+      ],
+    });
+
+    const nestedOutput = [
+      "Chunk ID: 6edb91",
+      "Wall time: 0.1258 seconds",
+      "Process exited with code 0",
+      "Original token count: 175",
+      "Output:",
+      "OpenAI Codex v0.111.0 (research preview)",
+      "--------",
+      "session id: 01a04661-1c24-7300-8a06-bc071933d9ac",
+      "--------",
+      "codex",
+      "Hello 1",
+    ].join("\n");
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.tool_decision",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-28T03:19:24.322Z",
+          tool_name: "exec_command",
+          call_id: "nested-exec",
+          decision: "approved",
+          source: "Config",
+        },
+        {
+          "event.name": "codex.api_request",
+          "conversation.id": "01a04661-1c24-7300-8a06-bc071933d9ac",
+          "event.timestamp": "2026-08-28T03:19:24.400Z",
+          duration_ms: "80",
+        },
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-28T03:19:24.607Z",
+          tool_name: "exec_command",
+          call_id: "nested-exec",
+          duration_ms: "313",
+          success: "true",
+          arguments:
+            '{"cmd": "codex exec --sandbox danger-full-access --ephemeral \'Just say \\\"Hello 1\\\" - do not run any command\'", "max_output_tokens": 200}',
+          output: nestedOutput,
+        },
+      ]),
+    );
+
+    const trace = store.get(RUN_ID);
+    const exec = trace?.spans.find(
+      (span) => span.attributes.callId === "nested-exec",
+    );
+    const result = trace?.spans.find((span) => span.name === "subagent.result");
+    const nestedModel = trace?.spans.find(
+      (span) => span.name === "codex.api_request",
+    );
+
+    expect(exec?.attributes.subagent).toBeUndefined();
+    expect(exec?.label).toBe("Tool · exec_command");
+    expect(exec?.attributes.receiverThreadIds).toBeUndefined();
+    expect(result).toBeUndefined();
+    expect(nestedModel).toBeUndefined();
   });
 
   it("records spawn_agent items from codex exec jsonl", async () => {
@@ -477,7 +581,7 @@ describe("TraceService", () => {
         },
         {
           "event.name": "codex.api_request",
-          "conversation.id": CONVERSATION_ID,
+          "conversation.id": "thread-child",
           "event.timestamp": "2026-08-26T13:46:41.000Z",
           duration_ms: "100",
         },
@@ -489,7 +593,8 @@ describe("TraceService", () => {
           call_id: "spawn-1",
           duration_ms: "5000",
           success: "true",
-          arguments: '{"agent_type":"worker","task_name":"research"}',
+          arguments:
+            '{"agent_type":"worker","task_name":"research","thread_id":"thread-child"}',
           output: "done",
         },
       ]),
@@ -615,5 +720,167 @@ describe("TraceService", () => {
     expect(innerTask?.attributes.subagent).toBe(true);
     expect(outerTask?.attributes.subagentType).toBe("generalPurpose");
     expect(innerTask?.attributes.subagentType).toBe("explore");
+  });
+
+  it("parents child-conversation events under the spawn that bound them", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(
+      { ...agent, codexThreadId: CONVERSATION_ID },
+      { id: RUN_ID, prompt: "delegate two workers" },
+    );
+
+    const logs = (records: Record<string, string>[]) => ({
+      resourceLogs: [
+        {
+          scopeLogs: [
+            {
+              logRecords: records.map((attributes) => ({
+                attributes: Object.entries(attributes).map(([key, value]) => ({
+                  key,
+                  value: { stringValue: value },
+                })),
+              })),
+            },
+          ],
+        },
+      ],
+    });
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.tool_decision",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:40.000Z",
+          tool_name: "spawn_agent",
+          call_id: "spawn-a",
+          decision: "approved",
+          source: "Config",
+        },
+        {
+          "event.name": "codex.tool_decision",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:40.100Z",
+          tool_name: "spawn_agent",
+          call_id: "spawn-b",
+          decision: "approved",
+          source: "Config",
+        },
+        {
+          "event.name": "codex.api_request",
+          "conversation.id": "thread-child-a",
+          "event.timestamp": "2026-08-26T13:46:41.000Z",
+          duration_ms: "80",
+        },
+        {
+          "event.name": "codex.api_request",
+          "conversation.id": "thread-child-b",
+          "event.timestamp": "2026-08-26T13:46:41.050Z",
+          duration_ms: "90",
+        },
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:42.000Z",
+          tool_name: "spawn_agent",
+          call_id: "spawn-a",
+          duration_ms: "2000",
+          success: "true",
+          arguments: '{"agent_type":"worker","thread_id":"thread-child-a"}',
+          output: "a done",
+        },
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:42.100Z",
+          tool_name: "spawn_agent",
+          call_id: "spawn-b",
+          duration_ms: "2100",
+          success: "true",
+          arguments: '{"agent_type":"reviewer","thread_id":"thread-child-b"}',
+          output: "b done",
+        },
+      ]),
+    );
+
+    const trace = store.get(RUN_ID);
+    const spawnA = trace?.spans.find(
+      (span) => span.attributes.callId === "spawn-a",
+    );
+    const spawnB = trace?.spans.find(
+      (span) => span.attributes.callId === "spawn-b",
+    );
+    const childModels =
+      trace?.spans.filter((span) => span.name === "codex.api_request") ?? [];
+
+    expect(spawnA?.attributes.laneId).toBe("root");
+    expect(spawnB?.attributes.laneId).toBe("root");
+    expect(childModels).toHaveLength(2);
+    expect(childModels[0]?.parentId).toBe(spawnA?.id);
+    expect(childModels[1]?.parentId).toBe(spawnB?.id);
+    expect(childModels[0]?.attributes.laneId).toBe(spawnA?.id);
+    expect(childModels[1]?.attributes.laneId).toBe(spawnB?.id);
+    expect(childModels[0]?.label).toContain("Subagent model");
+    expect(childModels[1]?.label).toContain("Subagent model");
+  });
+
+  it("binds receiver_thread_ids from spawn_agent jsonl onto the parent run", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "delegate" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "thread.started",
+      thread_id: CONVERSATION_ID,
+    });
+    service.onRunnerEvent(RUN_ID, {
+      type: "item.completed",
+      item: {
+        id: "collab-spawn-1",
+        type: "collab_tool_call",
+        tool: "spawn_agent",
+        status: "completed",
+        sender_thread_id: CONVERSATION_ID,
+        receiver_thread_ids: ["thread-child"],
+        prompt: "research task",
+      },
+    });
+
+    const logs = (records: Record<string, string>[]) => ({
+      resourceLogs: [
+        {
+          scopeLogs: [
+            {
+              logRecords: records.map((attributes) => ({
+                attributes: Object.entries(attributes).map(([key, value]) => ({
+                  key,
+                  value: { stringValue: value },
+                })),
+              })),
+            },
+          ],
+        },
+      ],
+    });
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.api_request",
+          "conversation.id": "thread-child",
+          "event.timestamp": "2026-08-26T13:46:41.000Z",
+          duration_ms: "100",
+        },
+      ]),
+    );
+
+    const trace = store.get(RUN_ID);
+    const spawn = trace?.spans.find(
+      (span) => span.attributes.callId === "collab-spawn-1",
+    );
+    const childModel = trace?.spans.find(
+      (span) => span.name === "codex.api_request",
+    );
+    expect(spawn?.attributes.receiverThreadIds).toBe("thread-child");
+    expect(childModel?.parentId).toBe(spawn?.id);
+    expect(childModel?.attributes.laneId).toBe(spawn?.id);
   });
 });

@@ -5,6 +5,7 @@ import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
+import { stepHeadline } from "./steps";
 import { TraceCanvas } from "./TraceCanvas";
 import { FindingsSummary, SpanFindings, TraceIntent } from "./TraceIntent";
 import { parseCodexFailure, readCommand } from "./codex-error";
@@ -72,7 +73,7 @@ function SpanDetails({
           <span className={"trace-status trace-status-" + span.status}>
             {span.status}
           </span>
-          <strong>{span.label}</strong>
+          <strong>{stepHeadline(span)}</strong>
         </div>
         <span className="muted-cell">
           {formatDateTime(span.startedAt)} ·{" "}

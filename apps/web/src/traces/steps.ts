@@ -15,6 +15,12 @@ export function isErrorStep(span: TraceSpan) {
 }
 
 export function isVisibleStep(span: TraceSpan) {
+  // Inferred "subagent" rows from exec_command are not a spawn. Hide them so
+  // older traces do not grow extra lanes for a shell-out.
+  if (span.name === "subagent.result" && span.attributes.synthesized === true) {
+    return false;
+  }
+  if (span.attributes.layoutOnly === true) return false;
   // An error is always worth showing, whatever kind produced it.
   if (isErrorStep(span)) return true;
   return VISIBLE_KINDS.has(span.kind);
@@ -35,8 +41,30 @@ export function isSubagentToolName(name: string) {
   return normalized.endsWith("/spawn_agent");
 }
 
+export function previewLabel(text: string, limit: number) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (flat.length <= limit) return flat;
+  return flat.slice(0, limit - 1) + "…";
+}
+
+function firstNonEmptyLine(text: string) {
+  return (
+    text
+      .split(/\r?\n/)
+      .map((entry) => entry.trim())
+      .find((entry) => entry.length > 0) ?? ""
+  );
+}
+
+export function subagentResultHeadline(span: TraceSpan) {
+  const result = span.attributes.result;
+  if (typeof result !== "string" || result.length === 0) return null;
+  const line = firstNonEmptyLine(result);
+  if (!line) return null;
+  return previewLabel(line, 36);
+}
+
 export function isSubagentTask(span: TraceSpan) {
-  if (span.attributes.subagent === true) return true;
   if (span.kind !== "tool_call") return false;
   const toolName = span.attributes.toolName;
   if (typeof toolName === "string" && isSubagentToolName(toolName)) {
@@ -48,9 +76,30 @@ export function isSubagentTask(span: TraceSpan) {
   return normalizedName.endsWith(".spawn_agent");
 }
 
+export function stepHeadline(span: TraceSpan) {
+  if (span.name === "subagent.result") {
+    return subagentResultHeadline(span) ?? span.label;
+  }
+  if (span.kind === "tool_call" && !isSubagentTask(span)) {
+    const toolName =
+      typeof span.attributes.toolName === "string"
+        ? span.attributes.toolName
+        : span.name.replace(/^tool\./, "");
+    return "Tool · " + toolName;
+  }
+  return span.label;
+}
+
+function stepSortTime(span: TraceSpan, spanById: Map<string, TraceSpan>) {
+  if (span.name === "subagent.result" && span.parentId) {
+    const parent = spanById.get(span.parentId);
+    if (parent) return sortTime(parent);
+  }
+  return sortTime(span);
+}
+
 export function isSubagentBoundary(span: TraceSpan) {
-  if (isSubagentTask(span)) return true;
-  return span.attributes.spawnsSubagents === true;
+  return isSubagentTask(span);
 }
 
 // How deeply a step sits inside spawned subagents. Drives indentation in the
@@ -79,7 +128,17 @@ export function orderedSteps(spans: TraceSpan[]): OrderedStep[] {
   const spanById = new Map(spans.map((span) => [span.id, span]));
   return spans
     .filter(isVisibleStep)
-    .sort((left, right) => sortTime(left).localeCompare(sortTime(right)))
+    .sort((left, right) => {
+      const byTime = stepSortTime(left, spanById).localeCompare(
+        stepSortTime(right, spanById),
+      );
+      if (byTime !== 0) return byTime;
+      if (left.id === right.parentId) return -1;
+      if (right.id === left.parentId) return 1;
+      if (left.kind === "tool_call" && right.kind !== "tool_call") return -1;
+      if (right.kind === "tool_call" && left.kind !== "tool_call") return 1;
+      return left.id.localeCompare(right.id);
+    })
     .map((span) => ({ span, depth: subagentDepth(span, spanById) }));
 }
 

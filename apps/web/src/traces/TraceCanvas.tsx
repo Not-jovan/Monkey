@@ -1,31 +1,27 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import Konva from "konva";
 import { Arrow, Circle, Group, Layer, Line, Rect, Stage, Text } from "react-konva";
 import type { TraceSpan } from "../types";
 import {
+  LABEL_GUTTER,
+  NODE_HEIGHT,
+  SLOT_WIDTH,
+  layoutSwimlanes,
+  parseSubagentIndex,
+  type EdgeKind,
+} from "./canvas-layout";
+import {
   isErrorStep,
-  isSubagentBoundary,
   isSubagentTask,
-  isVisibleStep,
-  sortTime,
+  subagentResultHeadline,
 } from "./steps";
 import { formatDuration, spanDuration } from "./format";
 
-const SLOT_WIDTH = 168;
-const SLOT_GAP = 52;
-const NODE_HEIGHT = 58;
-const ROW_GAP = 78;
-// Vertical space between wrapped bands of the timeline.
-const BAND_GAP = 26;
 // Gaps shorter than this are not worth a label; the arrow matters more.
 const GAP_LABEL_MIN_MS = 1_000;
 // Lifts a gap label clear of the connector it describes.
 const GAP_LABEL_LIFT = 10;
-// How far a wrap connector reaches past the nodes it joins.
-const WRAP_OUT = 26;
 const EDGE_LABEL_GAP = 18;
-const TOP_PADDING = 46;
-const LEFT_PADDING = 40;
-const LABEL_GUTTER = 92;
 
 const COLORS = {
   ink: "#20211f",
@@ -47,123 +43,13 @@ function statusColor(span: TraceSpan) {
   return COLORS.green;
 }
 
-function ownContentDepth(span: TraceSpan, spanById: Map<string, TraceSpan>) {
-  let depth = 0;
-  let current: TraceSpan | undefined = span;
-  while (current?.parentId) {
-    const parent = spanById.get(current.parentId);
-    if (!parent) break;
-    if (isSubagentBoundary(parent)) depth += 1;
-    current = parent;
-  }
-  return depth;
-}
-
-function parentContentDepth(
-  parentId: string | null,
-  spanById: Map<string, TraceSpan>,
-) {
-  if (!parentId) return 0;
-  const parent = spanById.get(parentId);
-  if (!parent) return 0;
-  return ownContentDepth(parent, spanById);
-}
-
-function contentTrackDepth(span: TraceSpan, spanById: Map<string, TraceSpan>) {
-  if (isSubagentTask(span)) {
-    return parentContentDepth(span.parentId, spanById);
-  }
-  if (span.attributes.spawnsSubagents === true) {
-    return parentContentDepth(span.parentId, spanById);
-  }
-  return ownContentDepth(span, spanById);
-}
-
-function parseSubagentIndex(span: TraceSpan): number | null {
-  const raw = span.attributes.subagentIndex;
-  if (typeof raw === "number") return raw;
-  if (typeof raw === "string") {
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  return null;
-}
-
-function maxSubagentLanes(steps: TraceSpan[]) {
-  let max = 0;
-  for (const span of steps) {
-    if (span.name !== "subagent.result") continue;
-    const index = parseSubagentIndex(span);
-    if (index !== null && index + 1 > max) max = index + 1;
-  }
-  return max;
-}
-
-function rowIndex(
-  span: TraceSpan,
-  spanById: Map<string, TraceSpan>,
-  maxSubagentLanes: number,
-  maxContentDepth: number,
-) {
-  const bottomRow = 2 + Math.max(maxSubagentLanes, maxContentDepth);
-  if (span.name === "user.prompt") return 0;
-  if (span.name === "user.intervention") return bottomRow;
-  if (span.actor === "user") return 0;
-
-  const subIndex = parseSubagentIndex(span);
-  if (span.name === "subagent.result" && subIndex !== null) {
-    return 2 + subIndex;
-  }
-
-  return 1 + contentTrackDepth(span, spanById);
-}
-
-function rowY(row: number) {
-  return TOP_PADDING + row * ROW_GAP;
-}
-
-function trackLabel(
-  row: number,
-  steps: TraceSpan[],
-  spanById: Map<string, TraceSpan>,
-  maxSubagentLanes: number,
-  maxContentDepth: number,
-) {
-  if (row === 0) return "user";
-  if (row === 1) return "agent";
-  const bottomRow = 2 + Math.max(maxSubagentLanes, maxContentDepth);
-  if (row === bottomRow && spanById.size > 0) {
-    const hasIntervention = steps.some((span) => span.name === "user.intervention");
-    if (hasIntervention) return "user";
-  }
-  if (maxSubagentLanes > 0 && row >= 2 && row < 2 + maxSubagentLanes) {
-    return "sub · " + (row - 2);
-  }
-  const depth = row - 1;
-  if (depth === 0) return "agent";
-  const laneSpan = steps.find(
-    (span) =>
-      rowIndex(span, spanById, maxSubagentLanes, maxContentDepth) === row &&
-      (span.name === "subagent.result" || isSubagentTask(span)),
-  );
-  const subagentType = laneSpan?.attributes.subagentType;
-  if (typeof subagentType === "string" && subagentType.length > 0) {
-    return "sub · " + subagentType;
-  }
-  if (depth === 1) return "subagent";
-  return "subagent L" + depth;
-}
-
 function stepLabel(span: TraceSpan) {
   if (span.kind === "run" && isErrorStep(span)) return "Run failed";
   if (span.kind === "turn" && isErrorStep(span)) return "Turn failed";
   if (span.kind === "model_call") return span.label;
 
   if (span.name === "subagent.result") {
-    const index = span.attributes.subagentIndex;
-    const indexLabel =
-      typeof index === "string" || typeof index === "number" ? String(index) : "?";
-    return "Subagent · " + indexLabel + " · returned";
+    return subagentResultHeadline(span) ?? "returned";
   }
 
   if (span.kind === "tool_call") {
@@ -171,22 +57,14 @@ function stepLabel(span: TraceSpan) {
       typeof span.attributes.toolName === "string"
         ? span.attributes.toolName
         : span.name.replace(/^tool\./, "");
-    if (span.attributes.spawnsSubagents === true) {
-      const count = span.attributes.subagentCount;
-      if (typeof count === "number" || typeof count === "string") {
-        return "Tool · " + toolName + " · spawns ×" + count;
-      }
-      return "Tool · " + toolName + " · spawns subagents";
-    }
     if (isSubagentTask(span)) {
-      if (span.label.startsWith("Subagent")) return span.label;
       const type = span.attributes.subagentType;
       if (typeof type === "string" && type.length > 0) {
         return "Subagent · " + type;
       }
+      if (span.label.startsWith("Subagent")) return span.label;
       return "Subagent · task";
     }
-    if (span.label.startsWith("Tool ·")) return span.label;
     if (span.label.startsWith("Called ")) {
       return "Tool · " + span.label.slice("Called ".length);
     }
@@ -195,8 +73,6 @@ function stepLabel(span: TraceSpan) {
 
   return span.label;
 }
-
-type EdgeKind = "sequential" | "delegate" | "return";
 
 function edgeLabel(
   kind: EdgeKind,
@@ -216,11 +92,7 @@ function edgeLabel(
     if (from.name === "user.intervention") return 'User "Terminated"';
     return 'User "Prompt"';
   }
-  if (
-    kind === "delegate" &&
-    toRow > fromRow &&
-    (isSubagentTask(from) || from.attributes.spawnsSubagents === true)
-  ) {
+  if (kind === "delegate" && toRow > fromRow && isSubagentTask(from)) {
     const subagentType = from.attributes.subagentType;
     if (typeof subagentType === "string" && subagentType.length > 0) {
       return subagentType;
@@ -259,6 +131,25 @@ function edgeBendOffset(
   const index = parseSubagentIndex(indexedSpan);
   if (index !== null) return 48 + index * 40;
   return 52;
+}
+
+function isStacked(
+  from: { column: number; row: number; x: number; y: number },
+  to: { column: number; row: number; x: number; y: number },
+) {
+  return from.column === to.column && from.row !== to.row;
+}
+
+function stackedPoints(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  downward: boolean,
+) {
+  const x = from.x + SLOT_WIDTH / 2;
+  if (downward) {
+    return [x, from.y + NODE_HEIGHT, x, to.y];
+  }
+  return [x, from.y, x, to.y + NODE_HEIGHT];
 }
 
 function connectionPoint(
@@ -381,6 +272,7 @@ export function TraceCanvas({
   onSelect,
 }: TraceCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const panLayerRef = useRef<Konva.Layer | null>(null);
   const [width, setWidth] = useState(800);
 
   useLayoutEffect(() => {
@@ -394,286 +286,81 @@ export function TraceCanvas({
     return () => window.removeEventListener("resize", measure);
   }, []);
 
-  const spanById = useMemo(
-    () => new Map(spans.map((span) => [span.id, span])),
-    [spans],
+  const layout = useMemo(
+    () => layoutSwimlanes(spans, width),
+    [spans, width],
   );
 
-  const layout = useMemo(() => {
-    const steps = spans
-      .filter(isVisibleStep)
-      .sort((left, right) => sortTime(left).localeCompare(sortTime(right)));
+  const clampPanX = (x: number) => {
+    const minX = Math.min(0, width - layout.contentWidth);
+    return Math.max(minX, Math.min(0, x));
+  };
 
-    let maxContentDepth = 0;
-    for (const step of steps) {
-      const depth = contentTrackDepth(step, spanById);
-      if (depth > maxContentDepth) maxContentDepth = depth;
-    }
-    const subagentLaneCount = maxSubagentLanes(steps);
+  useLayoutEffect(() => {
+    const layer = panLayerRef.current;
+    if (!layer) return;
+    layer.x(clampPanX(layer.x()));
+  }, [layout.contentWidth, width]);
 
-    // The timeline wraps like text: left to right, then down to the next band.
-    // A single unbroken track is unreadable past a handful of steps, because
-    // it grows without bound while the viewport does not.
-    const usable = Math.max(
-      SLOT_WIDTH + SLOT_GAP,
-      width - LABEL_GUTTER - LEFT_PADDING - 16,
-    );
-    const slotsPerBand = Math.max(1, Math.floor(usable / (SLOT_WIDTH + SLOT_GAP)));
-
-    const rowOf = steps.map((span) =>
-      rowIndex(span, spanById, subagentLaneCount, maxContentDepth),
-    );
-    const maxRow = rowOf.length === 0 ? 1 : Math.max(...rowOf);
-    // One unbroken track, sectioned by who is acting. A contiguous run of
-    // steps on the same track is one section with one label; the run wraps
-    // beneath that label instead of restating "user" and "agent" on every
-    // line. The pair only repeats when the user actually acts again.
-    const sections: { row: number; indices: number[] }[] = [];
-    steps.forEach((_span, index) => {
-      const row = rowOf[index]!;
-      const last = sections[sections.length - 1];
-      if (last && last.row === row) last.indices.push(index);
-      else sections.push({ row, indices: [index] });
-    });
-
-    type Placed = {
-      span: TraceSpan;
-      row: number;
-      band: number;
-      line: number;
-      column: number;
-      x: number;
-      y: number;
-      centerY: number;
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent) => {
+      const layer = panLayerRef.current;
+      if (!layer) return;
+      const delta = event.deltaX !== 0 ? event.deltaX : event.deltaY;
+      if (delta === 0) return;
+      event.preventDefault();
+      layer.x(clampPanX(layer.x() - delta));
     };
-    const positions: Placed[] = [];
-    const lanes: { band: number; row: number; label: string; y: number }[] = [];
-    let cursor = 0;
-    let line = 0;
-
-    sections.forEach((section, sectionIndex) => {
-      const lineCount = Math.max(1, Math.ceil(section.indices.length / slotsPerBand));
-      lanes.push({
-        band: sectionIndex,
-        row: section.row,
-        label: trackLabel(
-          section.row,
-          steps,
-          spanById,
-          subagentLaneCount,
-          maxContentDepth,
-        ),
-        y: cursor + rowY(0),
-      });
-      section.indices.forEach((stepIndex, local) => {
-        const localLine = Math.floor(local / slotsPerBand);
-        const column = local % slotsPerBand;
-        const y = cursor + rowY(localLine);
-        positions.push({
-          span: steps[stepIndex]!,
-          row: section.row,
-          band: sectionIndex,
-          line: line + localLine,
-          column,
-          x: LABEL_GUTTER + LEFT_PADDING + column * (SLOT_WIDTH + SLOT_GAP),
-          y,
-          centerY: y + NODE_HEIGHT / 2,
-        });
-      });
-      cursor += lineCount * ROW_GAP + BAND_GAP;
-      line += lineCount;
-    });
-    const height = cursor + 32;
-
-    // Consecutive steps separated by a line break. The sequence continues, so
-    // the wrap is drawn rather than left to reading order alone.
-    const wraps: { from: Placed; to: Placed }[] = [];
-    for (let index = 0; index + 1 < positions.length; index += 1) {
-      const from = positions[index]!;
-      const to = positions[index + 1]!;
-      if (from.line !== to.line) wraps.push({ from, to });
-    }
-
-    const positionBySpanId = new Map(
-      positions.map((position) => [position.span.id, position]),
-    );
-
-    const edges: {
-      kind: EdgeKind;
-      from: (typeof positions)[number];
-      to: (typeof positions)[number];
-    }[] = [];
-    const linked = new Set<string>();
-
-    const pushEdge = (
-      kind: EdgeKind,
-      from: (typeof positions)[number],
-      to: (typeof positions)[number],
-    ) => {
-      if (from.line !== to.line) return;
-      const key = kind + ":" + from.span.id + "->" + to.span.id;
-      if (linked.has(key)) return;
-      linked.add(key);
-      edges.push({ kind, from, to });
-    };
-
-    for (let index = 0; index < positions.length; index += 1) {
-      const current = positions[index]!;
-      if (isSubagentTask(current.span) || current.span.attributes.spawnsSubagents === true) {
-        for (const delegate of positions) {
-          if (delegate.span.parentId !== current.span.id) continue;
-          if (delegate.row <= current.row) continue;
-          pushEdge("delegate", current, delegate);
-        }
-      }
-
-      if (current.span.name === "subagent.result" && current.span.parentId) {
-        const parent = positionBySpanId.get(current.span.parentId);
-        if (parent && parent.row < current.row) {
-          pushEdge("return", current, parent);
-        }
-      }
-
-      if (
-        isSubagentTask(current.span) &&
-        current.span.status !== "running" &&
-        current.span.parentId
-      ) {
-        const parent = positionBySpanId.get(current.span.parentId);
-        if (parent && parent.row < current.row) {
-          pushEdge("return", current, parent);
-        }
-      }
-
-      for (let nextIndex = index + 1; nextIndex < positions.length; nextIndex += 1) {
-        const next = positions[nextIndex]!;
-        if (next.row !== current.row) continue;
-        pushEdge("sequential", current, next);
-        break;
-      }
-
-      if (current.row === 0 && current.span.actor === "user") {
-        for (let nextIndex = index + 1; nextIndex < positions.length; nextIndex += 1) {
-          const next = positions[nextIndex]!;
-          if (next.row !== 1) continue;
-          if (contentTrackDepth(next.span, spanById) !== 0) continue;
-          pushEdge("sequential", current, next);
-          break;
-        }
-      }
-    }
-
-    return { steps, positions, maxRow, height, lanes, edges, wraps, slotsPerBand };
-  }, [spanById, spans, width]);
-
-  const contentWidth =
-    (layout.positions.at(-1)?.x ?? 0) + SLOT_WIDTH + LEFT_PADDING;
-  const overflows = contentWidth > width + 8;
+    el.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    return () => el.removeEventListener("wheel", onWheel, { capture: true });
+  }, [layout.contentWidth, width]);
 
   return (
     <div className="trace-canvas" ref={containerRef}>
-      <Stage
-        width={width}
-        height={layout.height}
-        // Only draggable when there is something off-screen to reach. Now that
-        // the timeline wraps, dragging usually just fights the page scroll.
-        draggable={overflows}
-        onMouseEnter={(event) => {
-          if (!overflows) return;
-          event.target.getStage()!.container().style.cursor = "grab";
-        }}
-      >
-        {/* Static furniture. listening={false} keeps these shapes out of the
-            hit graph, which is what makes dragging a wide run expensive. */}
+      <Stage width={width} height={layout.height}>
         <Layer listening={false}>
-          <Text
-            text="◷ time →"
-            x={12}
-            y={10}
-            fontSize={12}
-            fill={COLORS.muted}
-          />
           {layout.lanes.map((lane) => (
-            <Group key={"lane-" + lane.band + "-" + lane.row}>
-              <Line
-                points={[
-                  LABEL_GUTTER,
-                  lane.y + NODE_HEIGHT + 8,
-                  LABEL_GUTTER +
-                    LEFT_PADDING +
-                    layout.slotsPerBand * (SLOT_WIDTH + SLOT_GAP),
-                  lane.y + NODE_HEIGHT + 8,
-                ]}
-                stroke={COLORS.line}
-                strokeWidth={1}
-                dash={[4, 6]}
-              />
-              <Text
-                text={lane.label}
-                x={8}
-                y={lane.y + 18}
-                width={LABEL_GUTTER - 12}
-                align="right"
-                fontSize={11}
-                fill={COLORS.muted}
-                wrap="none"
-                ellipsis
-              />
-            </Group>
+            <Line
+              key={"rail-" + lane.row}
+              points={[
+                LABEL_GUTTER,
+                lane.y + NODE_HEIGHT + 8,
+                width,
+                lane.y + NODE_HEIGHT + 8,
+              ]}
+              stroke={COLORS.line}
+              strokeWidth={1}
+              dash={[4, 6]}
+              perfectDrawEnabled={false}
+            />
           ))}
         </Layer>
-        <Layer>
-          {layout.wraps.map(({ from, to }) => {
-            const startX = from.x + SLOT_WIDTH;
-            const endX = to.x;
-            const midY = (from.centerY + to.centerY) / 2;
-            // Out past the last node, down between the lines, back across and
-            // into the first node of the next line. Tension rounds the four
-            // corners into a single S sweep.
-            return (
-              <Arrow
-                key={"wrap:" + from.span.id + "->" + to.span.id}
-                listening={false}
-                perfectDrawEnabled={false}
-                points={[
-                  startX,
-                  from.centerY,
-                  startX + WRAP_OUT,
-                  from.centerY,
-                  startX + WRAP_OUT,
-                  midY,
-                  endX - WRAP_OUT,
-                  midY,
-                  endX - WRAP_OUT,
-                  to.centerY,
-                  endX,
-                  to.centerY,
-                ]}
-                tension={0.5}
-                stroke={COLORS.line}
-                fill={COLORS.line}
-                strokeWidth={1.5}
-                pointerLength={9}
-                pointerWidth={8}
-                lineJoin="round"
-              />
-            );
-          })}
+        <Layer
+          ref={panLayerRef}
+          draggable
+          dragBoundFunc={(pos) => ({ x: clampPanX(pos.x), y: 0 })}
+        >
+          <Rect
+            x={0}
+            y={0}
+            width={Math.max(width, layout.contentWidth)}
+            height={layout.height}
+            fill="rgba(0,0,0,0.01)"
+            perfectDrawEnabled={false}
+          />
           {layout.edges.map(({ kind, from, to }) => {
-            const gap =
-              new Date(to.span.startedAt).getTime() -
-              new Date(from.span.endedAt ?? from.span.startedAt).getTime();
-            const label = edgeLabel(kind, from.span, from.row, to.row, gap);
-            const fromPoint = connectionPoint(from, "from", kind);
-            const toPoint = connectionPoint(to, "to", kind);
-            const bendOffset = edgeBendOffset(kind, from, to);
-            const points = edgePoints(
-              fromPoint.x,
-              fromPoint.y,
-              toPoint.x,
-              toPoint.y,
-              bendOffset,
-            );
+            const stacked = isStacked(from, to);
+            const points = stacked
+              ? stackedPoints(from, to, to.row > from.row)
+              : edgePoints(
+                  connectionPoint(from, "from", kind).x,
+                  connectionPoint(from, "from", kind).y,
+                  connectionPoint(to, "to", kind).x,
+                  connectionPoint(to, "to", kind).y,
+                  edgeBendOffset(kind, from, to),
+                );
             const stroke = edgeStroke(
               selectedId,
               from.span.id,
@@ -716,8 +403,20 @@ export function TraceCanvas({
             return (
               <Group
                 key={span.id}
-                onClick={() => onSelect(span.id)}
-                onTap={() => onSelect(span.id)}
+                onClick={() =>
+                  onSelect(
+                    span.attributes.layoutOnly === true && span.parentId
+                      ? span.parentId
+                      : span.id,
+                  )
+                }
+                onTap={() =>
+                  onSelect(
+                    span.attributes.layoutOnly === true && span.parentId
+                      ? span.parentId
+                      : span.id,
+                  )
+                }
                 onMouseEnter={(event) => {
                   event.target.getStage()!.container().style.cursor = "pointer";
                 }}
@@ -767,9 +466,7 @@ export function TraceCanvas({
                       fill={errored ? COLORS.errorFill : COLORS.paper}
                       stroke={stroke}
                       strokeWidth={selected || failing || errored ? 3 : 2}
-                      shadowColor="rgba(39, 38, 33, 0.18)"
-                      shadowBlur={selected ? 12 : 6}
-                      shadowOffsetY={3}
+                      perfectDrawEnabled={false}
                     />
                     <Text
                       text={stepLabel(span)}
@@ -855,6 +552,8 @@ export function TraceCanvas({
             );
           })}
           {layout.edges.map(({ kind, from, to }) => {
+            const stacked = isStacked(from, to);
+            if (stacked) return null;
             const gap =
               new Date(to.span.startedAt).getTime() -
               new Date(from.span.endedAt ?? from.span.startedAt).getTime();
@@ -923,6 +622,21 @@ export function TraceCanvas({
           })}
         </Layer>
       </Stage>
+      <div
+        className="trace-canvas-gutter"
+        style={{ height: layout.height }}
+      >
+        <div className="trace-canvas-gutter-time">◷ time →</div>
+        {layout.lanes.map((lane) => (
+          <div
+            key={"label-" + lane.row}
+            className="trace-canvas-gutter-label"
+            style={{ top: lane.y + 18 }}
+          >
+            {lane.label}
+          </div>
+        ))}
+      </div>
       {layout.steps.length === 0 && (
         <div className="trace-canvas-empty">Waiting for the first step…</div>
       )}

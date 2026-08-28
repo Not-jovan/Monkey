@@ -425,6 +425,35 @@ describe("AuditService", () => {
     expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
   });
+
+  it("does not audit a synthesized subagent result as its own step", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: () => SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+    const trace = seedTrace(stores.traceStore, "trace-synth");
+    stores.traceStore.appendSpan(trace.id, {
+      ...toolSpan(trace.id, "ok"),
+      id: "span-exec",
+    });
+    stores.traceStore.appendSpan(trace.id, {
+      ...toolSpan(trace.id, "ok"),
+      id: "span-synth",
+      kind: "system",
+      name: "subagent.result",
+      attributes: { synthesized: true, result: "Hello 1" },
+    });
+    await service.idle();
+    expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
+    expect(
+      stores.auditStore
+        .listByTrace(trace.id)
+        .every((step) => step.spanId !== "span-synth"),
+    ).toBe(true);
+  });
+
   it("stops retrying a model the account has not activated", async () => {
     const stores = await makeStores();
     const calls: string[] = [];

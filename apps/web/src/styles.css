@@ -1327,6 +1327,44 @@ textarea:focus {
 .trace-canvas {
   position: relative;
   overflow: hidden;
+  overscroll-behavior: contain;
+  touch-action: none;
+  cursor: grab;
+}
+
+.trace-canvas:active {
+  cursor: grabbing;
+}
+
+.trace-canvas-gutter {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 2;
+  width: 92px;
+  pointer-events: none;
+  background: var(--paper);
+}
+
+.trace-canvas-gutter-label {
+  position: absolute;
+  right: 8px;
+  width: 72px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-canvas-gutter-time {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .trace-canvas-empty {

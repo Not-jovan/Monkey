@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TraceSpan } from "../types";
 import { formatDuration, formatTime, spanDuration } from "./format";
-import { orderedSteps, stepRole, stepStatusText } from "./steps";
+import { orderedSteps, stepHeadline, stepRole, stepStatusText } from "./steps";
 
 // The default view of a run: real DOM, so it is keyboard navigable, readable
 // by a screen reader, selectable, and findable with the browser's own search —
@@ -108,7 +108,7 @@ export function TraceStepList({
             </span>
             <span className={"step-dot step-dot-" + span.status} aria-hidden="true" />
             <span className="step-role">{stepRole(span)}</span>
-            <span className="step-label">{span.label}</span>
+            <span className="step-label">{stepHeadline(span)}</span>
             {/* Conveyed visually by the dot and the row tint; said out loud here. */}
             <span className="sr-only">, {stepStatusText(span)}</span>
             {failing && <span className="step-flag">failed here</span>}
