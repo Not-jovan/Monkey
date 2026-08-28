@@ -206,6 +206,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
+| `AGENT_RUNTIME` | `codex` | `claude-code` to run Agents through Claude Code CLI instead. See [Agent runtime](#agent-runtime). |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
@@ -214,6 +215,49 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 See [.env.example](.env.example) for all Runtime and resource-limit options,
 and [docs/GLASS_BOX.md](docs/GLASS_BOX.md) for the audit middleware options.
+
+## Agent runtime
+
+The Launchpad runs every Agent turn through one configurable Runtime CLI.
+`AGENT_RUNTIME` selects which one — it's a single, server-wide setting, not
+a per-Agent choice, and every other part of the platform (workspace
+persistence, multi-turn resume, container execution, Glass Box tracing and
+auditing) works the same regardless of which one is active.
+
+| `AGENT_RUNTIME` | CLI used | Notes |
+| --- | --- | --- |
+| `codex` (default) | [Codex CLI](https://github.com/openai/codex) | See [Requirements](#requirements) — included in the Runtime container image, no host install needed for the Local POC or Docker Compose paths. |
+| `claude-code` | [Claude Code CLI](https://code.claude.com/docs) | Must be installed separately — see below. |
+
+### Switching to Claude Code
+
+1. Install Claude Code CLI wherever the control plane launches Runtime
+   processes: on `PATH` for `RUNTIME_PROVIDER=local-process`, or baked into
+   `CONTAINER_RUNTIME_IMAGE` for `RUNTIME_PROVIDER=container` (the same
+   expectation Codex CLI already has today).
+2. Set in `.env`:
+
+   ```dotenv
+   AGENT_RUNTIME=claude-code
+   ANTHROPIC_API_KEY=your-anthropic-api-key
+   ```
+
+3. Optional overrides:
+
+   | Variable | Default | Purpose |
+   | --- | --- | --- |
+   | `CLAUDE_CODE_BIN` | `claude` | Path to the Claude Code CLI binary. |
+   | `CLAUDE_CODE_HOME` | `claude-home` | Claude Code's config/session/credentials directory (`CLAUDE_CONFIG_DIR`) — the runtime-agnostic analog of `CODEX_HOME`. |
+
+No other configuration changes are needed. The Launchpad points Claude
+Code's own OTLP telemetry exporter at the same collector Codex uses, so
+traces, masking, and audits keep working without extra setup.
+
+**Known limitation:** Claude Code's OTLP telemetry does not carry tool call
+*output* content (only input and byte sizes), so the audit pipeline's
+secret-detection and network-whitelist checks see less of what happened for
+a Claude Code-backed Agent than for a Codex one. See
+[docs/GLASS_BOX.md](docs/GLASS_BOX.md).
 
 ## How it works
 

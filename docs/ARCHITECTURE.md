@@ -9,10 +9,11 @@ flowchart LR
     Service --> Store["JSON store"]
     Service --> Workspace["Agent workspace"]
     Service --> Runner{"AgentRunner"}
-    Runner -->|Local POC| Container["Disposable Runtime container"]
-    Runner -->|ECS| Process["Codex child process"]
-    Container --> Ark["Volcengine Ark"]
-    Process --> Ark
+    Runner -->|local-process| Process["ProcessRuntimeRunner"]
+    Runner -->|container| Container["ContainerRuntimeRunner"]
+    Process --> Runtime{{"RuntimeDefinition\n(codex | claude-code)"}}
+    Container --> Runtime
+    Runtime --> Ark["Volcengine Ark / Anthropic"]
 ```
 
 ## Components
@@ -47,28 +48,44 @@ Interrupted Runs become `cancelled` after a restart.
 data/launchpad.json       Agent, message, and Run metadata
 workspaces/AgentID/       Agent-created files
 workspaces/.deleted/      Archived deleted workspaces
-codex-home/               Codex configuration and sessions
+codex-home/ or claude-home/   Codex or Claude Code config/session data
+                               (whichever AGENT_RUNTIME selects)
 ```
 
 `JsonStore` serializes writes and atomically replaces one JSON file. It supports
 one process only.
 
-### Runtime providers
+### Agent runtimes
 
-- `CodexRunner` runs Codex inside the application container for ECS.
-- `ContainerCodexRunner` starts one disposable Docker, Colima, or Podman
-  container for every local turn.
+Which CLI actually executes a turn is a `RuntimeDefinition`
+(`apps/server/src/runtimes/types.ts`) — a data object, not a class: bin
+path, home directory/env var, argv builder, stdout-line parser, telemetry
+bootstrap, and OTLP trace-event adapter. `codexRuntime` and
+`claudeCodeRuntime` (`apps/server/src/runtimes/codex.ts`,
+`apps/server/src/runtimes/claude-code.ts`) are the two concrete
+definitions; `selectRuntime` (`apps/server/src/runtimes/index.ts`) picks
+one from the `AGENT_RUNTIME` config value.
 
-Both providers use argv-only process execution, bound output and time, resume
-the stored Codex thread, and escalate termination after a grace period.
+Two generic `AgentRunner` implementations execute whichever
+`RuntimeDefinition` is selected, driven entirely by that object:
+
+- `ProcessRuntimeRunner` (`apps/server/src/agent-runner.ts`) runs the
+  Runtime CLI as a host child process (ECS profile, or local development).
+- `ContainerRuntimeRunner` (`apps/server/src/container-runtime-runner.ts`)
+  starts one disposable Docker, Colima, or Podman container for every local
+  turn (Local POC profile).
+
+Both use argv-only process execution, bound output and time, resume the
+stored thread, and escalate termination after a grace period — none of that
+is runtime-specific.
 
 ## Deployment profiles
 
 | Profile | Control plane | Agent execution |
 | --- | --- | --- |
 | Local POC | Host Node.js | Disposable local container |
-| ECS | Application container | Codex process in the same container |
-| Local development | Host Node.js | Host Codex process |
+| ECS | Application container | Agent runtime process in the same container |
+| Local development | Host Node.js | Host Agent runtime process |
 
 ## Extension seams
 

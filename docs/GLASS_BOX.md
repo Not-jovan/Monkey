@@ -14,7 +14,7 @@ store. It never mutates a trace, and an audit failure never blocks a Run.
 flowchart LR
     User["User"] -->|message| API["Fastify control plane"]
     API --> Intent["Intent classifier"]
-    API --> Runtime["Codex Runtime"]
+    API --> Runtime["Agent Runtime\n(Codex or Claude Code)"]
     Runtime -->|OTLP/HTTP JSON| Collector["/collector/v1/logs"]
     Collector --> Redact["Secret detection + masking"]
     Redact --> Traces[("Traces")]
@@ -27,12 +27,21 @@ flowchart LR
 
 The trust boundary sits at the collector. The Runtime cannot hold the
 operator's bearer token, so it authenticates with a per-boot collector token
-that `writeCodexConfig` embeds in `config.toml`. Detection and masking run
-before anything is written, so the stores never receive a plaintext credential.
+that each runtime's `RuntimeDefinition` embeds into whatever telemetry
+configuration mechanism that runtime uses. Codex's `codexRuntime.bootstrap`
+(`apps/server/src/runtimes/codex.ts`) writes it into `config.toml`; Claude
+Code has no config file, so `claudeCodeRuntime.processEnv`
+(`apps/server/src/runtimes/claude-code.ts`) passes it as an
+`OTEL_EXPORTER_OTLP_LOGS_HEADERS` env var on every process launch instead.
+Detection and masking run before anything is written either way, so the
+stores never receive a plaintext credential.
 
-Telemetry stays on the machine: the generated `[otel]` block pins
-`metrics_exporter` and `trace_exporter` to `none`, overriding Codex 0.111.0's
-default of reporting metrics to its own endpoint.
+Telemetry stays on the machine: Codex 0.111.0's generated `[otel]` block
+pins `metrics_exporter` and `trace_exporter` to `none`, overriding its
+default of reporting metrics to its own endpoint. Claude Code is configured
+the same way in spirit — `OTEL_METRICS_EXPORTER=none` and
+`OTEL_TRACES_EXPORTER=none` in `processEnv` — just via env vars rather than
+a file.
 
 ## Setup
 
@@ -190,6 +199,16 @@ snapshots left by earlier ones. Deleting the files works; they regenerate. The
 Agent already receives the key in its process environment, so this grants no new
 access, but the platform does not keep secrets off disk entirely. Clear the
 snapshots before recording a demo and rotate the key afterwards.
+
+**Claude Code's telemetry never carries tool output content.** Confirmed
+against a live run: even with `OTEL_LOG_TOOL_DETAILS=1` set, Claude Code's
+OTLP logs signal only ever delivers tool call *input* (as two JSON strings,
+`tool_parameters` and `tool_input`) and byte sizes — never the output text
+itself, unlike Codex which reports it inline. The secret-detection and
+network-whitelist checks read both call arguments and output off span
+attributes, so for a Claude Code-backed Agent they only ever see the input
+half of a tool call. See
+`apps/server/src/traces/claude-code-events.ts` for the field-level detail.
 
 **Masking is shape-based.** Configured secret values are masked wherever they
 appear, along with credentials matching known shapes (GitHub, Stripe, OpenAI,
