@@ -1,3 +1,5 @@
+import type { RunFailure } from "./failures.js";
+
 export type AgentStatus = "ready" | "busy" | "stopped" | "error";
 export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 export type MessageRole = "user" | "assistant";
@@ -37,6 +39,9 @@ export interface AgentRun {
   prompt: string;
   output: string | null;
   error: string | null;
+  // The attributed form of `error`. Kept alongside rather than replacing it, so
+  // anything already reading the string keeps working.
+  failure: RunFailure | null;
   usage: RunUsage | null;
   startedAt: string | null;
   completedAt: string | null;

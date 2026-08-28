@@ -1,5 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  errorEvidence,
+  parseCodexEventLine,
+  readStreamError,
+  type ParsedEvents,
+} from "./codex-runner.js";
+
+// The runner and the trace service disagreed about this: only the trace side
+// counted turn.failed, so the same run could report two different error counts,
+// and errorEvidence could miss the event that said what actually went wrong.
+// One definition now, exercised from the side that used to be the narrower one.
+describe("readStreamError", () => {
+  it("reads both shapes Codex uses to report a failure", () => {
+    expect(readStreamError({ type: "error", message: "boom" })).toBe("boom");
+    expect(readStreamError({ type: "error", error: "boom" })).toBe("boom");
+    expect(readStreamError({ type: "error" })).toBe(
+      "Codex reported an unknown error",
+    );
+    expect(readStreamError({ type: "turn.failed", error: "stream reset" })).toBe(
+      "stream reset",
+    );
+    expect(
+      readStreamError({ type: "turn.failed", error: { message: "reset" } }),
+    ).toBe("reset");
+    expect(readStreamError({ type: "turn.failed" })).toBe(
+      "The Codex turn failed",
+    );
+  });
+
+  it("says nothing about events that are not failures", () => {
+    expect(readStreamError({ type: "turn.completed" })).toBeNull();
+    expect(readStreamError({ type: "item.completed" })).toBeNull();
+  });
+
+  it("collects turn.failed into the runner's own error list", () => {
+    const parsed: ParsedEvents = {
+      messages: [],
+      threadId: null,
+      usage: null,
+      errors: [],
+    };
+    parseCodexEventLine('{"type":"error","message":"npm timeout"}', parsed);
+    parseCodexEventLine(
+      '{"type":"turn.failed","error":{"message":"stream reset"}}',
+      parsed,
+    );
+    expect(parsed.errors).toEqual(["npm timeout", "stream reset"]);
+    // errorEvidence reads the last one, so a turn.failed is no longer passed
+    // over in favour of stderr.
+    expect(errorEvidence(parsed.errors, "some stderr")).toBe("stream reset");
+  });
+});
 
 describe("Codex runner protocol", () => {
   it("builds a new-session invocation", () => {

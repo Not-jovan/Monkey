@@ -38,6 +38,9 @@ function trace(id: string): TraceRecord {
     model: null,
     usage: emptyUsage(),
     failingSpanId: null,
+    failure: null,
+    recoveredErrorCount: 0,
+    evidenceComplete: true,
     unrecognizedEvents: 0,
     spans: [],
   };

@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { api, ApiError, setAuthToken } from "./api";
 import { IntentPanel } from "./intent/IntentPanel";
+import {
+  describeChange,
+  intentChanges,
+  versionByTrace,
+} from "./intent/intent-diff";
+import { LAYER_COPY } from "./traces/failure";
 import type { Agent, AgentRun, Message, SystemInfo } from "./types";
 
 const starterPrompts = [
@@ -37,6 +44,32 @@ function Spinner() {
   return <span className="spinner" aria-label="Loading" />;
 }
 
+// A failed run used to render its raw error string here and stop, which left
+// the reader with no idea whether the agent had done something wrong and no way
+// to reach the evidence. The run id is the trace id, so the trace is one link
+// away.
+function RunFailureNotice({ run }: { run: AgentRun }) {
+  const failure = run.failure;
+  const copy = failure ? LAYER_COPY[failure.layer] : null;
+  return (
+    <article className={"run-error" + (copy ? " failure-blame-" + copy.blame : "")}>
+      <div className="run-error-head">
+        <strong>{failure?.title ?? "Run failed"}</strong>
+        {copy && (
+          <span className="failure-chip">
+            {copy.label} · {failure?.kind}
+          </span>
+        )}
+      </div>
+      {copy && <span className="run-error-blame">{copy.note}</span>}
+      <span>{failure?.remedy ?? run.error}</span>
+      <Link className="button button-ghost" to={"/traces/" + run.id}>
+        Open the trace
+      </Link>
+    </article>
+  );
+}
+
 export default function App() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -50,6 +83,18 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
+  // Which of these messages moved the spec. Shares the query key with
+  // IntentPanel, so the two never disagree and only one request is made.
+  const intentQuery = useQuery({
+    queryKey: ["intent", selectedId],
+    queryFn: () => api.intent(selectedId ?? ""),
+    enabled: Boolean(selectedId),
+    refetchInterval: 4_000,
+  });
+  const specChangeByRun = useMemo(
+    () => versionByTrace(intentChanges(intentQuery.data?.versions ?? [])),
+    [intentQuery.data?.versions],
+  );
   const [authInput, setAuthInput] = useState("");
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
@@ -518,15 +563,31 @@ export default function App() {
                     </div>
                   </div>
                 ) : (
-                  messages.map((message) => (
-                    <article className={"message message-" + message.role} key={message.id}>
-                      <div className="message-meta">
-                        <strong>{message.role === "user" ? "You" : selected.name}</strong>
-                        <span>{formatTime(message.createdAt)}</span>
-                      </div>
-                      <div className="message-body">{message.content}</div>
-                    </article>
-                  ))
+                  messages.map((message) => {
+                    // Classification is asynchronous, so a message that changes
+                    // the rules used to do so with no acknowledgement anywhere.
+                    const change =
+                      message.role === "user"
+                        ? specChangeByRun.get(message.runId)
+                        : undefined;
+                    return (
+                      <article className={"message message-" + message.role} key={message.id}>
+                        <div className="message-meta">
+                          <strong>{message.role === "user" ? "You" : selected.name}</strong>
+                          <span>{formatTime(message.createdAt)}</span>
+                        </div>
+                        <div className="message-body">{message.content}</div>
+                        {change && (
+                          <span
+                            className="message-spec-change"
+                            title={describeChange(change)}
+                          >
+                            This changed the spec → v{change.version}
+                          </span>
+                        )}
+                      </article>
+                    );
+                  })
                 )}
                 {activeRun && ["queued", "running"].includes(activeRun.status) && (
                   <article className="message message-assistant thinking">
@@ -541,10 +602,7 @@ export default function App() {
                   </article>
                 )}
                 {activeRun?.status === "failed" && (
-                  <article className="run-error">
-                    <strong>Run failed</strong>
-                    <span>{activeRun.error}</span>
-                  </article>
+                  <RunFailureNotice run={activeRun} />
                 )}
                 <div ref={messageEnd} />
               </div>

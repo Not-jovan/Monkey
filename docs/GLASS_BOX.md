@@ -34,6 +34,137 @@ Telemetry stays on the machine: the generated `[otel]` block pins
 `metrics_exporter` and `trace_exporter` to `none`, overriding Codex 0.111.0's
 default of reporting metrics to its own endpoint.
 
+## Diagnosing a failure
+
+A failed run answers three questions, in this order: whose fault is it, where
+did it break, and did it happen before.
+
+**Attribution comes first**, because it is the answer most easily got wrong. A
+sandbox denial, an unactivated Ark model and a broken shell command all end a
+run, and when all three render as one error string the natural response to each
+is to blame the agent. Every failure is classified into a layer, and only two of
+them mean the agent is what needs improving:
+
+| Layer | Meaning | Example kinds |
+| --- | --- | --- |
+| `platform` | The launchpad failed | `runtime-timeout`, `output-cap`, `container-unavailable` |
+| `provider` | Ark refused or could not serve | `model-unavailable`, `rate-limited`, `context-length-exceeded`, `auth-rejected` |
+| `policy` | A boundary did its job | `sandbox-denied`, `approval-denied` |
+| **`agent`** | **The agent's own work failed** | `tool-failed` |
+| **`task`** | **Finished but produced nothing usable** | `no-agent-message` |
+| `user` | You stopped it | `cancelled` |
+
+Each failure also carries a `retryability` — `transient`, `permanent`, or
+`user-action` — and a `remedy` saying what to do next. The runner and the
+auditor share one definition of "permanent", so a model that is unavailable
+cannot be permanent in one place and worth retrying in the other.
+
+The classification lives in `apps/server/src/failures.ts`. States the runner
+observed directly — it killed the container, it hit the output cap — always beat
+pattern matching against the error text.
+
+**The `agent` layer is gated on where the evidence came from.** Words like
+`SyntaxError` or `npm ERR!` appear in plenty of text that has nothing to do
+with the Agent — a provider's JSON error body, a stack trace from the control
+plane — and pattern matching alone cannot tell those apart from a command's own
+output. A rule that blames the Agent therefore fires only when the evidence is a
+tool step's output or a non-zero process exit. Anything else falls through to
+`platform` / `unknown`, because a misattribution here points the reader at the
+Agent when the platform is at fault, which is the exact mistake the taxonomy
+exists to prevent.
+
+**A command that fails inside a "successful" tool call still counts.** Codex
+reports a tool call as successful whenever the *tool* ran — a command exiting
+127 with `command not found` arrives as `success: "true"`. That made the Agent's
+own failures invisible, so the `agent` layer was effectively unreachable and the
+attribution could only ever answer "not the Agent". A non-zero exit is now read
+from the output, and the step is marked failed when the output also carries a
+recognisable failure signature. A bare non-zero exit is not enough: `grep`
+finding nothing and `diff` seeing a difference are ordinary control flow, and
+the exit code is recorded as a fact on the span either way.
+
+**A diagnosis is not gated on the Run having stopped.** A sandbox denial that the
+Agent then works around leaves the Run `completed`, and that is the common case
+in practice — gating on failure made it undiagnosable. The failing step is
+recorded whatever the outcome, and the UI distinguishes "the Run failed" from
+"the Agent worked around this".
+
+**Where it broke** is `failingSpanId`, and the failing step also records
+`causedBySpanId`: the model call in flight when it was decided. Separating a bad
+plan from a bad execution is what decides the fix. This is inferred from event
+ordering rather than reported by the Runtime, so the UI presents it as
+"Likely planned by" rather than as a fact.
+
+**Whether it recurred** is answered twice. Within a run, a deterministic check
+reports a command the agent retried after it had already failed — no model
+needed, so it still reports when Ark is unreachable. Across runs,
+`GET /api/agents/:id/failures` groups failures by kind: one failure is an
+incident, the same failure five times is the thing to fix.
+
+### Errors a run recovered from
+
+Codex reports its own failures on the event stream as `error` and `turn.failed`.
+Those events were collected and then read only as `errors.at(-1)`, and only when
+the process also exited non-zero — so every error a run recovered from was
+discarded, and a run that succeeded on the fifth attempt was indistinguishable
+from a clean one. They are spans now, which also means they are audited, and the
+count is reported as `recoveredErrorCount` on the trace.
+
+What counts as a stream error is defined once, in `codex-runner.ts`, and shared
+with the trace service. The two previously disagreed — only the trace side read
+`turn.failed` — so the classifier could miss the one event that said what went
+wrong.
+
+`recoveredErrorCount` is counted from the steps that actually failed, not from
+those stream events. Stream errors turn out to be rare: a denied command arrives
+as a tool result, so a real Run that recovered from five failures reported zero.
+The count lives on the trace alone — a second copy on the Run was never read and
+could drift from the one that was.
+
+### Evidence the platform knows is incomplete
+
+`CODEX_MAX_OUTPUT_BYTES` truncates the stream and the span clip truncates long
+tool output. Both are now marked — `evidenceComplete` on the trace,
+`outputTruncated` on the span — so a diagnosis never silently rests on evidence
+that was thrown away.
+
+### Audit health is not an agent finding
+
+An auditor that could not run says nothing about the agent. Those records are
+`category: "audit-health"`, are excluded from the warning count, and are
+reported separately as `auditHealth` (`ok`, `degraded`, `failed`). Counting
+them together made every Ark outage look like the agent had misbehaved.
+
+### Reading the failure envelope
+
+A denied tool call arrives as a Rust `Debug` struct with the payload repeated
+across `message`, `stderr` and `aggregated_output`. Two things make it hard to
+read, and both are handled in `apps/web/src/traces/codex-error.ts`:
+
+- **The nesting depth is not fixed.** The same denial has been seen as
+  `SandboxDenied { message: "..." }` and, later, as
+  `CreateProcess { message: "Codex(Sandbox(Denied { ... }))" }`. The deeper form
+  escapes the payload twice, so unescaping a fixed number of times is wrong in
+  one direction or the other. The parser descends until the text stops looking
+  like a struct.
+- **The outer struct name is the mechanism, not the reason.** `CreateProcess`
+  says how the call failed; `Sandbox(Denied` says why. The inner cause is
+  preferred when one is recognisable.
+
+Both envelope shapes are kept as fixtures — `codex-failure.json` and
+`codex-failure-nested.json` — so a change that fixes one cannot quietly break
+the other.
+
+The diagnosis reads a span's full `output` rather than its `error`, because
+`error` is a 400-character clip: feeding it to the parser produced a header
+match over a truncated payload, which looked parsed and showed nothing.
+
+`RunFailure.detail` is the one line worth quoting out of that envelope, not the
+envelope itself — the full text already lives on the span, and duplicating
+kilobytes of Debug syntax into the stored failure made it neither readable nor
+useful. On a real denial it goes from 2,593 characters to
+`Error: listen EPERM: operation not permitted 0.0.0.0:8080`.
+
 ## Setup
 
 Auditing is on by default and activates once Ark is configured. No extra
@@ -79,6 +210,7 @@ still report when Ark is unreachable.
 | --- | --- | --- |
 | Network whitelist | Deterministic | Did the step contact a destination that is not allowed? |
 | Secret exposure | Deterministic detection, judged relevance | Which credentials appeared, and did they belong in this operation? |
+| Repeated failure | Deterministic | Did the Agent retry a call that had already failed? |
 | Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? |
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
 
@@ -101,10 +233,13 @@ type AuditTraceStep = {
   traceId: string;
   agentId: string;
   type: "warning" | "error";
-  category: "intent-check" | "security";
+  category: "intent-check" | "security" | "reliability" | "audit-health";
   finding: string;
 };
 ```
+
+`audit-health` records are the auditor reporting on itself and are never a claim
+about the Agent, so they are excluded from warning counts.
 
 ## Intent
 
@@ -122,15 +257,63 @@ Classification is queued rather than awaited, so a slow model never delays a
 message. A detected change appends a new intent version immediately and governs
 later audits.
 
+Each version records what changed and why: the message that triggered it, the
+classifier's reasoning, the constraints added, and the run the message belonged
+to. The Playground shows that history as a timeline and marks the message that
+moved the spec — without it, the rules the Agent is judged against changed
+silently, and a user had no way to tell whether their correction had landed.
+
+**Reverting appends; it never rewinds.** Restoring an earlier version writes a
+new version carrying that version's content. Audits pin the `intentId` they were
+judged against and the trace UI resolves that id, so a superseded version has to
+stay readable — deleting history would leave every older trace pointing at
+nothing.
+
+## Prior context
+
+Each run inherits a summary of the one before it on the same Codex session.
+
+This used to exist only when the run-level audit model answered: the summary was
+whatever the verdict returned, so a model outage, a disabled auditor, or an
+unactivated endpoint left the chain empty, and every later run was judged as if
+nothing had happened before it. It is now established on three levels:
+
+1. **Thread lineage** — deterministic and never absent. `buildCodexArgs` issues
+   `resume <threadId>`, so `conversationId` is the Agent's real continuity, and
+   the chain is keyed on it rather than on the Agent id. Resetting a session no
+   longer carries context across a boundary the Agent itself does not share.
+2. **Derived digest** — built from the trace alone: prompt, files touched,
+   commands run, services contacted, outcome, and failure attribution. Written
+   on `trace-completed`, before any model has been consulted.
+
+   Files written by a shell command are read out of the command text, since the
+   path appears in no argument: a run that created `server.js` with
+   `cat > server.js` used to report no files touched at all. Heredoc content is
+   kept with the path, so a credential written to disk that way is still visible
+   to the secret check.
+3. **Model summary** — the auditor's compression, used when it is available. It
+   upgrades the digest and never erases it.
+
+Which of the last two a reader is looking at is shown as `source`, because a
+derived digest and a model summary are not the same kind of claim. The step
+auditor receives the carried-in context too, so a step that only makes sense as
+the continuation of earlier work is not flagged as unmotivated.
+
 ## API
 
 | Route | Purpose |
 | --- | --- |
 | `POST /collector/v1/logs` | OTLP ingest. Requires `x-collector-token`; outside `/api` by design. |
-| `GET /api/agents/:id/traces` | Trace list rows with warning counts. |
-| `GET /api/agents/:id/intent` | Current objective, standing constraints, version map, and current intentId. |
-| `GET /api/traces/:id` | One trace with its audits and derived findings. |
+| `GET /api/agents/:id/traces` | Trace list rows with failure attribution, warning counts, and audit health. |
+| `GET /api/agents/:id/failures` | The Agent's failures grouped by kind, newest first. |
+| `GET /api/agents/:id/intent` | Current objective, standing constraints, the ordered version list, and current intentId. |
+| `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. |
+| `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
+
+Intent versions are served as an **ordered list**, not a map: version order is
+insertion order and the ids are random UUIDs, so the order has to be carried
+explicitly rather than left to survive a JSON round trip.
 
 Everything under `/api` is covered by the operator bearer token when
 `APP_AUTH_TOKEN` is set. The collector route is not, and uses its own per-boot
@@ -146,7 +329,12 @@ under `APP_DATA_DIR`:
 .data/traces/<chatId>.json    one TraceRecord per chat / AgentRun
 .data/audits/<chatId>.json    intent-pinned findings for that chat
 .data/intent/<agentId>.json   insertion-ordered map of intent versions
+.data/context/<chatId>.json   what that run carried out, for the next one
 ```
+
+Context is written from the `trace-completed` event rather than by the auditor,
+so it exists whether or not auditing is switched on. The auditor enriches that
+record; it does not own it.
 
 A Run left open by a crash is closed on the next boot, so the UI never shows a
 Run as live when nothing is running.
@@ -158,8 +346,22 @@ npm run check
 ```
 
 Runs typecheck, the test suite, and both builds. The suite covers OTLP parsing,
-span assembly, masking, storage, route auth, the audit policies, and intent
-classification mechanics.
+span assembly, masking, storage, route auth, the audit policies, intent
+classification mechanics, failure attribution, and the prior-context chain.
+
+Typecheck covers test files as well as sources (`tsconfig.test.json`). They were
+excluded before, which is how a runner result that had grown a required field
+reached the suite as a runtime `TypeError` rather than a compile error.
+
+Two properties are worth naming because they are the ones most easily broken by
+a later change:
+
+- **Prior context is established without a model.** `context-store.test.ts`
+  drives a full chain with no auditor wired in at all and asserts the digest,
+  the thread keying, and survival across a restart.
+- **A failure is never attributed to the Agent by default.** `failures.test.ts`
+  covers every rule in the taxonomy, and an unrecognised failure falls back to
+  `platform` rather than `agent`.
 
 The audit policies are verified against the 20-case dataset from the audit
 plan, kept verbatim at
@@ -209,6 +411,17 @@ message rather than atomically with it.
 **One judged call per step.** Long Runs are capped at 30 step audits per trace
 to bound cost. The Run-level intent audit is always performed and is not counted
 against that budget.
+
+**A recovered run is not a clean run.** `recoveredErrorCount` counts the errors
+a Run survived, and is zero on a failed Run — where the last error is the
+outcome rather than something the Agent got past.
+
+**The planning link is inferred.** `causedBySpanId` is the model call in flight
+when a step was decided, read off an async event stream. It is right in the
+ordinary case and is labelled as a likelihood rather than a certainty.
+
+**Repeat detection compares normalised arguments.** The same command reformatted
+is recognised; the same intent expressed as a different command is not.
 
 **Judged findings are model output.** Alignment, new objectives, and secret
 relevance come from a model and can be wrong in both directions. The

@@ -112,6 +112,35 @@ function flattenCommand(value: string | string[] | undefined): string | null {
 // Turns one persisted span into the activity view. Network calls seen in a
 // shell command are recorded with the surrounding command as the request body
 // so egress checks still see what was sent.
+// Files a shell command writes are named nowhere in its arguments — the path is
+// inside the command text. A run that created server.js with `cat > server.js`
+// reported "no files touched", which under-stated both the carry-forward digest
+// and the secret-exposure check.
+//
+// Redirections only: `2>&1` and `>&2` are excluded by requiring the target to
+// start with something path-like rather than a descriptor.
+const REDIRECT = /(?:^|[\s;&|])\d?>>?\s*(?!&)(['"]?)([^\s;&|<>'"]+)\1/g;
+const WRITER = /\b(?:tee|touch)\s+(?:-\S+\s+)*(['"]?)([^\s;&|<>'"]+)\1/g;
+// `cat > f << 'EOF' ... EOF` carries the file's content in the command itself,
+// which is worth keeping: a credential written to disk this way is exactly what
+// the secret check exists to notice.
+const HEREDOC = /<<-?\s*['"]?(\w+)['"]?\r?\n([\s\S]*?)\r?\n?\1/;
+
+export function filesWrittenBy(command: string): StepFile[] {
+  const paths = new Set<string>();
+  for (const pattern of [REDIRECT, WRITER]) {
+    pattern.lastIndex = 0;
+    for (const match of command.matchAll(pattern)) {
+      const target = match[2];
+      if (target && !target.startsWith("/dev/")) paths.add(target);
+    }
+  }
+  if (paths.size === 0) return [];
+  const heredoc = HEREDOC.exec(command);
+  const content = heredoc?.[2] ? heredoc[2].split(/\r?\n/) : [];
+  return [...paths].map((path) => ({ path, content }));
+}
+
 export function activityFromSpan(
   span: TraceSpan,
   trace: TraceRecord,
@@ -137,7 +166,10 @@ export function activityFromSpan(
     const command =
       flattenCommand(parsedArguments?.command) ??
       flattenCommand(parsedArguments?.cmd);
-    if (command) activity.commands.push(command);
+    if (command) {
+      activity.commands.push(command);
+      activity.files.push(...filesWrittenBy(command));
+    }
     const filePath = parsedArguments?.path ?? parsedArguments?.file_path;
     if (filePath) {
       activity.files.push({

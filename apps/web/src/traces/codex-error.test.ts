@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixture from "./__fixtures__/codex-failure.json" with { type: "json" };
+import nested from "./__fixtures__/codex-failure-nested.json" with { type: "json" };
 import { parseCodexFailure, readCommand } from "./codex-error";
 
 // The fixture is a verbatim capture of a real Codex 0.111.0 exec_command
@@ -73,6 +74,60 @@ describe("parseCodexFailure", () => {
     const half = RAW.slice(0, Math.floor(RAW.length / 2));
     expect(() => parseCodexFailure(half)).not.toThrow();
     expect(parseCodexFailure(half)?.kind).toBe("SandboxDenied");
+  });
+});
+
+// Codex changed the envelope: the same denial now arrives wrapped one level
+// deeper, as CreateProcess { message: "Codex(Sandbox(Denied { ... }))" }, so
+// every payload is escaped twice. The parser silently degraded — duplicate
+// stack frames, a stray backslash on every line, and no problem lines at all
+// for the shorter denial. Both shapes are pinned here so a fix for one cannot
+// quietly break the other.
+describe("parseCodexFailure against the nested envelope", () => {
+  const portBind = parseCodexFailure(nested.portBind.output);
+  const etcWrite = parseCodexFailure(nested.etcWrite.output);
+
+  it("reports the inner cause rather than the outer mechanism", () => {
+    // The header says CreateProcess, which is how it failed, not why.
+    expect(nested.portBind.output).toContain("CreateProcess");
+    expect(portBind?.kind).toBe("SandboxDenied");
+    expect(portBind?.tool).toBe("exec_command");
+    expect(portBind?.exitCode).toBe(1);
+  });
+
+  it("unescapes a payload that was escaped twice", () => {
+    expect(portBind?.problems).toContain(
+      "Error: listen EPERM: operation not permitted 0.0.0.0:8080",
+    );
+    // The old chain of replaces left a backslash before every newline, which
+    // is what broke the end-anchored problem patterns.
+    for (const problem of portBind?.problems ?? []) {
+      expect(problem.endsWith("\\")).toBe(false);
+    }
+    for (const frame of portBind?.stack ?? []) {
+      expect(frame.endsWith("\\")).toBe(false);
+    }
+  });
+
+  it("still collapses the repeated payload", () => {
+    // stderr and aggregated_output carry the same 12-frame trace.
+    expect(portBind?.stack).toHaveLength(12);
+    expect(new Set(portBind?.stack).size).toBe(portBind?.stack.length);
+  });
+
+  it("diagnoses a denial that carries no stack trace at all", () => {
+    // This one produced nothing before: no problems, no facts, no frames, and
+    // the whole payload dumped into "other output" — strictly worse than raw.
+    expect(etcWrite?.problems).toEqual([
+      "/bin/bash: line 1: /etc/launchpad-probe.txt: Permission denied",
+    ]);
+    expect(etcWrite?.rest.trim()).toBe("");
+  });
+
+  it("leaves far less unclassified than the raw envelope", () => {
+    expect(portBind?.rest.length).toBeLessThan(
+      nested.portBind.output.length / 4,
+    );
   });
 });
 

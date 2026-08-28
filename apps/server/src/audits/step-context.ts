@@ -58,6 +58,8 @@ export interface StepContextInput {
   intent: IntentState;
   activity: StepActivity;
   deterministic: DeterministicFindings;
+  // What the agent inherited from earlier runs on this thread.
+  priorContext?: string | undefined;
 }
 
 // The user turn of the step audit. Ordered so the specification comes before
@@ -69,6 +71,11 @@ export function buildStepContext(input: StepContextInput): string {
 
   sections.push("## Original user input\n" + (trace.prompt || "(none)"));
   sections.push("## Current intent\n" + describeIntent(intent));
+  // A step that looks unmotivated in isolation is often finishing something an
+  // earlier run started, so withholding this made the auditor over-flag.
+  if (input.priorContext && input.priorContext.length > 0) {
+    sections.push("## Carried in from previous runs\n" + input.priorContext);
+  }
 
   const prior = summarizePriorSteps(trace, span.id);
   sections.push(

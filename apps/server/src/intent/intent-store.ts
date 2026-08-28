@@ -1,7 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { intentFileSchema, type IntentVersion } from "./intent-model.js";
+import {
+  intentFileSchema,
+  type IntentVersion,
+  type IntentVersionEntry,
+} from "./intent-model.js";
 
 export class IntentStore {
   private readonly records = new Map<string, Map<string, IntentVersion>>();
@@ -25,15 +29,17 @@ export class IntentStore {
     }
   }
 
-  get(agentId: string) {
+  // Insertion order is the version order, and it is the only ordering there is:
+  // ids are random UUIDs. Returned as a list rather than a record so the order
+  // is carried explicitly instead of depending on object key order surviving
+  // JSON in the browser.
+  list(agentId: string): IntentVersionEntry[] {
     const versions = this.records.get(agentId);
-    if (!versions) return null;
-    return new Map(
-      [...versions.entries()].map(([id, version]) => [
-        id,
-        structuredClone(version),
-      ]),
-    );
+    if (!versions) return [];
+    return [...versions.entries()].map(([id, version]) => ({
+      id,
+      ...structuredClone(version),
+    }));
   }
 
   latest(agentId: string) {
@@ -57,7 +63,11 @@ export class IntentStore {
       return;
     }
     const versions = new Map<string, IntentVersion>();
-    versions.set(randomUUID(), { objective, extended: [] });
+    versions.set(randomUUID(), {
+      objective,
+      extended: [],
+      createdAt: new Date().toISOString(),
+    });
     this.records.set(agentId, versions);
     this.persist(agentId);
   }
@@ -72,10 +82,37 @@ export class IntentStore {
     versions.set(intentId, {
       objective: version.objective,
       extended: [...version.extended],
-      ...(version.update ? { update: { logs: [...version.update.logs] } } : {}),
+      createdAt: version.createdAt ?? new Date().toISOString(),
+      ...(version.update ? { update: structuredClone(version.update) } : {}),
     });
     this.persist(agentId);
     return intentId;
+  }
+
+  // Restores an earlier version by appending a new one that carries its
+  // content, never by rewinding the list. Audits pin the intentId they were
+  // judged against and the trace UI resolves that id, so a version that has
+  // been superseded still has to be readable — deleting history would make
+  // every older trace point at nothing.
+  revert(agentId: string, intentId: string) {
+    const versions = this.records.get(agentId);
+    const target = versions?.get(intentId);
+    if (!versions || !target) return null;
+    const current = this.latest(agentId);
+    if (current?.intentId === intentId) return null;
+    const position = [...versions.keys()].indexOf(intentId) + 1;
+    return this.append(agentId, {
+      objective: target.objective,
+      extended: [...target.extended],
+      update: {
+        kind: "revert",
+        logs: ["Reverted to version " + position],
+        addedConstraints: [],
+        previousObjective: current?.version.objective ?? null,
+        traceId: null,
+        revertedFrom: intentId,
+      },
+    });
   }
 
   remove(agentId: string) {

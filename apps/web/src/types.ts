@@ -28,6 +28,31 @@ export interface Message {
   createdAt: string;
 }
 
+// Mirrors apps/server/src/failures.ts. Only "agent" and "task" mean the agent
+// is what needs improving; the rest are the platform, the provider, a policy
+// boundary, or the operator.
+export type FailureLayer =
+  | "platform"
+  | "provider"
+  | "policy"
+  | "agent"
+  | "task"
+  | "user";
+
+export type Retryability = "transient" | "permanent" | "user-action";
+
+export interface RunFailure {
+  layer: FailureLayer;
+  kind: string;
+  retryability: Retryability;
+  title: string;
+  detail: string;
+  remedy: string;
+  exitCode: number | null;
+}
+
+export type AuditHealth = "ok" | "degraded" | "failed";
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -35,6 +60,9 @@ export interface AgentRun {
   prompt: string;
   output: string | null;
   error: string | null;
+  failure: RunFailure | null;
+  // Recovered-error counts live on the trace, not here: two copies of the same
+  // number could disagree, and this one was never read.
   usage: {
     inputTokens?: number;
     cachedInputTokens?: number;
@@ -89,7 +117,11 @@ export interface TraceSummary {
   spanCount: number;
   errorCount: number;
   failingSpanId: string | null;
+  failure: RunFailure | null;
+  recoveredErrorCount: number;
+  evidenceComplete: boolean;
   warningCount: number;
+  auditHealth: AuditHealth;
 }
 
 export interface TraceRecord {
@@ -103,8 +135,44 @@ export interface TraceRecord {
   model: string | null;
   usage: TraceUsage;
   failingSpanId: string | null;
+  failure: RunFailure | null;
+  recoveredErrorCount: number;
+  evidenceComplete: boolean;
   unrecognizedEvents: number;
   spans: TraceSpan[];
+}
+
+export interface RunDigest {
+  prompt: string;
+  outcome: string;
+  filesTouched: string[];
+  commands: string[];
+  services: string[];
+  failureKind: string | null;
+  failureLayer: string | null;
+}
+
+export interface RunContext {
+  traceId: string;
+  agentId: string;
+  conversationId: string | null;
+  startedAt: string;
+  endedAt: string;
+  intentId: string;
+  summary: string;
+  // "derived" means no model was involved. Shown, because a reader should know
+  // which kind of summary they are looking at.
+  source: "derived" | "model";
+  digest: RunDigest;
+}
+
+export interface ContextView {
+  carriedIn: RunContext | null;
+  carriedOut: RunContext | null;
+  position: number;
+  chainLength: number;
+  previousTraceId: string | null;
+  nextTraceId: string | null;
 }
 
 export interface AuditTraceStep {
@@ -113,7 +181,9 @@ export interface AuditTraceStep {
   agentId: string;
   spanId: string | null;
   type: "warning" | "error";
-  category: "intent-check" | "security";
+  // "audit-health" is the auditor reporting on itself, never a claim about the
+  // agent. Kept out of warning counts for that reason.
+  category: "intent-check" | "security" | "reliability" | "audit-health";
   finding: string;
 }
 
@@ -122,10 +192,29 @@ export interface IntentState {
   extended: string[];
 }
 
+export interface IntentUpdate {
+  logs: string[];
+  kind: "seed" | "classified" | "revert";
+  message?: string;
+  reason?: string;
+  addedConstraints: string[];
+  previousObjective: string | null;
+  // The run whose message moved the spec, so the Playground can mark it.
+  traceId: string | null;
+  revertedFrom: string | null;
+}
+
 export interface IntentVersion {
   objective: string;
   extended: string[];
-  update?: { logs: string[] };
+  createdAt?: string;
+  update?: IntentUpdate;
+}
+
+// History is append-only, so position in the ordered list is the version number
+// a reader sees.
+export interface IntentVersionEntry extends IntentVersion {
+  id: string;
 }
 
 export interface SystemInfo {

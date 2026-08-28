@@ -1,8 +1,17 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
+import {
+  buildCodexArgs,
+  errorEvidence,
+  parseCodexEventLine,
+} from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
+import {
+  classifyRunFailure,
+  noAgentMessageFailure,
+  RunFailureError,
+} from "./failures.js";
 import type {
   AgentRunner,
   RunUsage,
@@ -209,30 +218,52 @@ export class ContainerCodexRunner implements AgentRunner {
 
     try {
       const exitCode = await new Promise<number>((resolve, reject) => {
-        child.once("error", reject);
+        // A spawn failure is the engine or the image missing, not the agent
+        // doing anything wrong, so it is attributed before it is thrown.
+        child.once("error", (error: Error) =>
+          reject(
+            new RunFailureError(
+              classifyRunFailure(error.message, { spawnFailed: true }),
+            ),
+          ),
+        );
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
-        throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            timedOut: true,
+            timeoutMs: this.config.codexTimeoutMs,
+            exitCode,
+          }),
+        );
       }
       if (active.outputExceeded) {
-        throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            outputExceeded: true,
+            maxOutputBytes: this.config.codexMaxOutputBytes,
+            exitCode,
+          }),
+        );
       }
       if (exitCode !== 0) {
-        const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
-        throw new Error(
-          this.config.containerEngine +
-            " Runtime exited with code " +
-            exitCode +
-            ": " +
-            detail,
+        throw new RunFailureError(
+          classifyRunFailure(errorEvidence(parsed.errors, stderr), {
+            exitCode,
+            source: "process-exit",
+          }),
         );
       }
       const output = parsed.messages.at(-1)?.trim();
-      if (!output) throw new Error("Codex completed without an agent message");
-      return { output, threadId: parsed.threadId, usage: parsed.usage };
+      if (!output) throw new RunFailureError(noAgentMessageFailure());
+      return {
+        output,
+        threadId: parsed.threadId,
+        usage: parsed.usage,
+      };
     } finally {
       clearTimeout(timeout);
       this.active.delete(request.agentId);

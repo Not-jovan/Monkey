@@ -19,18 +19,45 @@ export const auditTraceStepSchema = z.object({
   agentId: z.string(),
   spanId: z.string().nullable(),
   type: z.enum(["warning", "error"]),
-  category: z.enum(["intent-check", "security"]),
+  // "audit-health" is the auditor reporting on itself. Kept apart from the two
+  // agent categories because "our auditor could not run" and "the agent
+  // misbehaved" are opposite claims, and counting them together made a model
+  // outage look like an agent defect.
+  // "reliability" is about how the agent behaved rather than whether it was
+  // safe or on-spec: retrying a call that has already failed, for instance.
+  category: z.enum([
+    "intent-check",
+    "security",
+    "reliability",
+    "audit-health",
+  ]),
   finding: z.string(),
 });
 
 export type AuditTraceStep = z.infer<typeof auditTraceStepSchema>;
 
+export const auditHealthSchema = z.enum(["ok", "degraded", "failed"]);
+export type AuditHealth = z.infer<typeof auditHealthSchema>;
+
+// Worst-case wins: one failed policy call degrades the whole record rather than
+// being averaged away by the calls that did work.
+const HEALTH_RANK: Record<AuditHealth, number> = {
+  ok: 0,
+  degraded: 1,
+  failed: 2,
+};
+
+export function worstHealth(left: AuditHealth, right: AuditHealth): AuditHealth {
+  return HEALTH_RANK[right] > HEALTH_RANK[left] ? right : left;
+}
+
 export const chatAuditSchema = z.object({
   agentId: z.string(),
   intentId: z.string(),
+  // Defaulted so audit files written before health was tracked still parse.
+  health: auditHealthSchema.default("ok"),
   contextSummary: z.string(),
   summary: z.object({
-    priorRollout: z.string(),
     tokenSummary: z.object({
       input: z.number(),
       output: z.number(),

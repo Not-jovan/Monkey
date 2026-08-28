@@ -4,14 +4,17 @@ import type { IntentState } from "../intent/intent-model.js";
 import type { IntentService } from "../intent/intent-service.js";
 import type { TraceSpan } from "../traces/trace-model.js";
 import type { TraceStore } from "../traces/trace-store.js";
+import type { ContextStore } from "../context/context-store.js";
+import { isPermanentProviderError } from "../failures.js";
 import { ArkApiError, type ArkClient } from "./ark-client.js";
 import {
   auditSteps,
   emitPolicyFindings,
+  type AuditHealth,
   type SecretExposureFinding,
 } from "./audit-model.js";
 import type { AuditStore } from "./audit-store.js";
-import { runDeterministicChecks } from "./deterministic.js";
+import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js";
 import { activityFromSpan } from "./step-activity.js";
 import { buildStepContext } from "./step-context.js";
 
@@ -95,6 +98,14 @@ const INTENT_SYSTEM_PROMPT = [
 
 const MAX_STEP_AUDITS_PER_TRACE = 30;
 
+// A run whose auditor fell back to the secondary model is not the same as one
+// whose auditor worked, and neither is a defect in the agent. Recorded so the
+// UI can say which of the three happened.
+function healthOf(status: "completed" | "degraded" | "failed"): AuditHealth {
+  if (status === "completed") return "ok";
+  return status;
+}
+
 function extractJson(content: string) {
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
@@ -123,6 +134,9 @@ interface AuditServiceDeps {
   networkWhitelist: string[] | null;
   // Supplies the specification each step is judged against.
   intent?: IntentService;
+  // Prior-run context. Always populated, model or no model — the auditor reads
+  // from it and enriches it, but never owns it.
+  context?: ContextStore;
   enabled: boolean;
   log?: (message: string, error?: unknown) => void;
 }
@@ -207,7 +221,14 @@ export class AuditService {
       this.deps.securityModel,
       this.deps.intentModel,
       STEP_SYSTEM_PROMPT,
-      buildStepContext({ trace, span, intent, activity, deterministic }),
+      buildStepContext({
+        trace,
+        span,
+        intent,
+        activity,
+        deterministic,
+        priorContext: this.deps.context?.priorFor(traceId)?.summary ?? "",
+      }),
       stepVerdict,
     );
 
@@ -297,13 +318,14 @@ export class AuditService {
           if (status === "failed") {
             push(
               "error",
-              "security",
+              "audit-health",
               "The audit could not be completed" + (reason ? ": " + reason : "."),
             );
           }
         },
       ),
       this.deps.intent?.currentId(trace.agentId) ?? "",
+      healthOf(status),
     );
   }
 
@@ -315,7 +337,8 @@ export class AuditService {
       typeof root?.attributes.instructions === "string"
         ? root.attributes.instructions
         : "";
-    const priorContext = this.deps.auditStore.priorRollout(trace.agentId);
+    const prior = this.deps.context?.priorFor(traceId) ?? null;
+    const priorContext = prior?.summary ?? "";
     const intent = this.intentState(trace.agentId);
 
     const steps = trace.spans
@@ -339,7 +362,12 @@ export class AuditService {
         ? "Standing constraints:\n" +
           intent.extended.map((entry) => "- " + entry).join("\n")
         : "",
-      priorContext ? "Compressed context from previous runs: " + priorContext : "",
+      priorContext
+        ? "Context carried in from the previous run (" +
+          (prior?.source === "model" ? "model summary" : "derived from trace") +
+          "): " +
+          priorContext
+        : "",
       "Run status: " + trace.status,
       "Steps:",
       steps,
@@ -355,6 +383,10 @@ export class AuditService {
       intentVerdict,
     );
 
+    // Upgrades the deterministic digest to the model's compression. A blank or
+    // failed verdict leaves the digest in place rather than erasing it.
+    this.deps.context?.enrich(traceId, verdict?.context_summary ?? "");
+
     const reason = verdict?.deviation ?? (verdict ? "" : (failure ?? ""));
     this.deps.auditStore.recordRun(
       trace,
@@ -369,10 +401,23 @@ export class AuditService {
           if (verdict && !verdict.aligned && verdict.deviation) {
             push("warning", "intent-check", verdict.deviation);
           }
+          // Needs no model, so it still reports when Ark is unreachable.
+          for (const repeat of findRepeatedFailures(trace)) {
+            push(
+              "warning",
+              "reliability",
+              "The agent retried " +
+                repeat.toolName +
+                " " +
+                repeat.count +
+                " times after it had already failed" +
+                (repeat.attempt ? ": " + repeat.attempt : "."),
+            );
+          }
           if (status === "failed") {
             push(
               "error",
-              "intent-check",
+              "audit-health",
               "The audit could not be completed" + (reason ? ": " + reason : "."),
             );
           }
@@ -380,6 +425,7 @@ export class AuditService {
       ),
       verdict?.context_summary ?? "",
       this.deps.intent?.currentId(trace.agentId) ?? "",
+      healthOf(status),
     );
   }
 
@@ -389,9 +435,7 @@ export class AuditService {
   private isPermanentlyUnavailable(error: unknown) {
     return (
       error instanceof ArkApiError &&
-      (error.status === 404 ||
-        error.code === "ModelNotOpen" ||
-        error.code === "ModelNotFound")
+      isPermanentProviderError(error.status, error.code)
     );
   }
 

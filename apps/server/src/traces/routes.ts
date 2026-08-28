@@ -2,12 +2,15 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AuditStore } from "../audits/audit-store.js";
+import { blamesAgent } from "../failures.js";
+import type { ContextService } from "../context/context-service.js";
 import type { IntentService } from "../intent/intent-service.js";
 import { HttpError } from "../errors.js";
 import type { TraceStore } from "./trace-store.js";
 import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
+const revertBody = z.object({ intentId: z.string().min(1) });
 const traceParams = z.object({ id: z.string().min(8).max(64) });
 
 export interface GlassboxDeps {
@@ -15,6 +18,7 @@ export interface GlassboxDeps {
   auditStore: AuditStore;
   traceService: TraceService;
   intentService?: IntentService;
+  contextService?: ContextService;
   collectorToken: string;
 }
 
@@ -52,6 +56,7 @@ export function registerGlassboxRoutes(
   app.get("/api/agents/:id/traces", async (request) => {
     const { id } = idParams.parse(request.params);
     const warningCounts = deps.auditStore.warningCountByTrace();
+    const health = deps.auditStore.healthByTrace();
     const traces = deps.traceStore.listByAgent(id).map((trace) => {
       let errorCount = 0;
       for (const span of trace.spans) {
@@ -69,10 +74,67 @@ export function registerGlassboxRoutes(
         spanCount: trace.spans.length,
         errorCount,
         failingSpanId: trace.failingSpanId,
+        // Why it failed, not merely that it did.
+        failure: trace.failure,
+        // A run that succeeded on the fifth attempt is not a clean run.
+        recoveredErrorCount: trace.recoveredErrorCount,
+        evidenceComplete: trace.evidenceComplete,
         warningCount: warningCounts.get(trace.id) ?? 0,
+        // Reported apart from warningCount: an auditor outage is not an agent
+        // defect, and counting the two together made every outage look like one.
+        auditHealth: health.get(trace.id) ?? "ok",
       };
     });
     return { traces };
+  });
+
+  // One failure is an incident; the same failure five times is the thing to
+  // fix. Grouped over data the trace store already holds.
+  app.get("/api/agents/:id/failures", async (request) => {
+    const { id } = idParams.parse(request.params);
+    const groups = new Map<
+      string,
+      {
+        kind: string;
+        layer: string;
+        retryability: string;
+        title: string;
+        remedy: string;
+        count: number;
+        lastSeenAt: string;
+        traceIds: string[];
+      }
+    >();
+    for (const trace of deps.traceStore.listByAgent(id)) {
+      const failure = trace.failure;
+      if (!failure) continue;
+      const existing = groups.get(failure.kind);
+      if (existing) {
+        existing.count += 1;
+        existing.traceIds.push(trace.id);
+        continue;
+      }
+      groups.set(failure.kind, {
+        kind: failure.kind,
+        layer: failure.layer,
+        retryability: failure.retryability,
+        title: failure.title,
+        remedy: failure.remedy,
+        count: 1,
+        // listByAgent is newest-first, so the first sighting is the latest.
+        lastSeenAt: trace.endedAt ?? trace.startedAt,
+        traceIds: [trace.id],
+      });
+    }
+    // The Agent's own failures first: they are the ones changing the Agent can
+    // fix. A platform outage sorted above them would bury the actionable half.
+    const ranked = [...groups.values()].sort((left, right) => {
+      const leftBlame = blamesAgent(left) ? 1 : 0;
+      const rightBlame = blamesAgent(right) ? 1 : 0;
+      if (leftBlame !== rightBlame) return rightBlame - leftBlame;
+      return right.count - left.count;
+    });
+    return { failures: ranked };
   });
 
   app.get("/api/agents/:id/intent", async (request) => {
@@ -80,11 +142,31 @@ export function registerGlassboxRoutes(
     if (!deps.intentService) {
       return {
         intent: { objective: "", extended: [] },
-        versions: {},
+        versions: [],
         intentId: null,
       };
     }
     return deps.intentService.view(id);
+  });
+
+  // Restoring an earlier spec appends a new version rather than rewinding, so
+  // an audit that pinned the reverted version can still be read back.
+  app.post("/api/agents/:id/intent/revert", async (request, reply) => {
+    const { id } = idParams.parse(request.params);
+    const { intentId } = revertBody.parse(request.body);
+    if (!deps.intentService) {
+      throw new HttpError(503, "Intent tracking is not enabled");
+    }
+    const result = deps.intentService.revert(id, intentId);
+    if (!result.created) {
+      throw new HttpError(
+        409,
+        "That intent version cannot be restored; it is unknown or already current",
+      );
+    }
+    // The appended version is by definition the newest, so view.intentId is
+    // already the id that was just created.
+    return reply.code(201).send(result.view);
   });
 
   app.get("/api/traces/:id", async (request) => {
@@ -98,7 +180,11 @@ export function registerGlassboxRoutes(
       trace,
       findings,
       auditComplete: deps.auditStore.isRunComplete(id),
+      auditHealth: deps.auditStore.health(id),
       intentId: deps.auditStore.intentId(id),
+      // What the agent carried in, what it leaves behind, and where this run
+      // sits on its Codex thread.
+      context: deps.contextService?.view(id) ?? null,
     };
   });
 
@@ -118,7 +204,9 @@ export function registerGlassboxRoutes(
       trace,
       findings,
       auditComplete: deps.auditStore.isRunComplete(id),
+      auditHealth: deps.auditStore.health(id),
       intentId: deps.auditStore.intentId(id),
+      context: deps.contextService?.view(id) ?? null,
     };
   };
 

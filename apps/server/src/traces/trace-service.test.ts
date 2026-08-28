@@ -65,6 +65,25 @@ const agent = {
 };
 const RUN_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 
+// Wraps OTLP log attributes in the envelope the collector receives. Was copied
+// verbatim into every test that needed it.
+const logs = (records: Record<string, string>[]) => ({
+  resourceLogs: [
+    {
+      scopeLogs: [
+        {
+          logRecords: records.map((attributes) => ({
+            attributes: Object.entries(attributes).map(([key, value]) => ({
+              key,
+              value: { stringValue: value },
+            })),
+          })),
+        },
+      ],
+    },
+  ],
+});
+
 describe("TraceService", () => {
   it("assembles the span tree for a real captured run", async () => {
     const { store, service } = await makeService();
@@ -257,23 +276,6 @@ describe("TraceService", () => {
       { id: RUN_ID, prompt: "run test" },
     );
 
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
-
     service.ingestLogs(
       logs([
         {
@@ -381,23 +383,6 @@ describe("TraceService", () => {
       { id: RUN_ID, prompt: "Spawn 2 subagents" },
     );
 
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
-
     service.ingestLogs(
       logs([
         {
@@ -442,23 +427,6 @@ describe("TraceService", () => {
       { ...agent, codexThreadId: CONVERSATION_ID },
       { id: RUN_ID, prompt: "Spawn 2 subagents" },
     );
-
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
 
     const nestedOutput = [
       "Chunk ID: 6edb91",
@@ -553,23 +521,6 @@ describe("TraceService", () => {
       { id: RUN_ID, prompt: "delegate research" },
     );
 
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
-
     service.ingestLogs(
       logs([
         {
@@ -621,23 +572,6 @@ describe("TraceService", () => {
       { ...agent, codexThreadId: CONVERSATION_ID },
       { id: RUN_ID, prompt: "research task" },
     );
-
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
 
     service.ingestLogs(
       logs([
@@ -730,23 +664,6 @@ describe("TraceService", () => {
       { ...agent, codexThreadId: CONVERSATION_ID },
       { id: RUN_ID, prompt: "delegate two workers" },
     );
-
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
 
     service.ingestLogs(
       logs([
@@ -846,23 +763,6 @@ describe("TraceService", () => {
       },
     });
 
-    const logs = (records: Record<string, string>[]) => ({
-      resourceLogs: [
-        {
-          scopeLogs: [
-            {
-              logRecords: records.map((attributes) => ({
-                attributes: Object.entries(attributes).map(([key, value]) => ({
-                  key,
-                  value: { stringValue: value },
-                })),
-              })),
-            },
-          ],
-        },
-      ],
-    });
-
     service.ingestLogs(
       logs([
         {
@@ -884,5 +784,271 @@ describe("TraceService", () => {
     expect(spawn?.attributes.receiverThreadIds).toBe("thread-child");
     expect(childModel?.parentId).toBe(spawn?.id);
     expect(childModel?.attributes.laneId).toBe(spawn?.id);
+  });
+
+  // parseCodexEventLine collected these and the runners read only the last one,
+  // and only on a non-zero exit — so every error a run recovered from was
+  // discarded before it could be seen or audited.
+  it("keeps the errors Codex reports on its own event stream", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "install the deps" });
+
+    service.onRunnerEvent(RUN_ID, {
+      type: "error",
+      message: "npm ERR! network timeout",
+    });
+    service.onRunnerEvent(RUN_ID, {
+      type: "turn.failed",
+      error: { message: "retrying after a stream reset" },
+    });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "installed" });
+
+    const trace = store.get(RUN_ID);
+    const errors = trace?.spans.filter((span) => span.name === "codex.error");
+    expect(errors).toHaveLength(2);
+    expect(errors?.[0]?.status).toBe("error");
+    expect(errors?.[0]?.error).toBe("npm ERR! network timeout");
+    expect(errors?.[1]?.error).toBe("retrying after a stream reset");
+    // The run succeeded, so both were recovered from.
+    expect(trace?.recoveredErrorCount).toBe(2);
+    expect(trace?.status).toBe("completed");
+  });
+
+  it("masks a credential that appears in a stream error", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "deploy" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "error",
+      message: "auth failed for " + SECRET,
+    });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "done" });
+
+    const error = store
+      .get(RUN_ID)
+      ?.spans.find((span) => span.name === "codex.error");
+    expect(error?.error).not.toContain(SECRET);
+  });
+
+  // On a failed run the last error is the outcome, not something survived.
+  it("records attribution on a failed run and claims no recovery", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "serve on port 8080" });
+    service.onRunnerEvent(RUN_ID, { type: "error", message: "SandboxDenied" });
+    service.onRunEnd(RUN_ID, {
+      status: "failed",
+      error: "sandbox denied",
+      failure: {
+        layer: "policy",
+        kind: "sandbox-denied",
+        retryability: "user-action",
+        title: "The Runtime sandbox denied this operation",
+        detail: "listen EPERM",
+        remedy: "Keep the work inside /workspace.",
+        exitCode: 1,
+      },
+    });
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.failure?.kind).toBe("sandbox-denied");
+    expect(trace?.recoveredErrorCount).toBe(0);
+    const root = trace?.spans.find((span) => span.name === "agent.run");
+    expect(root?.attributes.failureLayer).toBe("policy");
+    expect(root?.attributes.retryability).toBe("user-action");
+    // The stream error is the most recent failing span, so it is what the UI
+    // points at.
+    expect(trace?.failingSpanId).toBeTruthy();
+  });
+
+  // The case the whole diagnosis feature was invisible for: a real sandbox
+  // denial in this system leaves the run "completed", because the agent
+  // explains the denial and carries on. Nothing about it can be diagnosed if
+  // the failing step is only recorded when the run itself stopped.
+  it("records the failing step even when the run completed", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "serve on port 8080" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "error",
+      message:
+        'exec_command failed: SandboxDenied { message: "listen EPERM 0.0.0.0:8080" }',
+    });
+    service.onRunEnd(RUN_ID, {
+      status: "completed",
+      output: "I could not bind the port, so I documented how to run it locally.",
+    });
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.status).toBe("completed");
+    expect(trace?.failingSpanId).not.toBeNull();
+    // Attributed from the step, with no run-level failure to inherit from.
+    expect(trace?.failure?.layer).toBe("policy");
+    expect(trace?.failure?.kind).toBe("sandbox-denied");
+    expect(trace?.recoveredErrorCount).toBe(1);
+  });
+
+  it("leaves a genuinely clean run unmarked", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "write the docs" });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "done" });
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.failingSpanId).toBeNull();
+    expect(trace?.failure).toBeNull();
+  });
+
+  // Codex reports a tool call as successful whenever the *tool* ran — a command
+  // that exits 127 with "command not found" arrives as success:"true". That made
+  // the agent's own failures invisible: the one thing the taxonomy exists to
+  // identify never produced a failing step, so the layer could only ever say
+  // "not the agent".
+  it("marks a command that failed inside a successful tool call", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "probe the sandbox" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "thread.started",
+      thread_id: CONVERSATION_ID,
+    });
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:41.000Z",
+          tool_name: "exec_command",
+          call_id: "tool-1",
+          duration_ms: "50",
+          success: "true",
+          arguments: "{\"cmd\":\"frobnicate --all\"}",
+          output: "Chunk ID: aebf5d\nWall time: 0.0512 seconds\nProcess exited with code 127\nOriginal token count: 13\nOutput:\n/bin/bash: line 1: frobnicate: command not found\n",
+        },
+      ]),
+    );
+    service.onRunEnd(RUN_ID, { status: "completed", output: "done" });
+
+    const trace = store.get(RUN_ID);
+    const tool = trace?.spans.find((span) => span.kind === "tool_call");
+    expect(tool?.status).toBe("error");
+    expect(tool?.attributes.exitCode).toBe(127);
+    // The real output is kept as the evidence, not a friendly restatement of
+    // it — the classifier and the UI both read this field.
+    expect(tool?.error).toContain("frobnicate: command not found");
+    // With no other failure, the run's attribution is the agent's own work.
+    expect(trace?.failure?.layer).toBe("agent");
+    expect(trace?.failure?.kind).toBe("tool-failed");
+    expect(trace?.failingSpanId).toBe(tool?.id);
+  });
+
+  // A non-zero exit on its own is ordinary control flow: grep finding nothing,
+  // diff seeing a difference. Only a recognisable failure signature counts.
+  it("leaves a benign non-zero exit alone", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "search the workspace" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "thread.started",
+      thread_id: CONVERSATION_ID,
+    });
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:41.000Z",
+          tool_name: "exec_command",
+          call_id: "tool-1",
+          duration_ms: "50",
+          success: "true",
+          arguments: "{\"cmd\":\"grep -q nothing README.md\"}",
+          output: "Chunk ID: b1c2d3\nWall time: 0.0102 seconds\nProcess exited with code 1\nOriginal token count: 0\nOutput:\n",
+        },
+      ]),
+    );
+    service.onRunEnd(RUN_ID, { status: "completed", output: "no matches" });
+
+    const trace = store.get(RUN_ID);
+    const tool = trace?.spans.find((span) => span.kind === "tool_call");
+    expect(tool?.status).toBe("ok");
+    // The fact is still recorded, it is simply not treated as a failure.
+    expect(tool?.attributes.exitCode).toBe(1);
+    expect(trace?.failure).toBeNull();
+    expect(trace?.recoveredErrorCount).toBe(0);
+  });
+
+  // Counted from the steps that failed, not from Codex stream events. A denied
+  // command arrives as a tool result, not as a stream error, so the old tally
+  // read zero on runs that had visibly recovered several times.
+  it("counts recovered errors from the steps that actually failed", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "probe the sandbox" });
+    service.onRunnerEvent(RUN_ID, {
+      type: "thread.started",
+      thread_id: CONVERSATION_ID,
+    });
+
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:41.000Z",
+          tool_name: "exec_command",
+          call_id: "tool-1",
+          duration_ms: "50",
+          success: "true",
+          arguments: "{\"cmd\":\"frobnicate --all\"}",
+          output: "Chunk ID: aebf5d\nWall time: 0.0512 seconds\nProcess exited with code 127\nOriginal token count: 13\nOutput:\n/bin/bash: line 1: frobnicate: command not found\n",
+        },
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:42.000Z",
+          tool_name: "exec_command",
+          call_id: "tool-2",
+          duration_ms: "50",
+          success: "false",
+          arguments: "{\"cmd\":\"echo hi > /etc/probe.txt\"}",
+          output: "exec_command failed: CreateProcess { message: \"Codex(Sandbox(Denied { output: ExecToolCallOutput { exit_code: 1, stderr: StreamOutput { text: \\\"/bin/bash: line 1: /etc/probe.txt: Permission denied\\\\n\\\" } } }))\" }",
+        },
+        {
+          "event.name": "codex.tool_result",
+          "conversation.id": CONVERSATION_ID,
+          "event.timestamp": "2026-08-26T13:46:43.000Z",
+          tool_name: "exec_command",
+          call_id: "tool-3",
+          duration_ms: "50",
+          success: "false",
+          arguments: "{\"cmd\":\"echo hi > /etc/probe.txt\"}",
+          output: "exec_command failed: CreateProcess { message: \"Codex(Sandbox(Denied { output: ExecToolCallOutput { exit_code: 1, stderr: StreamOutput { text: \\\"/bin/bash: line 1: /etc/probe.txt: Permission denied\\\\n\\\" } } }))\" }",
+        },
+      ]),
+    );
+    service.onRunEnd(RUN_ID, { status: "completed", output: "reported them" });
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.status).toBe("completed");
+    expect(trace?.recoveredErrorCount).toBe(3);
+    // The exit code stated inside the denial envelope is carried through rather
+    // than discarded, so the stored failure no longer claims a null exit.
+    expect(trace?.failure?.kind).toBe("sandbox-denied");
+    expect(trace?.failure?.exitCode).toBe(1);
+  });
+
+  it("marks a run whose evidence the output cap truncated", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "dump the logs" });
+    service.onRunEnd(RUN_ID, {
+      status: "failed",
+      error: "output cap",
+      failure: {
+        layer: "platform",
+        kind: "output-cap",
+        retryability: "transient",
+        title: "The Runtime exceeded its output budget",
+        detail: "",
+        remedy: "Raise CODEX_MAX_OUTPUT_BYTES.",
+        exitCode: 1,
+      },
+    });
+    expect(store.get(RUN_ID)?.evidenceComplete).toBe(false);
   });
 });

@@ -1,14 +1,43 @@
 import type {
   Agent,
   AgentRun,
+  AuditHealth,
   AuditTraceStep,
+  ContextView,
   IntentState,
-  IntentVersion,
+  IntentVersionEntry,
   Message,
+  RunFailure,
   SystemInfo,
   TraceRecord,
   TraceSummary,
 } from "./types";
+
+export interface TraceDetail {
+  trace: TraceRecord;
+  findings: AuditTraceStep[];
+  auditComplete: boolean;
+  auditHealth: AuditHealth;
+  intentId: string | null;
+  context: ContextView | null;
+}
+
+export interface IntentView {
+  intent: IntentState;
+  versions: IntentVersionEntry[];
+  intentId: string | null;
+}
+
+export interface FailureGroup {
+  kind: string;
+  layer: string;
+  retryability: string;
+  title: string;
+  remedy: string;
+  count: number;
+  lastSeenAt: string;
+  traceIds: string[];
+}
 
 export class ApiError extends Error {
   constructor(
@@ -110,25 +139,21 @@ export const api = {
   run: (id: string) => request<{ run: AgentRun }>("/api/runs/" + id),
   agentTraces: (id: string) =>
     request<{ traces: TraceSummary[] }>("/api/agents/" + id + "/traces"),
-  trace: (id: string) =>
-    request<{
-      trace: TraceRecord;
-      findings: AuditTraceStep[];
-      auditComplete: boolean;
-      intentId: string | null;
-    }>("/api/traces/" + id),
-  intent: (id: string) =>
-    request<{
-      intent: IntentState;
-      versions: Record<string, IntentVersion>;
-      intentId: string | null;
-    }>("/api/agents/" + id + "/intent"),
+  trace: (id: string) => request<TraceDetail>("/api/traces/" + id),
+  agentFailures: (id: string) =>
+    request<{ failures: FailureGroup[] }>("/api/agents/" + id + "/failures"),
+  intent: (id: string) => request<IntentView>("/api/agents/" + id + "/intent"),
+  // Appends a version restoring an earlier one; it never rewinds history, so a
+  // trace that pinned the reverted version still resolves.
+  revertIntent: (id: string, intentId: string) =>
+    request<IntentView>("/api/agents/" + id + "/intent/revert", {
+      method: "POST",
+      body: JSON.stringify({ intentId }),
+    }),
   downloadTrace: (id: string) =>
-    request<{
-      exportedAt: string;
-      trace: TraceRecord;
-      findings: AuditTraceStep[];
-      auditComplete: boolean;
-      intentId: string | null;
-    }>("/api/traces/" + id + "/download"),
+    request<TraceDetail & { exportedAt: string }>(
+      "/api/traces/" + id + "/download",
+    ),
 };
+
+export type { RunFailure };
