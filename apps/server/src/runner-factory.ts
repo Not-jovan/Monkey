@@ -1,10 +1,15 @@
+import { ProcessRuntimeRunner } from "./agent-runner.js";
 import type { AppConfig } from "./config.js";
-import { ContainerCodexRunner } from "./container-codex-runner.js";
-import { CodexRunner } from "./codex-runner.js";
+import { ContainerRuntimeRunner } from "./container-runtime-runner.js";
+import type { RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner } from "./types.js";
 
-export function createRunner(config: AppConfig): AgentRunner {
+export function createRunner(
+  config: AppConfig,
+  runtime: RuntimeDefinition,
+  collectorToken: string,
+): AgentRunner {
   return config.runtimeProvider === "container"
-    ? new ContainerCodexRunner(config)
-    : new CodexRunner(config);
+    ? new ContainerRuntimeRunner(config, runtime, collectorToken)
+    : new ProcessRuntimeRunner(config, runtime, collectorToken);
 }

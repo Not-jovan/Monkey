@@ -9,6 +9,7 @@ import { loadConfig } from "../config.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
 import { createRedactor } from "./redaction.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
 
@@ -51,7 +52,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     model: "intent-model",
     enabled: false,
   });
-  const traceService = new TraceService(traceStore, createRedactor([]));
+  const traceService = new TraceService(traceStore, createRedactor([]), codexRuntime.trace);
   const app = await createApp(
     loadConfig({ NODE_ENV: "test", ...environment }),
     service,

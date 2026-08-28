@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRedactor } from "./redaction.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
 
@@ -53,7 +54,7 @@ async function makeService() {
     await store.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
-  const service = new TraceService(store, createRedactor([SECRET]));
+  const service = new TraceService(store, createRedactor([SECRET]), codexRuntime.trace);
   return { store, service };
 }
 

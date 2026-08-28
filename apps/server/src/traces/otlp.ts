@@ -21,7 +21,6 @@ const logRecord = z.object({
   timeUnixNano: z.union([z.string(), z.number()]).optional(),
   observedTimeUnixNano: z.union([z.string(), z.number()]).optional(),
   severityText: z.string().optional(),
-  eventName: z.string().optional(),
   attributes: z.array(keyValue).default([]),
 });
 
@@ -72,6 +71,10 @@ export function readOtlpLogs(payload: unknown) {
     for (const scopeLog of resourceLog.scopeLogs) {
       for (const record of scopeLog.logRecords) {
         const attributes = flatten(record.attributes);
+        // Both Codex and Claude Code send the event name as an "event.name"
+        // attribute (confirmed live for both — Claude Code's is the short,
+        // unqualified form, e.g. "api_request"; the fully-qualified name
+        // instead lives in the LogRecord's own unused `body` field).
         records.push({
           resource,
           attributes,

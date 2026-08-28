@@ -1,14 +1,9 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { buildCodexArgs, parseCodexEventLine } from "./codex-runner.js";
 import { RunCancelledError } from "./errors.js";
-import type {
-  AgentRunner,
-  RunUsage,
-  RunnerRequest,
-  RunnerResult,
-} from "./types.js";
+import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
+import type { AgentRunner, RunUsage, RunnerRequest, RunnerResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -22,25 +17,33 @@ interface ActiveContainer {
   termination: Promise<void> | null;
 }
 
-interface ParsedEvents {
-  messages: string[];
-  threadId: string | null;
-  usage: RunUsage | null;
-  errors: string[];
-}
-
 export function containerName(agentId: string, instanceId = "default"): string {
   const safeInstance = instanceId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 32);
   const safeAgent = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   return "launchpad-" + safeInstance + "-" + safeAgent;
 }
 
+// Generic across every Agent runtime: bind mounts, resource limits, and
+// labeling are identical regardless of which runtime is running; only the
+// env vars forwarded, the home-directory mount, the container entrypoint,
+// and its argv come from the RuntimeDefinition.
 export function buildContainerRunArgs(
   request: RunnerRequest,
   config: AppConfig,
+  runtime: RuntimeDefinition,
+  collectorToken: string,
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
   const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
+  const env = runtime.processEnv(config, collectorToken);
+  // The home-dir var gets its own explicit --env below, pointed at the
+  // container-side mount path rather than the host path processEnv
+  // returns; every other var is forwarded by name from the docker/podman
+  // CLI's own environment (which childEnvironment() below populates with
+  // the same processEnv values).
+  const passthroughEnvNames = Object.keys(env).filter(
+    (key) => key !== runtime.homeEnvVar,
+  );
   return [
     "run",
     "--rm",
@@ -72,10 +75,9 @@ export function buildContainerRunArgs(
     String(config.containerPidsLimit),
     "--user",
     config.containerUser,
+    ...passthroughEnvNames.flatMap((envName) => ["--env", envName]),
     "--env",
-    "ARK_API_KEY",
-    "--env",
-    "CODEX_HOME=/codex-home",
+    runtime.homeEnvVar + "=/runtime-home",
     "--env",
     "HOME=/tmp",
     "--env",
@@ -83,19 +85,23 @@ export function buildContainerRunArgs(
     "--mount",
     "type=bind,src=" + request.workspacePath + ",dst=/workspace",
     "--mount",
-    "type=bind,src=" + config.codexHome + ",dst=/codex-home",
+    "type=bind,src=" + runtime.homeDir(config) + ",dst=/runtime-home",
     "--workdir",
     "/workspace",
     config.containerRuntimeImage,
-    "codex",
-    ...buildCodexArgs(request, config.codexSandboxMode, "/workspace"),
+    runtime.bin(config),
+    ...runtime.buildArgs(request, "/workspace", config),
   ];
 }
 
-export class ContainerCodexRunner implements AgentRunner {
+export class ContainerRuntimeRunner implements AgentRunner {
   private readonly active = new Map<string, ActiveContainer>();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly runtime: RuntimeDefinition,
+    private readonly collectorToken: string,
+  ) {}
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -143,12 +149,14 @@ export class ContainerCodexRunner implements AgentRunner {
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
-      throw new Error("Agent already has an active Runtime container");
+      throw new Error(
+        "Agent already has an active " + this.runtime.id + " Runtime container",
+      );
     }
 
     const child = spawn(
       this.config.containerEngine,
-      buildContainerRunArgs(request, this.config),
+      buildContainerRunArgs(request, this.config, this.runtime, this.collectorToken),
       {
         cwd: request.workspacePath,
         env: this.childEnvironment(),
@@ -173,7 +181,7 @@ export class ContainerCodexRunner implements AgentRunner {
     const parsed: ParsedEvents = {
       messages: [],
       threadId: request.threadId,
-      usage: null,
+      usage: null as RunUsage | null,
       errors: [],
     };
     let stdout = "";
@@ -191,7 +199,9 @@ export class ContainerCodexRunner implements AgentRunner {
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed, request.onEvent);
+        for (const line of lines) {
+          this.runtime.parseEventLine(line, parsed, request.onEvent);
+        }
       } else {
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
@@ -212,13 +222,13 @@ export class ContainerCodexRunner implements AgentRunner {
         child.once("error", reject);
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
+      if (stdout.trim()) this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new Error("Runtime timed out after " + this.config.codexTimeoutMs + " ms");
       }
       if (active.outputExceeded) {
-        throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
+        throw new Error("Runtime output exceeded CODEX_MAX_OUTPUT_BYTES");
       }
       if (exitCode !== 0) {
         const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
@@ -231,7 +241,7 @@ export class ContainerCodexRunner implements AgentRunner {
         );
       }
       const output = parsed.messages.at(-1)?.trim();
-      if (!output) throw new Error("Codex completed without an agent message");
+      if (!output) throw new Error("Runtime completed without an agent message");
       return { output, threadId: parsed.threadId, usage: parsed.usage };
     } finally {
       clearTimeout(timeout);
@@ -241,8 +251,8 @@ export class ContainerCodexRunner implements AgentRunner {
 
   private childEnvironment(): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
-      ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...this.runtime.processEnv(this.config, this.collectorToken),
     };
     for (const name of [
       "PATH",

@@ -1,98 +1,17 @@
-import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError } from "./errors.js";
-import type {
-  AgentRunner,
-  RunUsage,
-  RunnerRequest,
-  RunnerResult,
-} from "./types.js";
+import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
+import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
-export interface ParsedEvents {
-  messages: string[];
-  threadId: string | null;
-  usage: RunUsage | null;
-  errors: string[];
-}
-
-export function buildCodexArgs(
-  request: RunnerRequest,
-  sandboxMode: AppConfig["codexSandboxMode"],
-  workspacePath = request.workspacePath,
-): string[] {
-  const args = [
-    "exec",
-    "--json",
-    "--sandbox",
-    sandboxMode,
-    "--skip-git-repo-check",
-    "-C",
-    workspacePath,
-  ];
-  if (request.threadId) {
-    args.push("resume", request.threadId, request.prompt);
-  } else {
-    args.push(request.prompt);
-  }
-  return args;
-}
-
-export function parseCodexEventLine(
-  line: string,
-  parsed: ParsedEvents,
-  onEvent?: (event: Record<string, unknown>) => void,
-): void {
-  let event: Record<string, unknown>;
-  try {
-    event = JSON.parse(line) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-
-  onEvent?.(event);
-
-  if (event.type === "thread.started" && typeof event.thread_id === "string") {
-    parsed.threadId = event.thread_id;
-  }
-
-  if (event.type === "item.completed" && event.item && typeof event.item === "object") {
-    const item = event.item as Record<string, unknown>;
-    if (item.type === "agent_message" && typeof item.text === "string") {
-      parsed.messages.push(item.text);
-    }
-  }
-
-  if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
-    const usage = event.usage as Record<string, unknown>;
-    parsed.usage = {
-      ...(typeof usage.input_tokens === "number"
-        ? { inputTokens: usage.input_tokens }
-        : {}),
-      ...(typeof usage.cached_input_tokens === "number"
-        ? { cachedInputTokens: usage.cached_input_tokens }
-        : {}),
-      ...(typeof usage.output_tokens === "number"
-        ? { outputTokens: usage.output_tokens }
-        : {}),
-    };
-  }
-
-  if (event.type === "error") {
-    const message =
-      typeof event.message === "string"
-        ? event.message
-        : typeof event.error === "string"
-          ? event.error
-          : "Codex reported an unknown error";
-    parsed.errors.push(message);
-  }
-}
-
-export class CodexRunner implements AgentRunner {
+// Generic across every Agent runtime (Codex, Claude Code, ...): all of the
+// spawn/timeout/cancel control flow lives here exactly once, driven by a
+// RuntimeDefinition for what differs (binary, argv, env, stdout parsing).
+export class ProcessRuntimeRunner implements AgentRunner {
   private readonly active = new Map<
     string,
     {
@@ -105,11 +24,15 @@ export class CodexRunner implements AgentRunner {
     }
   >();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly runtime: RuntimeDefinition,
+    private readonly collectorToken: string,
+  ) {}
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync(this.config.codexBin, ["--version"], {
+      await execFileAsync(this.runtime.bin(this.config), ["--version"], {
         timeout: 5_000,
         env: this.childEnvironment(),
       });
@@ -132,11 +55,11 @@ export class CodexRunner implements AgentRunner {
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
-      throw new Error("Agent already has an active Codex process");
+      throw new Error("Agent already has an active " + this.runtime.id + " process");
     }
 
-    const args = buildCodexArgs(request, this.config.codexSandboxMode);
-    const child = spawn(this.config.codexBin, args, {
+    const args = this.runtime.buildArgs(request, request.workspacePath, this.config);
+    const child = spawn(this.runtime.bin(this.config), args, {
       cwd: request.workspacePath,
       env: this.childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -177,7 +100,7 @@ export class CodexRunner implements AgentRunner {
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed, request.onEvent);
+          this.runtime.parseEventLine(line, parsed, request.onEvent);
         }
       } else {
         stderr += chunk.toString("utf8");
@@ -202,24 +125,30 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
+        this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
       }
       if (active.cancelled) {
         throw new RunCancelledError();
       }
       if (active.timedOut) {
-        throw new Error("Codex timed out after " + this.config.codexTimeoutMs + " ms");
+        throw new Error(
+          this.runtime.id + " timed out after " + this.config.codexTimeoutMs + " ms",
+        );
       }
       if (active.outputExceeded) {
-        throw new Error("Codex output exceeded CODEX_MAX_OUTPUT_BYTES");
+        throw new Error(
+          this.runtime.id + " output exceeded CODEX_MAX_OUTPUT_BYTES",
+        );
       }
       if (exitCode !== 0) {
         const detail = parsed.errors.at(-1) ?? stderr.trim() ?? "No error detail";
-        throw new Error("Codex exited with code " + exitCode + ": " + detail);
+        throw new Error(
+          this.runtime.id + " exited with code " + exitCode + ": " + detail,
+        );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
-        throw new Error("Codex completed without an agent message");
+        throw new Error(this.runtime.id + " completed without an agent message");
       }
       return {
         output,
@@ -261,9 +190,8 @@ export class CodexRunner implements AgentRunner {
       "TERM",
     ] as const;
     const environment: NodeJS.ProcessEnv = {
-      CODEX_HOME: this.config.codexHome,
-      ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...this.runtime.processEnv(this.config, this.collectorToken),
     };
     for (const name of inheritedNames) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];

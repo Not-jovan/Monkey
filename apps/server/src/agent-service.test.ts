@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentService } from "./agent-service.js";
 import { loadConfig } from "./config.js";
+import { codexRuntime } from "./runtimes/codex.js";
 import { JsonStore } from "./store.js";
 import { createRedactor } from "./traces/redaction.js";
 import { TraceService } from "./traces/trace-service.js";
@@ -143,7 +144,7 @@ describe("Agent lifecycle", () => {
     temporaryDirectories.push(root);
     const store = new TraceStore(path.join(root, "data", "traces"));
     await store.initialize();
-    const traces = new TraceService(store, createRedactor([]));
+    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
     const service = await makeService(new FakeRunner(), traces);
     const agent = await service.createAgent({ name: "Stoppable" });
     const { run } = await service.sendMessage(agent.id, "write hello");

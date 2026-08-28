@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { parseCodexEvent } from "./codex-events.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
+import type { PartialUsage, RuntimeTraceAdapter } from "./runtime-events.js";
 import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
 import type {
@@ -188,6 +188,7 @@ export class TraceService {
   constructor(
     private readonly store: TraceStore,
     private readonly redactor: Redactor,
+    private readonly traceAdapter: RuntimeTraceAdapter,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -515,7 +516,7 @@ export class TraceService {
     let buffered = 0;
     let skipped = 0;
     for (const record of records) {
-      const conversationId = record.attributes["conversation.id"];
+      const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
       if (typeof conversationId !== "string" || conversationId.length === 0) {
         skipped += 1;
         continue;
@@ -568,15 +569,14 @@ export class TraceService {
       typeof record.timestamp === "string"
         ? record.timestamp
         : this.now().toISOString();
-    const parsed = parseCodexEvent(record.attributes);
-    if (!parsed) {
+    const normalized = this.traceAdapter.normalize(record.attributes);
+    if (!normalized) {
       this.store.updateTrace(runId, (trace) => {
         trace.unrecognizedEvents += 1;
       });
       return;
     }
-    const { event, common } = parsed;
-    const conversationId = common["conversation.id"];
+    const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
     if (typeof conversationId !== "string" || conversationId.length === 0) {
       return;
     }
@@ -584,39 +584,54 @@ export class TraceService {
     const isRootScope = scope.spawnSpanId === null;
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
 
-    switch (event["event.name"]) {
-      case "codex.conversation_starts": {
+    switch (normalized.kind) {
+      case "ignored": {
+        return;
+      }
+      case "generic_error": {
+        this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+          name: normalized.eventName,
+          label: normalized.eventName,
+          kind: "system",
+          actor: "system",
+          status: "error",
+          startedAt: timestamp,
+          endedAt: timestamp,
+          durationMs: 0,
+          attributes: { laneId: this.laneIdFor(scope, false) },
+          error: this.redactor.redactText(normalized.errorMessage),
+        });
+        return;
+      }
+      case "conversation_started": {
         if (!isRootScope) return;
         this.store.updateTrace(runId, (trace) => {
-          trace.model = common.model ?? trace.model;
+          trace.model = normalized.model ?? trace.model;
         });
         this.store.updateSpan(runId, turnSpanId, (span) => {
-          span.attributes.provider = event.provider_name;
-          if (event.approval_policy)
-            span.attributes.approvalPolicy = event.approval_policy;
-          if (event.sandbox_policy)
-            span.attributes.sandboxPolicy = event.sandbox_policy;
-          if (event.mcp_servers.length > 0) {
-            span.attributes.mcpServers = event.mcp_servers.join(",");
+          if (normalized.provider) span.attributes.provider = normalized.provider;
+          if (normalized.approvalPolicy)
+            span.attributes.approvalPolicy = normalized.approvalPolicy;
+          if (normalized.sandboxPolicy)
+            span.attributes.sandboxPolicy = normalized.sandboxPolicy;
+          if (normalized.mcpServers && normalized.mcpServers.length > 0) {
+            span.attributes.mcpServers = normalized.mcpServers.join(",");
           }
         });
         return;
       }
-      case "codex.user_prompt": {
+      case "user_prompt": {
         if (!isRootScope) return;
         this.store.updateSpan(runId, state.promptSpanId, (span) => {
-          span.attributes.promptLength = event.prompt_length;
-          if (event.prompt) {
-            span.attributes.prompt = this.redactor.redactText(event.prompt);
+          span.attributes.promptLength = normalized.promptLength;
+          if (normalized.prompt) {
+            span.attributes.prompt = this.redactor.redactText(normalized.prompt);
           }
         });
         return;
       }
-      case "codex.api_request": {
-        const duration = event.duration_ms ?? 0;
-        const failedRequest =
-          event["error.message"] !== undefined ||
-          (event["http.response.status_code"] ?? 200) >= 400;
+      case "model_call": {
+        const duration = normalized.durationMs;
         const spanId = randomUUID();
         scope.lastModelCallSpanId = spanId;
         const firstInScope =
@@ -626,11 +641,11 @@ export class TraceService {
           id: spanId,
           traceId: runId,
           parentId: this.activeParent(scope, turnSpanId),
-          name: "codex.api_request",
-          label: modelCallLabel(scope, event.attempt),
+          name: normalized.spanName,
+          label: modelCallLabel(scope, normalized.attempt),
           kind: "model_call",
           actor: "agent",
-          status: failedRequest ? "error" : "ok",
+          status: normalized.failed ? "error" : "ok",
           startedAt: new Date(
             new Date(timestamp).getTime() - duration,
           ).toISOString(),
@@ -652,131 +667,106 @@ export class TraceService {
               : scope.toolsSinceLastModelCall.length > 0 && scope.lastToolOutput
                 ? { context: scope.lastToolOutput }
                 : {}),
-            ...(event["http.response.status_code"] !== undefined
-              ? { statusCode: event["http.response.status_code"] }
+            ...(normalized.statusCode !== undefined
+              ? { statusCode: normalized.statusCode }
               : {}),
-            ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+            ...(normalized.attempt !== undefined ? { attempt: normalized.attempt } : {}),
           },
-          error: event["error.message"]
-            ? this.redactor.redactText(event["error.message"])
+          error: normalized.errorMessage
+            ? this.redactor.redactText(normalized.errorMessage)
             : null,
         });
         scope.modelCallsInTurn += 1;
         scope.toolsSinceLastModelCall = [];
-        return;
-      }
-      case "codex.sse_event": {
-        if (event["event.kind"] === "response.completed") {
-          this.store.updateTrace(runId, (trace) => {
-            trace.usage.inputTokens += event.input_token_count ?? 0;
-            trace.usage.cachedTokens += event.cached_token_count ?? 0;
-            trace.usage.outputTokens += event.output_token_count ?? 0;
-            trace.usage.reasoningTokens += event.reasoning_token_count ?? 0;
-            trace.usage.toolTokens += event.tool_token_count ?? 0;
-          });
-          if (scope.lastModelCallSpanId) {
-            this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
-              if (event.input_token_count !== undefined) {
-                span.attributes.inputTokens = event.input_token_count;
-              }
-              if (event.output_token_count !== undefined) {
-                span.attributes.outputTokens = event.output_token_count;
-              }
-              if (event.reasoning_token_count !== undefined) {
-                span.attributes.reasoningTokens = event.reasoning_token_count;
-              }
-              if (event.cached_token_count !== undefined) {
-                span.attributes.cachedTokens = event.cached_token_count;
-              }
-              if (event.ttft_ms !== undefined) {
-                span.attributes.ttftMs = event.ttft_ms;
-              }
-            });
-          }
-        } else if (event["error.message"]) {
-          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
-            name: "codex.sse_event",
-            label: "Stream error (" + event["event.kind"] + ")",
-            kind: "system",
-            actor: "system",
-            status: "error",
-            startedAt: timestamp,
-            endedAt: timestamp,
-            durationMs: event.duration_ms ?? 0,
-            attributes: {
-              kind: event["event.kind"],
-              laneId: this.laneIdFor(scope, false),
-            },
-            error: this.redactor.redactText(event["error.message"]),
-          });
+        if (normalized.usage) {
+          this.applyUsage(runId, scope, normalized.usage);
         }
         return;
       }
-      case "codex.tool_decision": {
+      case "model_call_usage": {
+        this.applyUsage(runId, scope, normalized.usage);
+        return;
+      }
+      case "stream_error": {
+        this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+          name: normalized.spanName,
+          label: normalized.label ?? "Stream error",
+          kind: "system",
+          actor: "system",
+          status: "error",
+          startedAt: timestamp,
+          endedAt: timestamp,
+          durationMs: normalized.durationMs ?? 0,
+          attributes: {
+            ...(normalized.attributeKind ? { kind: normalized.attributeKind } : {}),
+            laneId: this.laneIdFor(scope, false),
+          },
+          error: this.redactor.redactText(normalized.errorMessage),
+        });
+        return;
+      }
+      case "tool_decision": {
         const spanId = randomUUID();
-        state.toolSpans.set(event.call_id, spanId);
-        const subagent = isSubagentTool(event.tool_name);
+        state.toolSpans.set(normalized.callId, spanId);
+        const subagent = isSubagentTool(normalized.toolName);
         const parentId = this.activeParent(scope, turnSpanId);
         this.store.appendSpan(runId, {
           id: spanId,
           traceId: runId,
           parentId,
-          name: "tool." + event.tool_name,
-          label: subagent ? "Subagent · task" : "Tool · " + event.tool_name,
+          name: "tool." + normalized.toolName,
+          label: subagent ? "Subagent · task" : "Tool · " + normalized.toolName,
           kind: "tool_call",
           actor: "agent",
-          status:
-            event.decision === "denied" || event.decision === "abort"
-              ? "error"
-              : "running",
+          status: normalized.decision === "denied" ? "error" : "running",
           startedAt: timestamp,
           endedAt: null,
           durationMs: null,
           attributes: {
-            toolName: event.tool_name,
-            callId: event.call_id,
-            decision: event.decision,
-            decisionSource: event.source,
+            toolName: normalized.toolName,
+            callId: normalized.callId,
+            decision: normalized.rawDecision,
+            decisionSource: normalized.source,
             laneId: this.laneIdFor(scope, subagent),
             ...(subagent ? { subagent: true } : {}),
           },
           error:
-            event.decision === "denied" || event.decision === "abort"
-              ? "Tool call " + event.decision
+            normalized.decision === "denied"
+              ? "Tool call " + normalized.rawDecision
               : null,
         });
         if (
-          isSameThreadSubagentTool(event.tool_name) &&
-          event.decision !== "denied" &&
-          event.decision !== "abort"
+          isSameThreadSubagentTool(normalized.toolName) &&
+          normalized.decision !== "denied"
         ) {
           scope.subagentStack.push(spanId);
         }
         return;
       }
-      case "codex.tool_result": {
-        const callId = event.call_id ?? "";
+      case "tool_result": {
+        const callId = normalized.callId ?? "";
         const existing = state.toolSpans.get(callId);
-        const succeeded = event.success === "true";
-        const output = event.output
-          ? this.redactor.redactText(clip(event.output, OUTPUT_CLIP))
+        const succeeded = normalized.success;
+        const output = normalized.output
+          ? this.redactor.redactText(clip(normalized.output, OUTPUT_CLIP))
           : "";
-        const toolArgumentsRaw = event.arguments
-          ? this.redactor.redactText(event.arguments)
+        const toolArgumentsRaw = normalized.arguments
+          ? this.redactor.redactText(normalized.arguments)
           : "";
         // Arguments are what the agent sent outward; output is what came back.
-        const requestSecrets = this.secretNames(event.arguments);
-        const responseSecrets = this.secretNames(event.output).filter(
+        const requestSecrets = this.secretNames(normalized.arguments);
+        const responseSecrets = this.secretNames(normalized.output).filter(
           (name) => !requestSecrets.includes(name),
         );
         const toolArguments = toolArgumentsRaw
           ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
           : "";
         if (toolArgumentsRaw && scope.lastModelCallSpanId) {
-          // Codex hands arguments over as a JSON string. Embedding it as-is
-          // produced a document whose "arguments" was itself escaped JSON
-          // ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer can
-          // make readable. Parse first so the panel shows one clean object.
+          // Runtimes hand arguments over as a JSON string. Embedding it
+          // as-is produced a document whose "arguments" was itself escaped
+          // JSON ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer
+          // can make readable. Parse first so the panel shows one clean
+          // object.
           let parsedArguments: unknown = toolArgumentsRaw;
           try {
             parsedArguments = JSON.parse(toolArgumentsRaw);
@@ -787,12 +777,12 @@ export class TraceService {
             runId,
             scope.lastModelCallSpanId,
             JSON.stringify({
-              name: event.tool_name,
+              name: normalized.toolName,
               arguments: parsedArguments,
             }),
           );
         }
-        const childThreadIds = readChildThreadIds(event.arguments);
+        const childThreadIds = readChildThreadIds(normalized.arguments);
         if (existing) {
           this.store.updateSpan(
             runId,
@@ -800,7 +790,7 @@ export class TraceService {
             (span) => {
               span.status = succeeded ? "ok" : "error";
               span.endedAt = timestamp;
-              span.durationMs = event.duration_ms;
+              span.durationMs = normalized.durationMs;
               if (toolArguments) span.attributes.arguments = toolArguments;
               if (output) span.attributes.output = output;
               if (requestSecrets.length > 0) {
@@ -809,12 +799,12 @@ export class TraceService {
               if (responseSecrets.length > 0) {
                 span.attributes.secretsInResponse = responseSecrets.join(",");
               }
-              if (event.mcp_server)
-                span.attributes.mcpServer = event.mcp_server;
+              if (normalized.mcpServer)
+                span.attributes.mcpServer = normalized.mcpServer;
               span.error = succeeded
                 ? null
                 : clip(output, 400) || "Tool failed";
-              if (isSubagentTool(event.tool_name)) {
+              if (isSubagentTool(normalized.toolName)) {
                 const subagentLabel = readSubagentLabel(toolArguments);
                 if (subagentLabel) {
                   span.attributes.subagentType = subagentLabel;
@@ -827,7 +817,7 @@ export class TraceService {
             },
             { emit: true },
           );
-          if (isSubagentTool(event.tool_name)) {
+          if (isSubagentTool(normalized.toolName)) {
             this.attachChildConversations(
               runId,
               state,
@@ -838,7 +828,7 @@ export class TraceService {
             this.popSubagentScope(scope, existing);
           }
           if (succeeded) {
-            scope.toolsSinceLastModelCall.push(event.tool_name);
+            scope.toolsSinceLastModelCall.push(normalized.toolName);
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         } else {
@@ -846,23 +836,23 @@ export class TraceService {
             runId,
             this.activeParent(scope, turnSpanId),
             {
-              name: "tool." + event.tool_name,
-              label: isSubagentTool(event.tool_name)
+              name: "tool." + normalized.toolName,
+              label: isSubagentTool(normalized.toolName)
                 ? "Subagent task"
-                : "Called " + event.tool_name,
+                : "Called " + normalized.toolName,
               kind: "tool_call",
               actor: "agent",
               status: succeeded ? "ok" : "error",
               startedAt: new Date(
-                new Date(timestamp).getTime() - event.duration_ms,
+                new Date(timestamp).getTime() - normalized.durationMs,
               ).toISOString(),
               endedAt: timestamp,
-              durationMs: event.duration_ms,
+              durationMs: normalized.durationMs,
               attributes: {
-                toolName: event.tool_name,
+                toolName: normalized.toolName,
                 callId,
-                laneId: this.laneIdFor(scope, isSubagentTool(event.tool_name)),
-                ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
+                laneId: this.laneIdFor(scope, isSubagentTool(normalized.toolName)),
+                ...(isSubagentTool(normalized.toolName) ? { subagent: true } : {}),
                 ...(toolArguments ? { arguments: toolArguments } : {}),
                 ...(output ? { output } : {}),
                 ...(requestSecrets.length > 0
@@ -876,35 +866,48 @@ export class TraceService {
             },
           );
           if (succeeded) {
-            scope.toolsSinceLastModelCall.push(event.tool_name);
+            scope.toolsSinceLastModelCall.push(normalized.toolName);
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         }
         return;
       }
-      case "codex.turn_ttft": {
+      case "turn_ttft": {
         if (!isRootScope) return;
         this.store.updateSpan(runId, turnSpanId, (span) => {
-          span.attributes.ttftMs = event.duration_ms;
+          span.attributes.ttftMs = normalized.durationMs;
         });
         return;
       }
-      default: {
-        if ("error.message" in event && event["error.message"]) {
-          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
-            name: event["event.name"],
-            label: event["event.name"],
-            kind: "system",
-            actor: "system",
-            status: "error",
-            startedAt: timestamp,
-            endedAt: timestamp,
-            durationMs: 0,
-            attributes: { laneId: this.laneIdFor(scope, false) },
-            error: this.redactor.redactText(event["error.message"]),
-          });
+    }
+  }
+
+  private applyUsage(runId: string, scope: ConversationScope, usage: PartialUsage) {
+    this.store.updateTrace(runId, (trace) => {
+      trace.usage.inputTokens += usage.inputTokens ?? 0;
+      trace.usage.cachedTokens += usage.cachedTokens ?? 0;
+      trace.usage.outputTokens += usage.outputTokens ?? 0;
+      trace.usage.reasoningTokens += usage.reasoningTokens ?? 0;
+      trace.usage.toolTokens += usage.toolTokens ?? 0;
+    });
+    if (scope.lastModelCallSpanId) {
+      this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
+        if (usage.inputTokens !== undefined) {
+          span.attributes.inputTokens = usage.inputTokens;
         }
-      }
+        if (usage.outputTokens !== undefined) {
+          span.attributes.outputTokens = usage.outputTokens;
+        }
+        if (usage.reasoningTokens !== undefined) {
+          span.attributes.reasoningTokens = usage.reasoningTokens;
+        }
+        if (usage.cachedTokens !== undefined) {
+          span.attributes.cachedTokens = usage.cachedTokens;
+        }
+        if (usage.ttftMs !== undefined) {
+          span.attributes.ttftMs = usage.ttftMs;
+        }
+      });
     }
   }
 
