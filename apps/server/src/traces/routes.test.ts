@@ -50,7 +50,6 @@ async function makeApp(environment: Record<string, string> = {}) {
     client: { complete: async () => ({ content: "" }) },
     model: "intent-model",
     enabled: false,
-    requireConfirmation: true,
   });
   const traceService = new TraceService(traceStore, createRedactor([]));
   const app = await createApp(
@@ -162,6 +161,7 @@ describe("Glassbox routes", () => {
     }>();
     expect(listed.traces).toHaveLength(1);
     expect(listed.traces[0]?.id).toBe(RUN_ID);
+    expect(listed).not.toHaveProperty("lifecycle");
 
     const detail = await app.inject({ method: "GET", url: "/api/traces/" + RUN_ID });
     expect(detail.statusCode).toBe(200);
@@ -204,60 +204,44 @@ describe("Glassbox routes", () => {
     expect(String(model?.attributes.output)).toContain("exec_command");
     await app.close();
   });
-  it("serves the current intent and resolves a pending update", async () => {
+  it("serves the current intent versions map", async () => {
     const { app, intentStore } = await makeApp();
     cleanups.push(async () => {
       await app.close();
     });
-    intentStore.ensure(AGENT_ID, "Build a todo list web application");
-    const updateId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-    intentStore.apply(AGENT_ID, {
-      id: updateId,
-      at: "2026-08-27T00:00:00.000Z",
-      message: "Do not read .env files.",
-      messageId: "msg-1",
-      traceId: RUN_ID,
-      reason: "prohibition",
-      added: ["Do not read .env files."],
-      objectiveBefore: null,
-      objectiveAfter: null,
-      status: "pending",
+    intentStore.seed(AGENT_ID, "Build a todo list web application");
+    const intentId = intentStore.append(AGENT_ID, {
+      objective: "Build a todo list web application",
+      extended: ["Do not read .env files."],
+      update: {
+        logs: ["Do not read .env files.", "prohibition"],
+      },
     });
 
-    const before = await app.inject({
+    const response = await app.inject({
       method: "GET",
       url: "/api/agents/" + AGENT_ID + "/intent",
     });
-    expect(before.statusCode).toBe(200);
-    const beforeBody = before.json() as {
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{
       intent: { objective: string; extended: string[] };
-      pending: { id: string }[];
-      requiresConfirmation: boolean;
-    };
-    expect(beforeBody.intent.objective).toBe("Build a todo list web application");
-    expect(beforeBody.intent.extended).toEqual([]);
-    expect(beforeBody.pending).toHaveLength(1);
-    expect(beforeBody.requiresConfirmation).toBe(true);
+      versions: Record<string, { objective: string; extended: string[] }>;
+      intentId: string | null;
+    }>();
+    expect(body.intent.objective).toBe("Build a todo list web application");
+    expect(body.intent.extended).toEqual(["Do not read .env files."]);
+    expect(body.intentId).toBe(intentId);
+    expect(body.versions[intentId]?.extended).toEqual([
+      "Do not read .env files.",
+    ]);
+    expect(body).not.toHaveProperty("pending");
+    expect(body).not.toHaveProperty("requiresConfirmation");
 
-    const confirmed = await app.inject({
+    const gone = await app.inject({
       method: "POST",
-      url: "/api/agents/" + AGENT_ID + "/intent/" + updateId,
+      url: "/api/agents/" + AGENT_ID + "/intent/" + intentId,
       payload: { decision: "confirm" },
     });
-    expect(confirmed.statusCode).toBe(200);
-    const confirmedBody = confirmed.json() as {
-      intent: { extended: string[] };
-      pending: unknown[];
-    };
-    expect(confirmedBody.intent.extended).toEqual(["Do not read .env files."]);
-    expect(confirmedBody.pending).toEqual([]);
-
-    // Resolving twice is a 404, not a silent second application.
-    const again = await app.inject({
-      method: "POST",
-      url: "/api/agents/" + AGENT_ID + "/intent/" + updateId,
-      payload: { decision: "confirm" },
-    });
-    expect(again.statusCode).toBe(404);
+    expect(gone.statusCode).toBe(404);
   });
 });

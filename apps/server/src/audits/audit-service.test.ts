@@ -44,7 +44,7 @@ async function makeStores() {
     await auditStore.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
-  return { traceStore, auditStore };
+  return { traceStore, auditStore, directory };
 }
 
 function seedTrace(traceStore: TraceStore, id: string, agentId = "agent-1") {
@@ -243,7 +243,13 @@ describe("AuditService", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.category).toBe("intent-check");
     expect(findings[0]?.finding).toContain("read credentials");
-    expect(stores.auditStore.latestIntentContext("agent-1")).toContain(
+    expect(stores.auditStore.priorRollout("agent-1")).toContain(
+      "Goal: count files",
+    );
+    await stores.auditStore.flush();
+    const reopened = new AuditStore(path.join(stores.directory, "audits"));
+    await reopened.initialize();
+    expect(reopened.priorRollout("agent-1")).toContain(
       "Goal: count files",
     );
 
@@ -336,17 +342,12 @@ describe("AuditService", () => {
       enabled: false,
     });
     intent.seed("agent-1", "Build a TypeScript todo application");
-    intentStore.apply("agent-1", {
-      id: "u1",
-      at: "2026-08-26T11:00:00.000Z",
-      message: "Do not read .env files.",
-      messageId: "msg-1",
-      traceId: "trace-constraint",
-      reason: "prohibition",
-      added: ["Do not read .env files."],
-      objectiveBefore: null,
-      objectiveAfter: null,
-      status: "applied",
+    intentStore.append("agent-1", {
+      objective: "Build a TypeScript todo application",
+      extended: ["Do not read .env files."],
+      update: {
+        logs: ["Do not read .env files.", "prohibition"],
+      },
     });
 
     const responder: FakeResponder = {

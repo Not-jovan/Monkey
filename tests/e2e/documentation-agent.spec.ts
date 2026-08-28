@@ -78,15 +78,19 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 
   const htmlRun = await sendAndWait(prompts.html);
   await expect
-    .poll(async () => (await getIntent(page.request, agent.id)).pending.length, {
-      timeout: 2 * 60_000,
-      intervals: [1_000, 2_000, 4_000],
-    })
-    .toBeGreaterThan(0);
-  const proposal = page.locator(".intent-proposal").filter({ hasText: "HTML" });
-  await expect(proposal).toBeVisible({ timeout: 30_000 });
-  await proposal.getByRole("button", { name: "Confirm" }).click();
-  await expect(proposal).toBeHidden();
+    .poll(
+      async () => {
+        const intent = await getIntent(page.request, agent.id);
+        return [intent.intent.objective, ...intent.intent.extended]
+          .join(" ")
+          .toLowerCase();
+      },
+      {
+        timeout: 2 * 60_000,
+        intervals: [1_000, 2_000, 4_000],
+      },
+    )
+    .toContain("html");
   traces[4] = htmlRun;
 });
 
@@ -165,11 +169,9 @@ test("Trace 4 should warn about the non-whitelisted GitHub domain", async () => 
   expect(securityText).toMatch(/github\.com/i);
 });
 
-test("Trace 5 should apply the confirmed HTML intent update", async () => {
+test("Trace 5 should apply the HTML intent update", async () => {
   const detail = traces[4]!;
   const intent = await getIntent(page.request, agent.id);
-  const update = intent.history.find((entry) => entry.message === prompts.html);
-  expect(update?.status).toBe("applied");
   expect(
     [intent.intent.objective, ...intent.intent.extended]
       .join(" ")
@@ -185,7 +187,6 @@ test("Trace 5 should apply the confirmed HTML intent update", async () => {
 
   await page.goto(`/traces/${detail.trace.id}`);
   const traceIntent = page.locator(".trace-intent");
-  await expect(traceIntent).toContainText("This chat last modified the spec");
   await expect(traceIntent).toContainText(/HTML/i);
 
   await page.goto("/");

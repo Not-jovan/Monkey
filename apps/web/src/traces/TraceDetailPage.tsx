@@ -16,6 +16,7 @@ type TraceDetail = {
   trace: TraceRecord;
   findings: AuditTraceStep[];
   auditComplete: boolean;
+  intentId: string | null;
 };
 
 function download(fileName: string, data: unknown) {
@@ -244,7 +245,12 @@ export function TraceDetailPage() {
         </section>
       )}
 
-      {trace && <TraceIntent trace={trace} />}
+      {trace && (
+        <TraceIntent
+          trace={trace}
+          intentId={detailQuery.data?.intentId ?? null}
+        />
+      )}
 
       {trace && (
         <FindingsSummary findings={findings} onSelect={setSelectedSpanId} />

@@ -9,13 +9,6 @@ import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const traceParams = z.object({ id: z.string().min(8).max(64) });
-const intentUpdateParams = z.object({
-  id: z.string().uuid(),
-  updateId: z.string().uuid(),
-});
-const intentDecisionBody = z.object({
-  decision: z.enum(["confirm", "reject"]),
-});
 
 export interface GlassboxDeps {
   traceStore: TraceStore;
@@ -39,10 +32,6 @@ export function registerGlassboxRoutes(
     );
   };
 
-  // OTLP/HTTP JSON ingest. Lives outside /api on purpose: the Runtime cannot
-  // hold the operator's bearer token, so it authenticates with a per-boot
-  // collector token that writeCodexConfig embeds in config.toml. Batches with
-  // full tool output routinely exceed the default 1 MB body limit.
   app.post(
     "/collector/v1/logs",
     { bodyLimit: 16 * 1024 * 1024 },
@@ -63,46 +52,39 @@ export function registerGlassboxRoutes(
   app.get("/api/agents/:id/traces", async (request) => {
     const { id } = idParams.parse(request.params);
     const warningCounts = deps.auditStore.warningCountByTrace();
-    const traces = deps.traceStore.listByAgent(id).map((summary) => ({
-      ...summary,
-      warningCount: warningCounts.get(summary.id) ?? 0,
-    }));
-    return { traces, lifecycle: deps.traceStore.lifecycleFor(id) };
+    const traces = deps.traceStore.listByAgent(id).map((trace) => {
+      let errorCount = 0;
+      for (const span of trace.spans) {
+        if (span.status === "error") errorCount += 1;
+      }
+      return {
+        id: trace.id,
+        agentId: trace.agentId,
+        status: trace.status,
+        startedAt: trace.startedAt,
+        endedAt: trace.endedAt,
+        prompt: trace.prompt,
+        model: trace.model,
+        usage: trace.usage,
+        spanCount: trace.spans.length,
+        errorCount,
+        failingSpanId: trace.failingSpanId,
+        warningCount: warningCounts.get(trace.id) ?? 0,
+      };
+    });
+    return { traces };
   });
 
   app.get("/api/agents/:id/intent", async (request) => {
     const { id } = idParams.parse(request.params);
-    const record = deps.intentService?.record(id) ?? null;
-    return {
-      intent: record
-        ? { objective: record.objective, extended: record.extended }
-        : { objective: "", extended: [] },
-      lastModifiedBy: record?.lastModifiedBy ?? null,
-      pending: deps.intentService?.pending(id) ?? [],
-      history: record?.history ?? [],
-      states: record?.states ?? [],
-      requiresConfirmation:
-        deps.intentService?.requiresConfirmation() ?? false,
-      updatedAt: record?.updatedAt ?? null,
-    };
-  });
-
-  // The user's decision on a proposed change to the specification. Nothing
-  // takes effect until this lands.
-  app.post("/api/agents/:id/intent/:updateId", async (request) => {
-    const { id, updateId } = intentUpdateParams.parse(request.params);
-    const { decision } = intentDecisionBody.parse(request.body);
     if (!deps.intentService) {
-      throw new HttpError(503, "Intent tracking is not enabled");
+      return {
+        intent: { objective: "", extended: [] },
+        versions: {},
+        intentId: null,
+      };
     }
-    const record = deps.intentService.resolve(id, updateId, decision);
-    if (!record) {
-      throw new HttpError(404, "No pending intent update with that id");
-    }
-    return {
-      intent: { objective: record.objective, extended: record.extended },
-      pending: deps.intentService.pending(id),
-    };
+    return deps.intentService.view(id);
   });
 
   app.get("/api/traces/:id", async (request) => {
@@ -116,6 +98,7 @@ export function registerGlassboxRoutes(
       trace,
       findings,
       auditComplete: deps.auditStore.isRunComplete(id),
+      intentId: deps.auditStore.intentId(id),
     };
   });
 
@@ -135,6 +118,7 @@ export function registerGlassboxRoutes(
       trace,
       findings,
       auditComplete: deps.auditStore.isRunComplete(id),
+      intentId: deps.auditStore.intentId(id),
     };
   };
 

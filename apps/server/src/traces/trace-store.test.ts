@@ -116,22 +116,4 @@ describe("TraceStore", () => {
     expect(restored?.spans[0]?.status).toBe("error");
     expect(restored?.spans[0]?.error).toContain("restarted");
   });
-
-  it("keeps a lifecycle journal per agent", async () => {
-    const { store, directory } = await makeStore();
-    store.recordLifecycle({
-      id: "e1",
-      agentId: "agent-1",
-      type: "created",
-      at: "2026-08-26T12:00:00.000Z",
-      details: "Agent Builder created",
-    });
-    await store.flush();
-    expect(store.lifecycleFor("agent-1")).toHaveLength(1);
-
-    const reloaded = new TraceStore(directory);
-    await reloaded.initialize();
-    expect(reloaded.lifecycleFor("agent-1")).toHaveLength(1);
-    expect(reloaded.lifecycleFor("agent-2")).toHaveLength(0);
-  });
 });

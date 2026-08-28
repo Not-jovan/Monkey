@@ -5,7 +5,6 @@ import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
 import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
 import type {
-  AgentLifecycleType,
   SpanActor,
   SpanKind,
   SpanStatus,
@@ -460,16 +459,6 @@ export class TraceService {
       durationMs: 0,
       attributes: { action },
       error: null,
-    });
-  }
-
-  recordLifecycle(agentId: string, type: AgentLifecycleType, details: string) {
-    return this.store.recordLifecycle({
-      id: randomUUID(),
-      agentId,
-      type,
-      at: this.now().toISOString(),
-      details: this.redactor.redactText(details),
     });
   }
 

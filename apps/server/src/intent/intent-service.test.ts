@@ -1,9 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArkClient } from "../audits/ark-client.js";
 import { classifyIntent } from "./intent-classifier.js";
+import { intentFileSchema } from "./intent-model.js";
 import { IntentService } from "./intent-service.js";
 import { IntentStore } from "./intent-store.js";
 
@@ -41,18 +42,13 @@ async function makeStore() {
 const AGENT = "agent-1";
 const OBJECTIVE = "Build a todo list web application";
 
-function makeService(
-  store: IntentStore,
-  replies: string[],
-  options: { requireConfirmation?: boolean } = {},
-) {
+function makeService(store: IntentStore, replies: string[]) {
   const { client, calls } = fakeClient(replies);
   const service = new IntentService({
     store,
     client,
     model: "intent-model",
     enabled: true,
-    ...options,
   });
   return { service, calls };
 }
@@ -141,6 +137,9 @@ describe("IntentService", () => {
       objective: OBJECTIVE,
       extended: [],
     });
+    const view = service.view(AGENT);
+    expect(view.intentId).toBeTruthy();
+    expect(view.versions[view.intentId ?? ""]?.update).toBeUndefined();
   });
 
   it("uses the first message as the objective when there are no instructions", async () => {
@@ -155,12 +154,8 @@ describe("IntentService", () => {
     expect(service.state(AGENT).objective).toBe(
       "Build a todo list web application",
     );
-    expect(service.record(AGENT)?.lastModifiedBy).toEqual({
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    // The first message is the intent; there is nothing to classify it against.
     expect(calls).toHaveLength(0);
+    expect(service.view(AGENT).versions[service.currentId(AGENT)]?.update).toBeUndefined();
   });
 
   it("leaves the specification alone on NO_CHANGE", async () => {
@@ -176,10 +171,10 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).extended).toEqual([]);
-    expect(service.record(AGENT)?.history).toEqual([]);
+    expect(Object.keys(service.view(AGENT).versions)).toHaveLength(1);
   });
 
-  it("appends a new constraint and records why it exists", async () => {
+  it("appends a new version with logs when the classifier updates the spec", async () => {
     const { store } = await makeStore();
     const { service } = makeService(store, [
       '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
@@ -192,10 +187,14 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
-    const [update] = service.record(AGENT)?.history ?? [];
-    expect(update?.status).toBe("applied");
-    expect(update?.message).toBe("Do not read from .env files.");
-    expect(update?.reason).toBe("prohibition");
+    const view = service.view(AGENT);
+    expect(Object.keys(view.versions)).toHaveLength(2);
+    const latest = view.intentId ? view.versions[view.intentId] : undefined;
+    expect(latest?.update?.logs).toContain("Do not read from .env files.");
+    expect(latest?.update?.logs).toContain("prohibition");
+    expect(latest?.update?.logs).toContain(
+      "Added constraint: Do not read .env files.",
+    );
   });
 
   it("does not add the same constraint twice", async () => {
@@ -217,15 +216,16 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
-    expect(service.record(AGENT)?.history).toHaveLength(1);
+    expect(Object.keys(service.view(AGENT).versions)).toHaveLength(2);
   });
 
-  it("replaces the objective on a full pivot and keeps the old one on record", async () => {
+  it("replaces the objective on a full pivot and keeps the previous version", async () => {
     const { store } = await makeStore();
     const { service } = makeService(store, [
       '{"classification":"INTENT_UPDATE","reason":"pivot","extendedIntent":[],"objective":"Build a calendar application"}',
     ]);
     service.seed(AGENT, OBJECTIVE);
+    const seedId = service.currentId(AGENT);
     service.observe(AGENT, OBJECTIVE, {
       content: "Forget the todo app. I want a calendar.",
       messageId: "msg-1",
@@ -233,29 +233,12 @@ describe("IntentService", () => {
     });
     await service.idle();
     expect(service.state(AGENT).objective).toBe("Build a calendar application");
-    const [update] = service.record(AGENT)?.history ?? [];
-    expect(update?.objectiveBefore).toBe(OBJECTIVE);
-    expect(update?.objectiveAfter).toBe("Build a calendar application");
-  });
-
-  it("holds an update as pending when confirmation is required", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(
-      store,
-      [
-        '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
-      ],
-      { requireConfirmation: true },
+    const view = service.view(AGENT);
+    expect(view.versions[seedId]?.objective).toBe(OBJECTIVE);
+    const latest = view.intentId ? view.versions[view.intentId] : undefined;
+    expect(latest?.update?.logs).toContain(
+      "Objective changed from " + OBJECTIVE + " to Build a calendar application",
     );
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Do not read .env.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-    expect(service.state(AGENT).extended).toEqual([]);
-    expect(service.record(AGENT)?.history[0]?.status).toBe("pending");
   });
 
   it("never throws when the classifier gives up", async () => {
@@ -271,218 +254,41 @@ describe("IntentService", () => {
     expect(service.state(AGENT).extended).toEqual([]);
   });
 
-  it("persists the specification across a restart", async () => {
+  it("persists versions in insertion order across a restart", async () => {
     const { store, directory } = await makeStore();
     const { service } = makeService(store, [
       '{"classification":"INTENT_UPDATE","reason":"rule","extendedIntent":["Use TypeScript everywhere."]}',
     ]);
     service.seed(AGENT, OBJECTIVE);
+    const seedId = service.currentId(AGENT);
     service.observe(AGENT, OBJECTIVE, {
       content: "All new code must be TypeScript.",
       messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
+    const updateId = service.currentId(AGENT);
     await store.flush();
 
+    const onDisk = intentFileSchema.parse(
+      JSON.parse(
+        await readFile(path.join(directory, "intent", AGENT + ".json"), "utf8"),
+      ),
+    );
+    expect(Object.keys(onDisk)).toEqual([seedId, updateId]);
+    expect(onDisk[seedId]?.update).toBeUndefined();
+    expect(onDisk[updateId]?.extended).toEqual(["Use TypeScript everywhere."]);
+
     const reopened = new IntentStore(path.join(directory, "intent"));
     await reopened.initialize();
-    expect(reopened.get(AGENT)?.extended).toEqual([
+    const loaded = reopened.get(AGENT);
+    expect(loaded).not.toBeNull();
+    if (!loaded) return;
+    expect(reopened.latest(AGENT)?.intentId).toBe(updateId);
+    expect(reopened.latest(AGENT)?.version.extended).toEqual([
       "Use TypeScript everywhere.",
     ]);
-    expect(reopened.get(AGENT)?.objective).toBe(OBJECTIVE);
-    expect(reopened.get(AGENT)?.lastModifiedBy).toEqual({
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    expect(reopened.get(AGENT)?.states[1]?.traces).toEqual(["trace-1"]);
-  });
-
-  it("hydrates a document written before snapshots existed", async () => {
-    const { directory } = await makeStore();
-    await writeFile(
-      path.join(directory, "intent", AGENT + ".json"),
-      JSON.stringify({
-        version: 1,
-        agentId: AGENT,
-        objective: OBJECTIVE,
-        extended: ["Do not read .env files."],
-        updatedAt: "2026-08-01T00:00:00.000Z",
-        history: [
-          {
-            id: "u1",
-            at: "2026-08-01T00:00:00.000Z",
-            message: "Do not read .env files.",
-            reason: "prohibition",
-            added: ["Do not read .env files."],
-            objectiveBefore: null,
-            objectiveAfter: null,
-            status: "applied",
-          },
-        ],
-      }) + "\n",
-    );
-    const reopened = new IntentStore(path.join(directory, "intent"));
-    await reopened.initialize();
-    const record = reopened.get(AGENT);
-    expect(record?.states).toHaveLength(1);
-    expect(record?.states[0]?.extended).toEqual(["Do not read .env files."]);
-    expect(record?.history[0]?.messageId).toBeNull();
-    expect(record?.lastModifiedBy).toBeNull();
-  });
-  it("applies a pending update only once the user confirms it", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(
-      store,
-      [
-        '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
-      ],
-      { requireConfirmation: true },
-    );
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Do not read .env.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-
-    const [proposed] = service.pending(AGENT);
-    expect(proposed).toBeDefined();
-    expect(service.state(AGENT).extended).toEqual([]);
-
-    service.resolve(AGENT, proposed!.id, "confirm");
-    expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
-    expect(service.pending(AGENT)).toEqual([]);
-    expect(service.record(AGENT)?.history[0]?.status).toBe("applied");
-  });
-
-  it("keeps a rejected update on record without applying it", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(
-      store,
-      [
-        '{"classification":"INTENT_UPDATE","reason":"pivot","extendedIntent":[],"objective":"Build a calendar application"}',
-      ],
-      { requireConfirmation: true },
-    );
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Actually, build a calendar.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-
-    const [proposed] = service.pending(AGENT);
-    service.resolve(AGENT, proposed!.id, "reject");
-    expect(service.state(AGENT).objective).toBe(OBJECTIVE);
-    expect(service.pending(AGENT)).toEqual([]);
-    expect(service.record(AGENT)?.history[0]?.status).toBe("rejected");
-  });
-
-  it("refuses to resolve an update that is not pending", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(store, [
-      '{"classification":"INTENT_UPDATE","reason":"rule","extendedIntent":["Do not read .env files."]}',
-    ]);
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Do not read .env.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-
-    const [applied] = service.record(AGENT)?.history ?? [];
-    expect(service.resolve(AGENT, applied!.id, "reject")).toBeNull();
-    expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
-  });
-
-  it("keeps every spec snapshot and the chats that ran under it", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(store, [
-      '{"classification":"NO_CHANGE","reason":"work","extendedIntent":[]}',
-      '{"classification":"NO_CHANGE","reason":"work","extendedIntent":[]}',
-      '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
-      '{"classification":"NO_CHANGE","reason":"work","extendedIntent":[]}',
-    ]);
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Build the todo list UI.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Add a delete button.",
-      messageId: "msg-2",
-      traceId: "trace-2",
-    });
-    await service.idle();
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Do not read .env files.",
-      messageId: "msg-3",
-      traceId: "trace-3",
-    });
-    await service.idle();
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Add unit tests.",
-      messageId: "msg-4",
-      traceId: "trace-4",
-    });
-    await service.idle();
-
-    const record = service.record(AGENT);
-    expect(record?.states).toHaveLength(2);
-    expect(record?.states[0]?.traces).toEqual(["trace-1", "trace-2"]);
-    expect(record?.states[0]?.lastModifiedBy).toBeNull();
-    expect(record?.states[1]?.traces).toEqual(["trace-3", "trace-4"]);
-    expect(record?.states[1]?.lastModifiedBy).toEqual({
-      messageId: "msg-3",
-      traceId: "trace-3",
-    });
-    expect(record?.lastModifiedBy).toEqual({
-      messageId: "msg-3",
-      traceId: "trace-3",
-    });
-    expect(service.state(AGENT)).toEqual({
-      objective: OBJECTIVE,
-      extended: ["Do not read .env files."],
-    });
-    expect(service.snapshotForTrace(AGENT, "trace-2")?.extended).toEqual([]);
-    expect(service.snapshotForTrace(AGENT, "trace-4")?.extended).toEqual([
-      "Do not read .env files.",
-    ]);
-  });
-
-  it("moves the proposing chat onto the new snapshot once confirmed", async () => {
-    const { store } = await makeStore();
-    const { service } = makeService(
-      store,
-      [
-        '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
-      ],
-      { requireConfirmation: true },
-    );
-    service.seed(AGENT, OBJECTIVE);
-    service.observe(AGENT, OBJECTIVE, {
-      content: "Do not read .env.",
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
-    await service.idle();
-
-    expect(service.record(AGENT)?.states[0]?.traces).toEqual(["trace-1"]);
-    const [proposed] = service.pending(AGENT);
-    service.resolve(AGENT, proposed!.id, "confirm");
-
-    const record = service.record(AGENT);
-    expect(record?.states[0]?.traces).toEqual([]);
-    expect(record?.states[1]?.traces).toEqual(["trace-1"]);
-    expect(record?.lastModifiedBy).toEqual({
-      messageId: "msg-1",
-      traceId: "trace-1",
-    });
+    expect(reopened.latest(AGENT)?.version.objective).toBe(OBJECTIVE);
+    expect([...loaded.keys()]).toEqual([seedId, updateId]);
   });
 });

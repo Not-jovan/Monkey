@@ -1,56 +1,27 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import type {
-  AuditTraceStep,
-  IntentSnapshot,
-  IntentState,
-  IntentUpdate,
-  TraceRecord,
-} from "../types";
-import { formatDateTime } from "./format";
+import type { AuditTraceStep, IntentState, TraceRecord } from "../types";
 
-function snapshotForTrace(
-  states: IntentSnapshot[],
-  traceId: string,
-): IntentSnapshot | null {
-  if (states.length === 0) return null;
-  const match = states.find((entry) => entry.traces.includes(traceId));
-  return match ?? states[states.length - 1] ?? null;
-}
-
-// A trace on its own does not say what the run was measured against. Without
-// the objective and the standing constraints in force, a finding like "not in
-// alignment" is unreadable — you cannot tell what it failed to align with.
-export function TraceIntent({ trace }: { trace: TraceRecord }) {
-  const intentQuery = useQuery<{
-    intent: IntentState;
-    pending: IntentUpdate[];
-    history: IntentUpdate[];
-    states: IntentSnapshot[];
-    requiresConfirmation: boolean;
-    updatedAt: string | null;
-  }>({
+export function TraceIntent({
+  trace,
+  intentId,
+}: {
+  trace: TraceRecord;
+  intentId: string | null;
+}) {
+  const intentQuery = useQuery({
     queryKey: ["intent", trace.agentId],
     queryFn: () => api.intent(trace.agentId),
-    // The specification changes only when the user says something, so there is
-    // nothing to poll for while looking at a finished run.
     staleTime: 30_000,
   });
 
-  const states: IntentSnapshot[] = intentQuery.data?.states ?? [];
-  const snapshot = snapshotForTrace(states, trace.id);
-  const latest = states[states.length - 1];
-  const intent: IntentState | undefined = snapshot
-    ? { objective: snapshot.objective, extended: snapshot.extended }
-    : intentQuery.data?.intent;
-  const changedHere =
-    snapshot?.lastModifiedBy?.traceId === trace.id
-      ? snapshot
-      : null;
-  const laterUpdates = Boolean(
-    snapshot && latest && snapshot.id !== latest.id,
-  );
-
+  let intent: IntentState | undefined = intentQuery.data?.intent;
+  if (intentId) {
+    const pinned = intentQuery.data?.versions[intentId];
+    if (pinned) {
+      intent = pinned;
+    }
+  }
   if (!intent || (intent.objective.length === 0 && intent.extended.length === 0)) {
     return null;
   }
@@ -70,15 +41,6 @@ export function TraceIntent({ trace }: { trace: TraceRecord }) {
             ))}
           </ul>
         </>
-      )}
-      {changedHere && (
-        <p className="muted-cell">
-          This chat last modified the spec
-          {changedHere.at ? " · " + formatDateTime(changedHere.at) : ""}
-        </p>
-      )}
-      {laterUpdates && (
-        <p className="muted-cell">Later chats updated this spec.</p>
       )}
     </section>
   );

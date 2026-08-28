@@ -50,30 +50,19 @@ export interface TraceDetail {
   trace: TraceRecord;
   findings: AuditTraceStep[];
   auditComplete: boolean;
+  intentId: string | null;
 }
 
-export interface IntentUpdate {
-  id: string;
-  message: string;
-  added: string[];
-  objectiveAfter: string | null;
-  status: "applied" | "pending" | "rejected";
-}
-
-export interface IntentSnapshot {
-  id: string;
+export interface IntentVersion {
   objective: string;
   extended: string[];
-  lastModifiedBy: { messageId: string; traceId: string } | null;
-  traces: string[];
+  update?: { logs: string[] };
 }
 
 export interface IntentResponse {
   intent: { objective: string; extended: string[] };
-  lastModifiedBy: { messageId: string; traceId: string } | null;
-  pending: IntentUpdate[];
-  history: IntentUpdate[];
-  states: IntentSnapshot[];
+  versions: Record<string, IntentVersion>;
+  intentId: string | null;
 }
 
 async function json<T>(response: Awaited<ReturnType<APIRequestContext["get"]>>) {

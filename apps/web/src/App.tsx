@@ -51,9 +51,6 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authInput, setAuthInput] = useState("");
-  // Bumped after each message so the intent panel re-checks promptly for a
-  // proposal instead of waiting out its poll interval.
-  const [intentRefresh, setIntentRefresh] = useState(0);
   const messageEnd = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
@@ -233,7 +230,6 @@ export default function App() {
     setError(null);
     try {
       const result = await api.sendMessage(selected.id, content);
-      setIntentRefresh((value) => value + 1);
       if (selectedIdRef.current === selected.id) {
         setMessages((current) => [...current, result.message]);
         setActiveRun(result.run);
@@ -499,7 +495,7 @@ export default function App() {
                 </div>
               </div>
 
-              <IntentPanel agentId={selected.id} refreshKey={intentRefresh} />
+              <IntentPanel agentId={selected.id} />
 
               <div className="messages">
                 {messages.length === 0 && !activeRun ? (

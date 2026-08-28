@@ -268,8 +268,9 @@ export class AuditService {
     const reason = [deterministicReason, verdict?.reason ?? failure ?? ""]
       .filter((part) => part.length > 0)
       .join(" · ");
-    this.deps.auditStore.noteStep(traceId, spanId);
-    this.deps.auditStore.add(
+    this.deps.auditStore.recordSpan(
+      trace,
+      spanId,
       auditSteps(
         { id: randomUUID(), traceId, agentId: trace.agentId, spanId },
         (push) => {
@@ -299,6 +300,7 @@ export class AuditService {
           }
         },
       ),
+      this.deps.intent?.currentId(trace.agentId) ?? "",
     );
   }
 
@@ -310,7 +312,7 @@ export class AuditService {
       typeof root?.attributes.instructions === "string"
         ? root.attributes.instructions
         : "";
-    const priorContext = this.deps.auditStore.latestIntentContext(trace.agentId);
+    const priorContext = this.deps.auditStore.priorRollout(trace.agentId);
     const intent = this.intentState(trace.agentId);
 
     const steps = trace.spans
@@ -351,12 +353,8 @@ export class AuditService {
     );
 
     const reason = verdict?.deviation ?? (verdict ? "" : (failure ?? ""));
-    this.deps.auditStore.noteRun(
-      traceId,
-      trace.agentId,
-      verdict?.context_summary ?? null,
-    );
-    this.deps.auditStore.add(
+    this.deps.auditStore.recordRun(
+      trace,
       auditSteps(
         {
           id: randomUUID(),
@@ -377,6 +375,8 @@ export class AuditService {
           }
         },
       ),
+      verdict?.context_summary ?? "",
+      this.deps.intent?.currentId(trace.agentId) ?? "",
     );
   }
 

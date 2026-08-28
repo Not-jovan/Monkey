@@ -37,7 +37,6 @@ export default defineConfig({
           PUBLIC_PORT: String(port),
           LOCAL_POC_DATA_ROOT: stateRoot,
           AUDIT_ENABLED: "true",
-          INTENT_CONFIRMATION: "true",
           AUDIT_NETWORK_WHITELIST:
             "tanstack.com,youtube.com,.youtube.com",
         },

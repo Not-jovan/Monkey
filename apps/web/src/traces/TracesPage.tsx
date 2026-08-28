@@ -82,7 +82,6 @@ export function TracesPage() {
     refetchInterval: 3_000,
   });
   const traces = tracesQuery.data?.traces ?? [];
-  const lifecycle = tracesQuery.data?.lifecycle ?? [];
 
   const table = useReactTable({
     data: traces,
@@ -177,23 +176,6 @@ export function TracesPage() {
           </tbody>
         </table>
       </section>
-
-      {lifecycle.length > 0 && (
-        <section className="lifecycle-card">
-          <span className="eyebrow">Agent lifecycle</span>
-          <div className="lifecycle-list">
-            {[...lifecycle].reverse().map((event) => (
-              <div className="lifecycle-item" key={event.id}>
-                <span className={"lifecycle-type lifecycle-" + event.type}>
-                  {event.type}
-                </span>
-                <span>{event.details}</span>
-                <span className="muted-cell">{formatDateTime(event.at)}</span>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
     </div>
   );
 }

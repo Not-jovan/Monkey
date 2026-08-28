@@ -122,39 +122,10 @@ export interface IntentState {
   extended: string[];
 }
 
-export interface IntentChatRef {
-  messageId: string;
-  traceId: string;
-}
-
-export interface IntentSnapshot {
-  id: string;
-  at: string;
+export interface IntentVersion {
   objective: string;
   extended: string[];
-  lastModifiedBy: IntentChatRef | null;
-  traces: string[];
-}
-
-export interface IntentUpdate {
-  id: string;
-  at: string;
-  message: string;
-  messageId: string | null;
-  traceId: string | null;
-  reason: string;
-  added: string[];
-  objectiveBefore: string | null;
-  objectiveAfter: string | null;
-  status: "applied" | "pending" | "rejected";
-}
-
-export interface AgentLifecycleEvent {
-  id: string;
-  agentId: string;
-  type: "created" | "updated" | "deleted" | "started" | "stopped";
-  at: string;
-  details: string;
+  update?: { logs: string[] };
 }
 
 export interface SystemInfo {

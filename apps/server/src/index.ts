@@ -45,7 +45,6 @@ const intentService = new IntentService({
   store: intentStore,
   client: arkClient,
   model: config.auditIntentModel,
-  requireConfirmation: config.intentConfirmation,
   enabled: auditingAvailable,
   log: (message, error) => console.error(message, error),
 });

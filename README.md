@@ -211,7 +211,6 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
 | `AUDIT_ENABLED` | `true` | Trace and audit middleware. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Hostnames the Agent may reach; unset disables the check. |
-| `INTENT_CONFIRMATION` | `false` | Hold a detected intent change until the user confirms it. |
 
 See [.env.example](.env.example) for all Runtime and resource-limit options,
 and [docs/GLASS_BOX.md](docs/GLASS_BOX.md) for the audit middleware options.

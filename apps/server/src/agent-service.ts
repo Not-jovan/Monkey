@@ -85,11 +85,6 @@ export class AgentService {
     };
     await this.workspaces.create(agent);
     await this.store.mutate((database) => database.agents.push(agent));
-    this.traces?.recordLifecycle(
-      agent.id,
-      "created",
-      "Agent " + agent.name + " created",
-    );
     return agent;
   }
 
@@ -119,11 +114,6 @@ export class AgentService {
       return structuredClone(agent);
     });
     await this.workspaces.writeInstructions(updated);
-    this.traces?.recordLifecycle(
-      id,
-      "updated",
-      "Agent " + updated.name + " updated",
-    );
     return updated;
   }
 
@@ -138,18 +128,11 @@ export class AgentService {
       );
       database.runs = database.runs.filter((item) => item.agentId !== id);
     });
-    this.traces?.recordLifecycle(
-      id,
-      "deleted",
-      "Agent " + agent.name + " deleted",
-    );
     return { archivedWorkspace };
   }
 
   async startAgent(id: string): Promise<Agent> {
-    const agent = await this.setStatus(id, "ready");
-    this.traces?.recordLifecycle(id, "started", "Agent started by user");
-    return agent;
+    return this.setStatus(id, "ready");
   }
 
   async stopAgent(id: string): Promise<Agent> {
@@ -158,9 +141,7 @@ export class AgentService {
     // inside the trace it interrupts.
     this.traces?.onUserIntervention(id, "terminate");
     await this.cancelExecution(id);
-    const agent = await this.setStatus(id, "stopped");
-    this.traces?.recordLifecycle(id, "stopped", "Agent stopped by user");
-    return agent;
+    return this.setStatus(id, "stopped");
   }
 
   getMessages(agentId: string): Message[] {

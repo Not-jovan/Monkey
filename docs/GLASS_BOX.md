@@ -45,7 +45,6 @@ services are required.
 | `AUDIT_SECURITY_MODEL` | `gpt-oss-120b-250805` | Judges each step. |
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Comma-separated hostnames the Agent may reach. |
-| `INTENT_CONFIRMATION` | `false` | Hold a detected intent change until the user confirms it. |
 | `OTEL_COLLECTOR_URL` | Derived | Override when the Runtime cannot reach the host via `host.docker.internal`. |
 
 Both audit models must be **activated on your Ark account** and must answer
@@ -120,18 +119,16 @@ that seek information ("Should we use PostgreSQL?") are not updates; questions
 that demand a change ("Can you avoid using `any`?") are.
 
 Classification is queued rather than awaited, so a slow model never delays a
-message. With `INTENT_CONFIRMATION=true`, a detected change is held as
-`pending` and shown in the Playground with **Confirm** / **Dismiss**; nothing
-governs later audits until the user decides.
+message. A detected change appends a new intent version immediately and governs
+later audits.
 
 ## API
 
 | Route | Purpose |
 | --- | --- |
 | `POST /collector/v1/logs` | OTLP ingest. Requires `x-collector-token`; outside `/api` by design. |
-| `GET /api/agents/:id/traces` | Trace summaries with warning counts, plus the Agent lifecycle journal. |
-| `GET /api/agents/:id/intent` | Current objective, standing constraints, pending proposals, and history. |
-| `POST /api/agents/:id/intent/:updateId` | `{"decision":"confirm"\|"reject"}` on a pending proposal. |
+| `GET /api/agents/:id/traces` | Trace list rows with warning counts. |
+| `GET /api/agents/:id/intent` | Current objective, standing constraints, version map, and current intentId. |
 | `GET /api/traces/:id` | One trace with its audits and derived findings. |
 | `GET /api/traces/:id/export` | The same payload as a download. |
 
@@ -146,10 +143,9 @@ trace data. All three write atomically (temp file plus rename, mode `0600`)
 under `APP_DATA_DIR`:
 
 ```
-.data/traces/<trace-id>.json        one document per Run
-.data/traces/lifecycle-<agent>.json create/update/start/stop/delete journal
-.data/audits/<audit-id>.json        references traces by id only
-.data/intent/<agent-id>.json        objective, constraints, decision history
+.data/traces/<chatId>.json    one TraceRecord per chat / AgentRun
+.data/audits/<chatId>.json    intent-pinned findings for that chat
+.data/intent/<agentId>.json   insertion-ordered map of intent versions
 ```
 
 A Run left open by a crash is closed on the next boot, so the UI never shows a
@@ -208,8 +204,7 @@ egress enforcement — it reports, it does not block.
 
 **Intent updates apply after the message.** Classification runs asynchronously,
 so a constraint stated in a message governs audits from shortly after that
-message rather than atomically with it. With `INTENT_CONFIRMATION=true` it
-applies only once the user confirms.
+message rather than atomically with it.
 
 **One judged call per step.** Long Runs are capped at 30 step audits per trace
 to bound cost. The Run-level intent audit is always performed and is not counted
