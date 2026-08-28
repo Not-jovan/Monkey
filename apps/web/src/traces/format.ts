@@ -24,3 +24,7 @@ export function formatTime(value: string) {
     second: "2-digit",
   }).format(new Date(value));
 }
+
+export function formatTokenCount(value: number) {
+  return value.toLocaleString();
+}

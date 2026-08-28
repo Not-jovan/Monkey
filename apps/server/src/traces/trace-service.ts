@@ -676,6 +676,9 @@ export class TraceService {
           });
           if (scope.lastModelCallSpanId) {
             this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
+              if (event.input_token_count !== undefined) {
+                span.attributes.inputTokens = event.input_token_count;
+              }
               if (event.output_token_count !== undefined) {
                 span.attributes.outputTokens = event.output_token_count;
               }

@@ -108,6 +108,8 @@ describe("TraceService", () => {
     expect(String(model?.attributes.context)).toContain("Count the txt files");
     expect(String(model?.attributes.output)).toContain("exec_command");
     expect(String(model?.attributes.output)).toContain("ls -la");
+    expect(model?.attributes.inputTokens).toBe(7451);
+    expect(model?.attributes.cachedTokens).toBe(6912);
 
     for (const span of trace?.spans ?? []) {
       expect(span.status).not.toBe("running");

@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
-import { formatDateTime, formatDuration, spanDuration } from "./format";
+import { formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { stepHeadline } from "./steps";
 import { TraceCanvas } from "./TraceCanvas";
@@ -12,6 +12,9 @@ import { parseCodexFailure, readCommand } from "./codex-error";
 import { FailureBlock } from "./FailureBlock";
 import { TextBlock } from "./TextBlock";
 import { TraceStepList } from "./TraceStepList";
+import { TraceTimeline } from "./TraceTimeline";
+import { UsageBars } from "./UsageBars";
+import { spanUsage } from "./usage";
 
 type TraceDetail = {
   trace: TraceRecord;
@@ -19,6 +22,8 @@ type TraceDetail = {
   auditComplete: boolean;
   intentId: string | null;
 };
+
+type StepView = "graph" | "list" | "timeline";
 
 function download(fileName: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -30,6 +35,37 @@ function download(fileName: string, data: unknown) {
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function openJson(fileName: string, data: unknown) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json",
+  });
+  const url = URL.createObjectURL(blob);
+  const opened = window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  if (!opened) {
+    download(fileName, data);
+  }
+}
+
+function readStoredView(): StepView {
+  try {
+    const stored = localStorage.getItem("trace-view");
+    if (stored === "list" || stored === "timeline") return stored;
+    if (stored === "graph" || stored === "flow") return "graph";
+  } catch {
+    // Private windows and blocked site data throw on access.
+  }
+  return "graph";
+}
+
+function persistView(view: StepView) {
+  try {
+    localStorage.setItem("trace-view", view);
+  } catch {
+    // Remembering the choice is a convenience, never a requirement.
+  }
 }
 
 function SpanDetails({
@@ -45,6 +81,7 @@ function SpanDetails({
   const input = stepContext(span, detailOptions);
   const output = stepReturn(span, detailOptions);
   const returnNote = stepReturnNote(span);
+  const usage = spanUsage(span);
   // A shell script inside the arguments keeps its escaped newlines, so show the
   // command as real text rather than a one-line JSON blob.
   const command =
@@ -61,44 +98,45 @@ function SpanDetails({
     "result",
     "arguments",
     "prompt",
+    "inputTokens",
+    "cachedTokens",
+    "outputTokens",
+    "reasoningTokens",
+    "toolTokens",
   ]);
   const longText = ["instructions"];
   const attributeEntries = Object.entries(span.attributes).filter(
     ([key]) => !hiddenInPanel.has(key),
   );
+  const duration = formatDuration(
+    span.durationMs ?? spanDuration(span.startedAt, span.endedAt),
+  );
+
+  let errorBlock = null;
+  if (failure) {
+    errorBlock = <FailureBlock failure={failure} raw={failureSource} />;
+  } else if (span.error) {
+    errorBlock = <div className="span-error">{span.error}</div>;
+  }
+
+  let inputBlock = null;
+  if (command) {
+    inputBlock = <TextBlock label="Input" text={command} />;
+  } else if (input) {
+    inputBlock = <TextBlock label="Input" text={input} />;
+  }
+
   return (
     <div className="span-panel">
       <div className="span-panel-head">
-        <div>
-          <span className={"trace-status trace-status-" + span.status}>
-            {span.status}
-          </span>
-          <strong>{stepHeadline(span)}</strong>
-        </div>
-        <span className="muted-cell">
-          {formatDateTime(span.startedAt)} ·{" "}
-          {formatDuration(
-            span.durationMs ?? spanDuration(span.startedAt, span.endedAt),
-          )}
-        </span>
+        <strong>{stepHeadline(span)}</strong>
+        <span className="muted-cell">{duration}</span>
       </div>
-      {command ? (
-        <TextBlock label="Command" text={command} />
-      ) : (
-        input && <TextBlock label="Input" text={input} />
-      )}
-      {failure ? (
-        <FailureBlock failure={failure} raw={failureSource} />
-      ) : (
-        <>
-          {output && <TextBlock label="Output" text={output} note={returnNote} />}
-          {span.error && (
-            <div className="span-context-block">
-              <span className="eyebrow">Error</span>
-              <div className="span-error">{span.error}</div>
-            </div>
-          )}
-        </>
+      {errorBlock}
+      {usage && <UsageBars model={trace.model} usage={usage} />}
+      {inputBlock}
+      {!failure && output && (
+        <TextBlock label="Output" text={output} note={returnNote} />
       )}
       <div className="span-attributes">
         {attributeEntries.map(([key, value]) =>
@@ -111,7 +149,7 @@ function SpanDetails({
             </div>
           ),
         )}
-        {attributeEntries.length === 0 && !input && !output && (
+        {attributeEntries.length === 0 && !input && !output && !command && (
           <span className="muted-cell">No recorded attributes.</span>
         )}
       </div>
@@ -123,6 +161,7 @@ function SpanDetails({
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [view, setView] = useState<StepView>(readStoredView);
 
   const authQuery = useQuery({ queryKey: ["auth"], queryFn: api.auth });
   const locked = authQuery.data?.required === true && !hasAuthToken();
@@ -137,21 +176,6 @@ export function TraceDetailPage() {
 
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
-  const [view, setView] = useState<"list" | "flow">(() => {
-    try {
-      return localStorage.getItem("trace-view") === "list" ? "list" : "flow";
-    } catch {
-      // Private windows and blocked site data throw on access.
-      return "list";
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem("trace-view", view);
-    } catch {
-      // Remembering the choice is a convenience, never a requirement.
-    }
-  }, [view]);
 
   const warningsBySpan = new Map<string, number>();
   for (const finding of findings) {
@@ -169,6 +193,11 @@ export function TraceDetailPage() {
     (finding) => finding.spanId === selectedSpanId,
   );
 
+  const chooseView = (next: StepView) => {
+    setView(next);
+    persistView(next);
+  };
+
   if (locked || detailQuery.error) {
     let message = "Could not load the trace.";
     if (isApiErrorWithStatus(detailQuery.error, 404)) {
@@ -183,67 +212,73 @@ export function TraceDetailPage() {
           <span>{message}</span>
         </div>
         <Link className="button button-ghost" to="/traces">
-          ← Back to traces
+          ← Back
         </Link>
       </div>
     );
   }
 
+  let durationLabel = "—";
+  if (trace) {
+    if (trace.endedAt) {
+      durationLabel = formatDuration(
+        spanDuration(trace.startedAt, trace.endedAt),
+      );
+    } else {
+      durationLabel = formatDuration(
+        Date.now() - new Date(trace.startedAt).getTime(),
+      );
+    }
+  }
+
   return (
     <div className="glassbox-page">
       <header className="glassbox-topbar">
-        <div className="trace-headline">
-          <Link className="button button-ghost" to="/traces">
-            ←
-          </Link>
-          <div>
-            <span className="eyebrow">Run trace</span>
-            <h1>{trace ? formatDateTime(trace.startedAt) : "Loading…"}</h1>
-          </div>
-          {trace && (
-            <span className={"trace-status trace-status-" + trace.status}>
-              {trace.status}
-            </span>
-          )}
-          {warningCount > 0 && (
-            <span className="warning-badge warning-badge-large">
-              ⚠ {warningCount} audit warning{warningCount > 1 ? "s" : ""}
-            </span>
-          )}
+        <Link className="button button-ghost" to="/traces">
+          ← Back
+        </Link>
+        <div className="glassbox-topbar-actions">
+          <button
+            className="button button-ghost"
+            disabled={!trace}
+            onClick={async () => {
+              const payload = await api.trace(traceId);
+              openJson("trace-" + traceId + "-api.json", payload);
+            }}
+          >
+            Trace API
+          </button>
+          <button
+            className="button button-ghost"
+            disabled={!trace}
+            onClick={async () => {
+              const payload = await api.downloadTrace(traceId);
+              download("trace-" + traceId + ".json", payload);
+            }}
+          >
+            Download
+          </button>
         </div>
-        <button
-          className="button button-primary"
-          disabled={!trace}
-          onClick={async () => {
-            const payload = await api.downloadTrace(traceId);
-            download("trace-" + traceId + ".json", payload);
-          }}
-        >
-          Download trace
-        </button>
       </header>
 
       {trace && (
-        <section className="trace-meta">
-          <div>
-            <span className="eyebrow">Prompt</span>
-            <p>{trace.prompt}</p>
-          </div>
-          <div className="trace-meta-stats">
-            <span>{trace.model ?? "model n/a"}</span>
-            <span>
-              {trace.usage.inputTokens} in · {trace.usage.outputTokens} out ·{" "}
-              {trace.usage.cachedTokens} cached · {trace.usage.reasoningTokens}{" "}
-              reasoning
+        <>
+          <p className="trace-instruction" title={trace.prompt}>
+            {trace.prompt}
+          </p>
+          <div className="trace-badges">
+            <span className={"trace-status trace-status-" + trace.status}>
+              {trace.status}
             </span>
-            <span>
-              {trace.spans.length} spans
-              {trace.unrecognizedEvents > 0
-                ? " · " + trace.unrecognizedEvents + " unrecognized events"
-                : ""}
-            </span>
+            {warningCount > 0 && (
+              <span className="warning-badge">
+                {warningCount} Warning{warningCount === 1 ? "" : "s"}
+              </span>
+            )}
+            <span className="trace-duration">{durationLabel}</span>
           </div>
-        </section>
+          <UsageBars model={trace.model} usage={trace.usage} />
+        </>
       )}
 
       {trace && (
@@ -266,23 +301,31 @@ export function TraceDetailPage() {
             <div className="view-toggle" role="group" aria-label="Step view">
               <button
                 type="button"
-                className={view === "flow" ? "is-active" : ""}
-                aria-pressed={view === "flow"}
-                onClick={() => setView("flow")}
+                className={view === "graph" ? "is-active" : ""}
+                aria-pressed={view === "graph"}
+                onClick={() => chooseView("graph")}
               >
-                Flow
+                Call Graph
               </button>
               <button
                 type="button"
                 className={view === "list" ? "is-active" : ""}
                 aria-pressed={view === "list"}
-                onClick={() => setView("list")}
+                onClick={() => chooseView("list")}
               >
-                List
+                Call List
+              </button>
+              <button
+                type="button"
+                className={view === "timeline" ? "is-active" : ""}
+                aria-pressed={view === "timeline"}
+                onClick={() => chooseView("timeline")}
+              >
+                Timeline
               </button>
             </div>
           </div>
-          {view === "list" ? (
+          {view === "list" && (
             <TraceStepList
               spans={trace.spans}
               selectedId={selectedSpanId}
@@ -290,8 +333,18 @@ export function TraceDetailPage() {
               warningsBySpan={warningsBySpan}
               onSelect={setSelectedSpanId}
             />
-          ) : (
+          )}
+          {view === "graph" && (
             <TraceCanvas
+              spans={trace.spans}
+              selectedId={selectedSpanId}
+              failingSpanId={trace.failingSpanId}
+              warningsBySpan={warningsBySpan}
+              onSelect={setSelectedSpanId}
+            />
+          )}
+          {view === "timeline" && (
+            <TraceTimeline
               spans={trace.spans}
               selectedId={selectedSpanId}
               failingSpanId={trace.failingSpanId}
@@ -302,17 +355,12 @@ export function TraceDetailPage() {
         </section>
       )}
 
-      {trace && selectedSpan ? (
+      {trace && selectedSpan && (
         <SpanDetails
           findings={selectedFindings}
           span={selectedSpan}
           trace={trace}
         />
-      ) : (
-        <div className="span-panel span-panel-hint">
-          Select a step in the flow above to inspect its details and findings.
-          Drag to pan.
-        </div>
       )}
     </div>
   );
