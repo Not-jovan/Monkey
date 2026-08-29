@@ -213,7 +213,10 @@ function policySteps(
 }
 
 describe("policy findings", () => {
-  it("emits one intent-check entry per misalignment", () => {
+  // A step is judged on its own, so a deviation is only ever a suspicion here.
+  // auditAll's backtrace reads the steps that led up to it and promotes the
+  // ones nothing the user asked for accounts for.
+  it("emits one intent-check suspicion per misalignment", () => {
     const steps = policySteps({
       notInAlignment: [
         "The agent read .env despite the intent prohibiting it.",
@@ -222,7 +225,7 @@ describe("policy findings", () => {
     });
     expect(steps).toHaveLength(2);
     expect(steps.every((step) => step.category === "intent-check")).toBe(true);
-    expect(steps.every((step) => step.type === "warning")).toBe(true);
+    expect(steps.every((step) => step.type === "suspicion")).toBe(true);
     expect(new Set(steps.map((step) => step.id)).size).toBe(2);
   });
 

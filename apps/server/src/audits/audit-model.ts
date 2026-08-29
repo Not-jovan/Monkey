@@ -237,8 +237,14 @@ export function emitPolicyFindings(
     actedOnExternalInstructions?: string[];
   },
 ) {
+  // PLAN_AUDITOR check 3 raises a *suspicion* here, not a warning: a step is
+  // judged in isolation, and in isolation "this looks off" is as much as the
+  // evidence supports. auditAll's backtrace reads the steps that led up to it
+  // and promotes the ones nothing the user asked for accounts for. Calling it a
+  // warning here made the auditor state as fact something it had not yet
+  // checked, which is where its false positives came from.
   for (const entry of policies.notInAlignment) {
-    push("warning", "intent-check", entry);
+    push("suspicion", "intent-check", entry);
   }
   for (const objective of policies.newObjectives) {
     if (objective.requestedByUser || !objective.actedUpon) continue;
