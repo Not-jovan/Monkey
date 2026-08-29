@@ -299,15 +299,16 @@ nothing.
 ### Post-run human correction
 
 An audit finding does not have authority to rewrite the Agent. From the
-Auditor view, an operator can select **Correct this**, write a constraint for
-future runs, and explicitly apply it. The backend verifies that the finding
-belongs to the completed trace, that its audit has finished, and that the Agent
+Auditor view, an operator can select **Correct this** for one finding or select
+several related findings, write one constraint for future runs, and explicitly
+apply it. The backend verifies that every finding belongs to the completed
+trace, that its audit has finished, and that the Agent
 has no active run before appending a `human-correction` intent version. The
 active intent is included in the prompt for later runs, so the approved
 constraint governs both execution and auditing. Reverting the intent therefore
 also removes that constraint from later runtime prompts.
 
-That version records the source trace, finding, and span. The intent history
+That version records the source trace and every selected finding/span pair. The intent history
 links back to the evidence and the existing revert control can undo the
 correction without erasing it. Auditor-health records cannot create
 corrections, and applying the same finding twice is rejected.
@@ -365,7 +366,7 @@ the continuation of earlier work is not flagged as unmotivated.
 | `GET /api/agents/:id/failures` | The Agent's failures grouped by kind, newest first. |
 | `GET /api/agents/:id/intent` | Current objective, standing constraints, the ordered version list, and current intentId. |
 | `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. |
-| `POST /api/traces/:id/intent/correct` | Apply a human-authored constraint from a finding. Body: `{ "findingId": "...", "correction": "..." }`. |
+| `POST /api/traces/:id/intent/correct` | Apply one human-authored constraint from one or more findings. Body: `{ "findingIds": ["..."], "correction": "..." }`; legacy `findingId` remains accepted. |
 | `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, the pinned intent, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
 | `GET /api/audits/:id` | The auditor's own trace for that run: model calls, prompts, verdicts, and timing. Not included in the agent trace API. |

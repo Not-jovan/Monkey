@@ -149,6 +149,30 @@ describe("intentChanges", () => {
     expect(versionByTrace(changes).has("trace-2")).toBe(false);
   });
 
+  it("keeps every source for a grouped human correction", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", {
+        extended: ["Address related security findings together."],
+        update: update({
+          kind: "human-correction",
+          message: "Address related security findings together.",
+          traceId: "trace-3",
+          sources: [
+            { findingId: "finding-a", spanId: "span-a" },
+            { findingId: "finding-b", spanId: null },
+          ],
+        }),
+      }),
+    ]);
+
+    expect(changes[1]?.sources).toEqual([
+      { findingId: "finding-a", spanId: "span-a" },
+      { findingId: "finding-b", spanId: null },
+    ]);
+    expect(changes[1]?.sourceFindingId).toBe("finding-a");
+  });
+
   it("survives an empty history", () => {
     expect(intentChanges([])).toEqual([]);
   });

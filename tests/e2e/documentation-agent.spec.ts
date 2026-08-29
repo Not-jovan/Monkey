@@ -220,7 +220,7 @@ test("A human can turn Trace 4 evidence into a reversible correction", async () 
   expect(intent.intent.extended).toContain(correction);
   expect(intent.versions.at(-1)?.update).toMatchObject({
     kind: "human-correction",
-    sourceFindingId: finding!.id,
+    sources: [{ findingId: finding!.id, spanId: finding!.spanId }],
     traceId: detail.trace.id,
   });
 });

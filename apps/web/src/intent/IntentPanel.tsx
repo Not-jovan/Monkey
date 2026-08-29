@@ -148,22 +148,26 @@ export function IntentPanel({ agentId }: { agentId: string }) {
               {change.kind === "human-correction" && change.trigger && (
                 <p className="intent-change-trigger">
                   Human correction: &ldquo;{change.trigger}&rdquo;
-                  {change.traceId && (
+                  {change.traceId && change.sources.length > 0 && (
                     <>
-                      {" "}
-                      <Link
-                        to={
-                          "/traces/" +
-                          change.traceId +
-                          "?pane=auditor" +
-                          (change.sourceFindingId
-                            ? "&finding=" +
-                              encodeURIComponent(change.sourceFindingId)
-                            : "")
-                        }
-                      >
-                        View source finding
-                      </Link>
+                      {" Evidence: "}
+                      {change.sources.map((source, index) => (
+                        <span key={source.findingId}>
+                          {index > 0 && ", "}
+                          <Link
+                            to={
+                              "/traces/" +
+                              change.traceId +
+                              "?pane=auditor&finding=" +
+                              encodeURIComponent(source.findingId)
+                            }
+                          >
+                            {change.sources.length === 1
+                              ? "view source finding"
+                              : "finding " + (index + 1)}
+                          </Link>
+                        </span>
+                      ))}
                     </>
                   )}
                 </p>

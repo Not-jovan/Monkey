@@ -230,16 +230,19 @@ describe("IntentService", () => {
     expect(service.view(AGENT).versions).toHaveLength(2);
   });
 
-  it("applies a human correction with evidence provenance exactly once", async () => {
+  it("applies one human correction from grouped evidence exactly once", async () => {
     const { store } = await makeStore();
     const { service } = makeService(store, []);
     service.seed(AGENT, OBJECTIVE);
+    const seedId = service.currentId(AGENT);
 
     const first = service.applyHumanCorrection(AGENT, {
       correction: "  Do not contact hosts outside the network whitelist.  ",
       traceId: "trace-2",
-      findingId: "finding-2",
-      spanId: "span-7",
+      sources: [
+        { findingId: "finding-2", spanId: "span-7" },
+        { findingId: "finding-3", spanId: "span-8" },
+      ],
     });
 
     expect(first.created).toBeTruthy();
@@ -249,17 +252,22 @@ describe("IntentService", () => {
     const applied = first.view.versions.at(-1);
     expect(applied?.update?.kind).toBe("human-correction");
     expect(applied?.update?.traceId).toBe("trace-2");
-    expect(applied?.update?.sourceFindingId).toBe("finding-2");
-    expect(applied?.update?.sourceSpanId).toBe("span-7");
+    expect(applied?.update?.sources).toEqual([
+      { findingId: "finding-2", spanId: "span-7" },
+      { findingId: "finding-3", spanId: "span-8" },
+    ]);
 
     const duplicate = service.applyHumanCorrection(AGENT, {
       correction: "A different correction must not replace the first one.",
       traceId: "trace-2",
-      findingId: "finding-2",
-      spanId: "span-7",
+      sources: [{ findingId: "finding-3", spanId: "span-8" }],
     });
     expect(duplicate.created).toBeNull();
     expect(service.view(AGENT).versions).toHaveLength(2);
+
+    const reverted = service.revert(AGENT, seedId);
+    expect(reverted.created).toBeTruthy();
+    expect(reverted.view.intent.extended).toEqual([]);
   });
 
   it("removes persisted intent when an Agent is forgotten", async () => {

@@ -6,6 +6,7 @@ import type {
   AuditHealth,
   AuditTraceStep,
   ContextView,
+  IntentUpdate,
   TraceIntentView,
   TraceRecord,
   TraceSpan,
@@ -21,12 +22,21 @@ import { stepHeadline } from "./steps";
 
 type AuditorView = "list" | "timeline";
 
+function correctionFindingIds(update?: IntentUpdate) {
+  if (update?.sources && update.sources.length > 0) {
+    return update.sources.map((source) => source.findingId);
+  }
+  return update?.sourceFindingId ? [update.sourceFindingId] : [];
+}
+
 function HumanCorrection({
   trace,
   finding,
+  onApplied,
 }: {
   trace: TraceRecord;
   finding: AuditTraceStep;
+  onApplied: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [correction, setCorrection] = useState("");
@@ -37,7 +47,7 @@ function HumanCorrection({
   });
   const appliedIndex =
     intentQuery.data?.versions.findIndex(
-      (entry) => entry.update?.sourceFindingId === finding.id,
+      (entry) => correctionFindingIds(entry.update).includes(finding.id),
     ) ?? -1;
   const appliedVersion =
     appliedIndex >= 0 ? intentQuery.data?.versions[appliedIndex] : undefined;
@@ -48,10 +58,11 @@ function HumanCorrection({
       intentQuery.data?.intent.extended.includes(entry),
     );
   const apply = useMutation({
-    mutationFn: () => api.correctIntent(trace.id, finding.id, correction),
+    mutationFn: () => api.correctIntent(trace.id, [finding.id], correction),
     onSuccess: (view) => {
       queryClient.setQueryData(["intent", trace.agentId], view);
       setEditing(false);
+      onApplied();
     },
   });
 
@@ -291,12 +302,53 @@ export function TraceAuditor({
 }) {
   const [view, setView] = useState<AuditorView>("list");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [selectedFindingIds, setSelectedFindingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [groupEditing, setGroupEditing] = useState(false);
+  const [groupCorrection, setGroupCorrection] = useState("");
+  const queryClient = useQueryClient();
+  const intentQuery = useQuery({
+    queryKey: ["intent", trace.agentId],
+    queryFn: () => api.intent(trace.agentId),
+  });
   const healthNotes = findings.filter(
     (finding) => finding.category === "audit-health",
   );
   const agentFindings = findings.filter(
     (finding) => finding.category !== "audit-health",
   );
+  const correctedFindingIds = new Set(
+    (intentQuery.data?.versions ?? []).flatMap((entry) =>
+      correctionFindingIds(entry.update),
+    ),
+  );
+  const selectedFindings = agentFindings.filter((finding) =>
+    selectedFindingIds.has(finding.id),
+  );
+  const applyGroup = useMutation({
+    mutationFn: () =>
+      api.correctIntent(
+        trace.id,
+        selectedFindings.map((finding) => finding.id),
+        groupCorrection,
+      ),
+    onSuccess: (intentView) => {
+      queryClient.setQueryData(["intent", trace.agentId], intentView);
+      setSelectedFindingIds(new Set());
+      setGroupCorrection("");
+      setGroupEditing(false);
+    },
+  });
+  const toggleFinding = (findingId: string) => {
+    setSelectedFindingIds((current) => {
+      const next = new Set(current);
+      if (next.has(findingId)) next.delete(findingId);
+      else next.add(findingId);
+      return next;
+    });
+    applyGroup.reset();
+  };
   const copy = healthCopy(auditHealth, healthNotes);
   const selectedSpan =
     auditorSpans.find((span) => span.id === selectedSpanId) ?? null;
@@ -391,9 +443,98 @@ export function TraceAuditor({
           <h2 className="eyebrow" id="auditor-findings-heading">
             Findings
           </h2>
+          {selectedFindings.length > 0 && (
+            <div className="finding-selection">
+              <div className="finding-selection-head">
+                <strong>
+                  {selectedFindings.length} finding
+                  {selectedFindings.length === 1 ? "" : "s"} selected
+                </strong>
+                <div className="finding-correction-actions">
+                  {!groupEditing && (
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      onClick={() => setGroupEditing(true)}
+                    >
+                      {selectedFindings.length === 1
+                        ? "Correct selected"
+                        : "Create shared correction"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="button button-ghost"
+                    disabled={applyGroup.isPending}
+                    onClick={() => {
+                      setSelectedFindingIds(new Set());
+                      setGroupCorrection("");
+                      setGroupEditing(false);
+                      applyGroup.reset();
+                    }}
+                  >
+                    Clear
+                  </button>
+                </div>
+              </div>
+              {groupEditing && (
+                <div className="finding-correction">
+                  <ul className="finding-selection-list">
+                    {selectedFindings.map((finding) => (
+                      <li key={finding.id}>{finding.finding}</li>
+                    ))}
+                  </ul>
+                  <label htmlFor="group-correction">Correction for future runs</label>
+                  <textarea
+                    id="group-correction"
+                    value={groupCorrection}
+                    maxLength={1_000}
+                    placeholder="Write one constraint that addresses the selected findings together."
+                    onChange={(event) => setGroupCorrection(event.target.value)}
+                  />
+                  <p className="muted-cell">
+                    This creates one reversible intent version linked to all selected
+                    evidence.
+                  </p>
+                  <div className="finding-correction-actions">
+                    <button
+                      type="button"
+                      className="button button-primary"
+                      disabled={
+                        applyGroup.isPending || groupCorrection.trim().length === 0
+                      }
+                      onClick={() => applyGroup.mutate()}
+                    >
+                      Apply correction
+                    </button>
+                    <button
+                      type="button"
+                      className="button button-ghost"
+                      disabled={applyGroup.isPending}
+                      onClick={() => {
+                        setGroupEditing(false);
+                        setGroupCorrection("");
+                        applyGroup.reset();
+                      }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {applyGroup.isError && (
+                    <p className="intent-change-error" role="alert">
+                      {applyGroup.error instanceof Error
+                        ? applyGroup.error.message
+                        : "The grouped correction could not be applied."}
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
           <table className="findings-table">
             <thead>
               <tr>
+                <th>Select</th>
                 <th>Severity</th>
                 <th>Type</th>
                 <th>Finding</th>
@@ -416,6 +557,15 @@ export function TraceAuditor({
                     }
                   >
                     <td>
+                      <input
+                        type="checkbox"
+                        aria-label={"Select finding: " + finding.finding}
+                        checked={selectedFindingIds.has(finding.id)}
+                        disabled={correctedFindingIds.has(finding.id)}
+                        onChange={() => toggleFinding(finding.id)}
+                      />
+                    </td>
+                    <td>
                       <span className={"finding-type finding-type-" + finding.type}>
                         {finding.type}
                       </span>
@@ -424,7 +574,16 @@ export function TraceAuditor({
                     <td>
                       <div className="finding-copy">{finding.finding}</div>
                       {finding.category !== "audit-health" && (
-                        <HumanCorrection trace={trace} finding={finding} />
+                        <HumanCorrection
+                          trace={trace}
+                          finding={finding}
+                          onApplied={() => {
+                            setSelectedFindingIds(new Set());
+                            setGroupCorrection("");
+                            setGroupEditing(false);
+                            applyGroup.reset();
+                          }}
+                        />
                       )}
                     </td>
                     <td>

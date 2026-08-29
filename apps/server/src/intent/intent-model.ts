@@ -33,6 +33,17 @@ export const intentUpdateSchema = z.object({
   // audit finding and step the operator reviewed before changing the spec.
   sourceFindingId: z.string().nullable().optional(),
   sourceSpanId: z.string().nullable().optional(),
+  // New corrections can combine related findings from the same trace into
+  // one reversible intent version. Keep the singular fields above readable
+  // for intent files created before grouped correction existed.
+  sources: z
+    .array(
+      z.object({
+        findingId: z.string(),
+        spanId: z.string().nullable(),
+      }),
+    )
+    .optional(),
 });
 
 export type IntentUpdate = z.infer<typeof intentUpdateSchema>;

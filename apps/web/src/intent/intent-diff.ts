@@ -28,6 +28,7 @@ export interface IntentChange {
   revertedFromVersion: number | null;
   sourceFindingId: string | null;
   sourceSpanId: string | null;
+  sources: Array<{ findingId: string; spanId: string | null }>;
   isCurrent: boolean;
 }
 
@@ -52,6 +53,17 @@ export function intentChanges(
     const added = difference(entry.extended, previous?.extended ?? []);
     const removed = difference(previous?.extended ?? [], entry.extended);
     const revertedFrom = update?.revertedFrom ?? null;
+    const sources =
+      update?.sources && update.sources.length > 0
+        ? update.sources
+        : update?.sourceFindingId
+          ? [
+              {
+                findingId: update.sourceFindingId,
+                spanId: update.sourceSpanId ?? null,
+              },
+            ]
+          : [];
 
     return {
       id: entry.id,
@@ -72,8 +84,9 @@ export function intentChanges(
       revertedFromVersion: revertedFrom
         ? (positionById.get(revertedFrom) ?? null)
         : null,
-      sourceFindingId: update?.sourceFindingId ?? null,
-      sourceSpanId: update?.sourceSpanId ?? null,
+      sourceFindingId: sources[0]?.findingId ?? null,
+      sourceSpanId: sources[0]?.spanId ?? null,
+      sources,
       isCurrent: index === versions.length - 1,
     };
   });

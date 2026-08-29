@@ -521,6 +521,15 @@ describe("Glassbox routes", () => {
           finding:
             "Contacted github.com, which is outside the configured whitelist.",
         },
+        {
+          id: "finding-retry-2",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "warning",
+          category: "reliability",
+          finding: "Repeated the same failed network operation.",
+        },
       ],
       "",
       intentStore.latest(AGENT_ID)?.intentId ?? "",
@@ -540,7 +549,7 @@ describe("Glassbox routes", () => {
       method: "POST",
       url: "/api/traces/" + RUN_ID + "/intent/correct",
       payload: {
-        findingId: "finding-network-1",
+        findingIds: ["finding-network-1", "finding-retry-2"],
         correction: "Do not contact hosts outside the configured whitelist.",
       },
     });
@@ -554,7 +563,7 @@ describe("Glassbox routes", () => {
       method: "POST",
       url: "/api/traces/" + RUN_ID + "/intent/correct",
       payload: {
-        findingId: "finding-network-1",
+        findingIds: ["finding-network-1", "finding-retry-2"],
         correction: "Do not contact hosts outside the configured whitelist.",
       },
     });
@@ -564,7 +573,7 @@ describe("Glassbox routes", () => {
       versions: {
         update?: {
           kind: string;
-          sourceFindingId?: string | null;
+          sources?: { findingId: string; spanId: string | null }[];
           traceId: string | null;
         };
       }[];
@@ -574,7 +583,10 @@ describe("Glassbox routes", () => {
     );
     expect(body.versions.at(-1)?.update).toMatchObject({
       kind: "human-correction",
-      sourceFindingId: "finding-network-1",
+      sources: [
+        { findingId: "finding-network-1", spanId: null },
+        { findingId: "finding-retry-2", spanId: null },
+      ],
       traceId: RUN_ID,
     });
 
@@ -582,7 +594,7 @@ describe("Glassbox routes", () => {
       method: "POST",
       url: "/api/traces/" + RUN_ID + "/intent/correct",
       payload: {
-        findingId: "finding-network-1",
+        findingIds: ["finding-retry-2"],
         correction: "Try to apply it twice.",
       },
     });
@@ -648,6 +660,15 @@ describe("Glassbox routes", () => {
           category: "reliability",
           finding: "The agent repeated a failed command.",
         },
+        {
+          id: "finding-related-3",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "warning",
+          category: "security",
+          finding: "A related security warning.",
+        },
       ],
       "",
       intentStore.latest(AGENT_ID)?.intentId ?? "",
@@ -656,11 +677,18 @@ describe("Glassbox routes", () => {
       method: "POST",
       url: "/api/traces/" + RUN_ID + "/intent/correct",
       payload: {
-        findingId: "finding-auditor-health",
+        findingIds: ["finding-related-3", "finding-auditor-health"],
         correction: "Change the Agent because its auditor was unavailable.",
       },
     });
     expect(auditorHealth.statusCode).toBe(400);
+    expect(
+      intentStore
+        .latest(AGENT_ID)
+        ?.version.update?.sources?.some(
+          (source) => source.findingId === "finding-related-3",
+        ),
+    ).not.toBe(true);
 
     const missingSpan = await app.inject({
       method: "POST",

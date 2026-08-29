@@ -19,8 +19,27 @@ export interface IntentObserveInput {
 export interface HumanCorrectionInput {
   correction: string;
   traceId: string;
-  findingId: string;
-  spanId: string | null;
+  sources?: { findingId: string; spanId: string | null }[];
+  // Accepted for existing internal callers and older tests.
+  findingId?: string;
+  spanId?: string | null;
+}
+
+function correctionSources(input: HumanCorrectionInput) {
+  if (input.sources && input.sources.length > 0) return input.sources;
+  return input.findingId
+    ? [{ findingId: input.findingId, spanId: input.spanId ?? null }]
+    : [];
+}
+
+function sourceFindingIds(update: {
+  sourceFindingId?: string | null | undefined;
+  sources?: { findingId: string }[] | undefined;
+}) {
+  if (update.sources && update.sources.length > 0) {
+    return update.sources.map((source) => source.findingId);
+  }
+  return update.sourceFindingId ? [update.sourceFindingId] : [];
 }
 
 export class IntentService {
@@ -90,8 +109,10 @@ export class IntentService {
 
   applyHumanCorrection(agentId: string, input: HumanCorrectionInput) {
     const correction = input.correction.trim();
+    const sources = correctionSources(input);
+    const findingIds = sources.map((source) => source.findingId);
     const view = this.view(agentId);
-    if (!this.canApplyHumanCorrection(agentId, input.findingId, correction)) {
+    if (!this.canApplyHumanCorrection(agentId, findingIds, correction)) {
       return { created: null, view };
     }
     const created = this.deps.store.append(agentId, {
@@ -100,7 +121,12 @@ export class IntentService {
       update: {
         kind: "human-correction",
         logs: [
-          "Human correction applied from audit finding " + input.findingId,
+          "Human correction applied from " +
+            findingIds.length +
+            " audit finding" +
+            (findingIds.length === 1 ? "" : "s") +
+            ": " +
+            findingIds.join(", "),
           "Added constraint: " + correction,
         ],
         message: correction,
@@ -109,8 +135,7 @@ export class IntentService {
         previousObjective: null,
         traceId: input.traceId,
         revertedFrom: null,
-        sourceFindingId: input.findingId,
-        sourceSpanId: input.spanId,
+        sources,
       },
     });
     return { created, view: this.view(agentId) };
@@ -118,16 +143,22 @@ export class IntentService {
 
   canApplyHumanCorrection(
     agentId: string,
-    findingId: string,
+    findingIds: string | string[],
     correction: string,
   ) {
     const view = this.view(agentId);
+    const requested = new Set(
+      (Array.isArray(findingIds) ? findingIds : [findingIds]).filter(Boolean),
+    );
     return (
       !this.forgotten.has(agentId) &&
+      requested.size > 0 &&
       correction.trim().length > 0 &&
       !view.intent.extended.includes(correction.trim()) &&
       !view.versions.some(
-        (entry) => entry.update?.sourceFindingId === findingId,
+        (entry) =>
+          entry.update &&
+          sourceFindingIds(entry.update).some((findingId) => requested.has(findingId)),
       )
     );
   }

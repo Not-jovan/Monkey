@@ -110,6 +110,7 @@ export interface IntentUpdate {
   revertedFrom: string | null;
   sourceFindingId?: string | null;
   sourceSpanId?: string | null;
+  sources?: Array<{ findingId: string; spanId: string | null }>;
 }
 
 export interface IntentVersionEntry {

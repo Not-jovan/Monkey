@@ -11,10 +11,21 @@ import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const revertBody = z.object({ intentId: z.string().min(1) });
-const correctionBody = z.object({
-  findingId: z.string().min(1).max(200),
-  correction: z.string().trim().min(1).max(1_000),
-});
+const findingIdSchema = z.string().min(1).max(200);
+const correctionBody = z
+  .object({
+    // findingId remains accepted for clients created before grouped correction.
+    findingId: findingIdSchema.optional(),
+    findingIds: z.array(findingIdSchema).min(1).max(20).optional(),
+    correction: z.string().trim().min(1).max(1_000),
+  })
+  .refine((body) => Boolean(body.findingId) !== Boolean(body.findingIds), {
+    message: "Provide either findingId or findingIds",
+  })
+  .transform((body) => ({
+    correction: body.correction,
+    findingIds: [...new Set(body.findingIds ?? [body.findingId!])],
+  }));
 const traceParams = z.object({ id: z.string().min(8).max(64) });
 
 export interface GlassboxDeps {
@@ -203,26 +214,33 @@ export function registerGlassboxRoutes(
         "Wait for the Agent's active run to finish before changing its intent",
       );
     }
-    const finding = deps.auditStore
-      .listByTrace(id)
-      .find((entry) => entry.id === body.findingId);
+    const findingsById = new Map(
+      deps.auditStore.listByTrace(id).map((finding) => [finding.id, finding]),
+    );
+    const findings = body.findingIds.map((findingId) => findingsById.get(findingId));
     if (
-      !finding ||
-      finding.traceId !== trace.id ||
-      finding.agentId !== trace.agentId ||
-      (finding.spanId !== null &&
-        !trace.spans.some((span) => span.id === finding.spanId))
+      findings.some(
+        (finding) =>
+          !finding ||
+          finding.traceId !== trace.id ||
+          finding.agentId !== trace.agentId ||
+          (finding.spanId !== null &&
+            !trace.spans.some((span) => span.id === finding.spanId)),
+      )
     ) {
       throw new HttpError(404, "Audit finding not found on this trace");
     }
-    if (finding.category === "audit-health") {
+    const verifiedFindings = findings.filter(
+      (finding): finding is NonNullable<typeof finding> => Boolean(finding),
+    );
+    if (verifiedFindings.some((finding) => finding.category === "audit-health")) {
       throw new HttpError(400, "Auditor health cannot change the Agent's intent");
     }
     const correction = deps.traceService.redactText(body.correction);
     if (
       !deps.intentService.canApplyHumanCorrection(
         trace.agentId,
-        finding.id,
+        body.findingIds,
         correction,
       )
     ) {
@@ -234,8 +252,10 @@ export function registerGlassboxRoutes(
     const result = deps.intentService.applyHumanCorrection(trace.agentId, {
       correction,
       traceId: trace.id,
-      findingId: finding.id,
-      spanId: finding.spanId,
+      sources: verifiedFindings.map((finding) => ({
+        findingId: finding.id,
+        spanId: finding.spanId,
+      })),
     });
     if (!result.created) {
       throw new HttpError(
