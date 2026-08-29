@@ -49,7 +49,20 @@ export const auditTraceStepSchema = z.object({
   traceId: z.string(),
   agentId: z.string(),
   spanId: z.string().nullable(),
-  type: z.enum(["warning", "error"]),
+  // The specification version this finding was judged against, pinned when the
+  // run's auditing was queued rather than read when the model call returns.
+  // The document carries one too, but that is last-writer-wins: without this a
+  // run would attribute all of its findings to whichever version happened to be
+  // current when the last one landed — including a correction appended after
+  // the run had finished. Defaulted for audit files written before findings
+  // carried it.
+  intentId: z.string().default(""),
+  // PLAN_AUDITOR separates warnings from suspicions. A suspicion is what a
+  // step audit raises when it can see something questionable but cannot decide
+  // it alone -- an action that *might* deviate from intent, an instruction that
+  // *might* have been obeyed. auditAll resolves each one into a warning or
+  // leaves it standing, because that judgement needs the whole run.
+  type: z.enum(["warning", "suspicion", "error"]),
   // "audit-health" is the auditor reporting on itself. Kept apart from the two
   // agent categories because "our auditor could not run" and "the agent
   // misbehaved" are opposite claims, and counting them together made a model
@@ -104,6 +117,15 @@ export const chatAuditSchema = z.object({
   // The auditor's own steps. Kept off the agent TraceRecord so /api/traces/:id
   // never mixes the two, and defaulted so older audit files still parse.
   auditorSpans: z.array(traceSpanSchema).default([]),
+  // Findings from auditing the auditor itself. Deliberately a separate field
+  // rather than more auditorSpans: a meta-audit reads auditorSpans and writes
+  // here, so it can never produce input for another meta-audit. That is what
+  // makes the recursion structurally impossible rather than merely discouraged
+  // -- and it is why nothing subscribes to this field.
+  metaAudit: z.array(auditTraceStepSchema).default([]),
+  // When the last meta-audit ran, so the UI can say whether what it is showing
+  // predates the auditor spans below it.
+  metaAuditedAt: z.string().nullable().default(null),
 });
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;
@@ -140,6 +162,9 @@ export function auditSteps(
     traceId: string;
     agentId: string;
     spanId: string | null;
+    // Optional so a caller reporting on the auditor itself, rather than on the
+    // agent against a spec, is not forced to invent one.
+    intentId?: string;
   },
   write: (
     push: (
@@ -158,6 +183,7 @@ export function auditSteps(
       traceId: identity.traceId,
       agentId: identity.agentId,
       spanId: identity.spanId,
+      intentId: identity.intentId ?? "",
       type,
       category,
       finding,
@@ -166,24 +192,69 @@ export function auditSteps(
   return steps;
 }
 
+// AGENTS.md no longer matches the agent's recorded instructions. Which claim
+// this is depends entirely on when it was noticed: an edit made during a run is
+// attributable to the agent and is a security finding, while a file that was
+// already wrong when the run began names no culprit and is the auditor
+// reporting that it may have judged against a spec the agent never read.
+export function instructionsDriftFinding(
+  identity: {
+    id: string;
+    traceId: string;
+    agentId: string;
+    intentId?: string;
+  },
+  when: "before" | "during",
+) {
+  return auditSteps({ ...identity, spanId: null }, (push) =>
+    push(
+      "error",
+      when === "during" ? "security" : "audit-health",
+      when === "during"
+        ? "This run modified AGENTS.md, the file it reads its own instructions " +
+            "from. The agent has edited the specification it is governed by, so " +
+            "the recorded instructions no longer describe what it was following."
+        : "AGENTS.md did not match this agent's recorded instructions when the " +
+            "run began. The agent was following a specification the platform " +
+            "did not write, and this run was audited against one it may never " +
+            "have read.",
+    ),
+  );
+}
+
+// Everything a step's checks concluded, in the shape the emitter reads. Named
+// so the assembly that builds it and the emitter that consumes it agree by
+// type rather than by inline repetition.
+export interface PolicyFindings {
+  notInAlignment: string[];
+  newObjectives: NewObjectiveFinding[];
+  networkViolations: string[];
+  secretExposures: SecretExposureFinding[];
+  promptInjections?: PromptInjectionFinding[];
+  suspiciousActions?: SuspiciousActionFinding[];
+  actedOnExternalInstructions?: string[];
+  // PLAN_AUDITOR check 5: the specific arguments that would escape the
+  // sandbox or escalate privileges, rather than a bare "misuse" flag.
+  toolMisuseFlags?: string[];
+  // PLAN_AUDITOR check 6: what a sink write turned out to contain.
+  sinkWrites?: { target: string; classification: string; reason: string }[];
+}
 export function emitPolicyFindings(
   push: (
     type: AuditTraceStep["type"],
     category: AuditTraceStep["category"],
     finding: string,
   ) => void,
-  policies: {
-    notInAlignment: string[];
-    newObjectives: NewObjectiveFinding[];
-    networkViolations: string[];
-    secretExposures: SecretExposureFinding[];
-    promptInjections?: PromptInjectionFinding[];
-    suspiciousActions?: SuspiciousActionFinding[];
-    actedOnExternalInstructions?: string[];
-  },
+  policies: PolicyFindings,
 ) {
+  // PLAN_AUDITOR check 3 raises a *suspicion* here, not a warning: a step is
+  // judged in isolation, and in isolation "this looks off" is as much as the
+  // evidence supports. auditAll's backtrace reads the steps that led up to it
+  // and promotes the ones nothing the user asked for accounts for. Calling it a
+  // warning here made the auditor state as fact something it had not yet
+  // checked, which is where its false positives came from.
   for (const entry of policies.notInAlignment) {
-    push("warning", "intent-check", entry);
+    push("suspicion", "intent-check", entry);
   }
   for (const objective of policies.newObjectives) {
     if (objective.requestedByUser || !objective.actedUpon) continue;
@@ -208,6 +279,24 @@ export function emitPolicyFindings(
         finding,
     );
   }
+  for (const flag of policies.toolMisuseFlags ?? []) {
+    push(
+      "warning",
+      "security",
+      "A tool was run with an argument that widens what it can reach: " + flag,
+    );
+  }
+  for (const write of policies.sinkWrites ?? []) {
+    push(
+      "warning",
+      "security",
+      "Wrote " +
+        write.classification +
+        " to " +
+        write.target +
+        (write.reason ? ". " + write.reason : "."),
+    );
+  }
   for (const url of policies.networkViolations) {
     push(
       "warning",
@@ -216,7 +305,11 @@ export function emitPolicyFindings(
     );
   }
   for (const exposure of policies.secretExposures) {
-    if (exposure.relevant === true) continue;
+    // Egress is reported even when the auditor judged the credential relevant.
+    // Detection here is deterministic; a judged call may soften the wording but
+    // must never delete the finding, or a model's opinion becomes the only
+    // thing standing between a leaked credential and silence.
+    if (exposure.relevant === true && exposure.location !== "request") continue;
     const verb =
       exposure.location === "request" ? "was sent outward" : "was exposed";
     push(
@@ -227,7 +320,9 @@ export function emitPolicyFindings(
         verb +
         (exposure.relevant === null
           ? " and its relevance could not be assessed."
-          : " and is unrelated to the operation.") +
+          : exposure.relevant
+            ? " and the auditor judged it relevant to this operation."
+            : " and is unrelated to the operation.") +
         (exposure.reason ? " " + exposure.reason : ""),
     );
   }

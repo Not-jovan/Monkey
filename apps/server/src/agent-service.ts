@@ -21,6 +21,16 @@ import { WorkspaceManager } from "./workspace.js";
 
 const now = () => new Date().toISOString();
 
+export interface InstructionsDrift {
+  agentId: string;
+  traceId: string;
+  // "before" — the file already disagreed when the run began, so this run was
+  // governed by a spec nobody approved and there is no telling who changed it.
+  // "during" — it was intact at the start and had changed by the end, which
+  // attributes the edit to this run.
+  when: "before" | "during";
+}
+
 const INTENT_PRECEDENCE = [
   "Use the standing intent as persistent context.",
   "If the current user request explicitly states that it changes or relaxes the standing intent, follow that change; otherwise follow both the standing intent and the current user request.",
@@ -43,6 +53,10 @@ export class AgentService {
     private readonly runner: AgentRunner,
     private readonly traces?: TraceService,
     private readonly activeIntent?: (agentId: string) => string,
+    // Reports AGENTS.md no longer matching the agent's recorded instructions.
+    // The file is inside the workspace and the default sandbox is
+    // workspace-write, so the agent can edit the spec it is governed by.
+    private readonly onInstructionsDrift?: (drift: InstructionsDrift) => void,
   ) {}
 
   private redact(text: string): string {
@@ -201,6 +215,10 @@ export class AgentService {
   async sendMessage(
     agentId: string,
     prompt: string,
+    // Supplied by the caller when the run has to be identified before it
+    // starts — the intent classifier is queued against this id so the spec a
+    // message establishes is settled before the run it governs executes.
+    runId: string = randomUUID(),
   ): Promise<{ run: AgentRun; message: Message }> {
     if (!isArkConfigured(this.config)) {
       throw new HttpError(
@@ -209,7 +227,6 @@ export class AgentService {
       );
     }
     const timestamp = now();
-    const runId = randomUUID();
     // The raw prompt goes to Codex; every stored or returned copy is masked so
     // pasted credentials never persist in the transcript.
     const redactedPrompt = this.redact(prompt);
@@ -316,6 +333,14 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
+    // Checked either side of the run so an edit can be attributed. Reporting is
+    // best-effort: a workspace that cannot be read is not a reason to refuse to
+    // run, and the drift report is a finding, not a gate.
+    const driftedBefore = await this.checkInstructionsDrift(
+      agentAtStart,
+      run.id,
+      "before",
+    );
     // Set by onModel below, which fires before the turn does any work — so a
     // run that fails still knows what it was running on.
     let observedModel: string | null = null;
@@ -415,6 +440,31 @@ export class AgentService {
         failure,
         model: observedModel,
       });
+    } finally {
+      // Only worth reporting when the file was intact beforehand: a run that
+      // started with drift has already been reported, and re-reporting it every
+      // run would bury the one case that names a culprit.
+      if (!driftedBefore) {
+        await this.checkInstructionsDrift(agentAtStart, run.id, "during");
+      }
+    }
+  }
+
+  // Returns whether the file disagreed, so the caller can tell "already drifted"
+  // from "this run changed it".
+  private async checkInstructionsDrift(
+    agent: Agent,
+    traceId: string,
+    when: InstructionsDrift["when"],
+  ): Promise<boolean> {
+    if (!this.onInstructionsDrift) return false;
+    try {
+      if (!(await this.workspaces.instructionsDrifted(agent))) return false;
+      this.onInstructionsDrift({ agentId: agent.id, traceId, when });
+      return true;
+    } catch {
+      // Never let an unreadable workspace take a run down with it.
+      return false;
     }
   }
 

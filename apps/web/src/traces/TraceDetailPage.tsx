@@ -220,7 +220,13 @@ export function TraceDetailPage() {
       (warningsBySpan.get(finding.spanId) ?? 0) + 1,
     );
   }
-  const warningCount = agentFindings.length;
+  // Split for the same reason the list rows are: a suspicion is a question the
+  // auditor could not settle, and counting it as a warning states the very
+  // thing the severity exists to avoid stating.
+  const suspicionCount = agentFindings.filter(
+    (finding) => finding.type === "suspicion",
+  ).length;
+  const warningCount = agentFindings.length - suspicionCount;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
   const diagnosis = trace ? buildDiagnosis(trace) : null;
   const recovered = trace ? recoveryNote(trace) : null;
@@ -358,6 +364,11 @@ export function TraceDetailPage() {
                     {warningCount} Warning{warningCount === 1 ? "" : "s"}
                   </span>
                 )}
+                {suspicionCount > 0 && (
+                  <span className="suspicion-badge">
+                    {suspicionCount} Unresolved
+                  </span>
+                )}
                 {recovered && (
                   <span className="recovered-badge">↺ {recovered}</span>
                 )}
@@ -393,6 +404,8 @@ export function TraceDetailPage() {
           intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
           auditorSpans={auditorQuery.data?.spans ?? []}
+          metaAudit={auditorQuery.data?.metaAudit ?? []}
+          metaAuditedAt={auditorQuery.data?.metaAuditedAt ?? null}
           onShowStep={showStep}
           focusedFindingId={focusedFindingId}
         />

@@ -1869,6 +1869,9 @@ textarea:focus {
 
 .finding-type-warning { color: #d97706; }
 .finding-type-error { color: #c55353; }
+/* Muted on purpose: a suspicion is an unresolved question, and colouring it
+   like a warning would report a judgement the auditor has not made. */
+.finding-type-suspicion { color: #7a7a86; }
 
 .findings-table {
   width: 100%;
@@ -2341,6 +2344,22 @@ textarea:focus {
   white-space: nowrap;
 }
 
+/* Deliberately quieter than .warning-badge, and dashed like the auditor badge:
+   both say "the middleware is telling you about itself" rather than making a
+   claim about the agent. */
+.suspicion-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px dashed #c9c8c0;
+  background: transparent;
+  font-size: 0.72rem;
+  color: #6f6f78;
+  white-space: nowrap;
+}
+
 .recovered-badge {
   display: inline-flex;
   align-items: center;
@@ -2540,6 +2559,80 @@ textarea:focus {
 .intent-removed {
   color: var(--red);
   text-decoration: line-through;
+}
+
+/* A divergence is a claim that two things disagree, so it is styled as a
+   notice rather than an error: nothing is broken, but the agent and the
+   auditor are working from different specs until someone adopts or reverts. */
+.intent-diverged {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--purple);
+  border-radius: 6px;
+  background: var(--purple-soft);
+}
+
+.intent-diverged p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.intent-adopt {
+  align-self: flex-start;
+  padding: 5px 10px;
+  border: 1px solid var(--purple);
+  border-radius: 6px;
+  background: var(--paper);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--purple-dark);
+  cursor: pointer;
+}
+
+.intent-adopt:hover:not(:disabled) {
+  background: var(--purple);
+  color: var(--paper);
+}
+
+.intent-adopt:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* The auditor's own audit. Kept visually distinct from agent findings: it is a
+   claim about our tooling, not about the agent. */
+.meta-audit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+}
+
+.auditor-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.auditor-actions .button {
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.auditor-actions .button:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .intent-change-error {

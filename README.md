@@ -410,6 +410,9 @@ npm run test:e2e
 
 The test server automatically enables intent tracking and configures
 `tanstack.com`, `youtube.com`, and YouTube subdomains as permitted destinations.
+Intent updates apply automatically — there is no confirmation step; a spec
+change is instead reversible through `POST /api/agents/:id/intent/revert` and
+visible in the Playground timeline.
 Override `E2E_PORT` if port `3100` is already in use. Failure screenshots,
 videos, and Playwright traces are retained under `test-results/`; the HTML
 report is written to `playwright-report/`.

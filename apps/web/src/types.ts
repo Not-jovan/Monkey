@@ -121,6 +121,9 @@ export interface TraceSummary {
   recoveredErrorCount: number;
   evidenceComplete: boolean;
   warningCount: number;
+  // Questions the auditor raised and could not settle. Kept out of
+  // warningCount so the row does not claim more than the auditor concluded.
+  suspicionCount: number;
   auditHealth: AuditHealth;
 }
 
@@ -180,6 +183,10 @@ export interface AuditorTrace {
   agentId: string;
   health: AuditHealth;
   spans: TraceSpan[];
+  // Findings from auditing the auditor. Empty until someone asks: this never
+  // runs on its own, because its output would otherwise be the next run's input.
+  metaAudit: AuditTraceStep[];
+  metaAuditedAt: string | null;
 }
 
 export interface AuditTraceStep {
@@ -187,7 +194,13 @@ export interface AuditTraceStep {
   traceId: string;
   agentId: string;
   spanId: string | null;
-  type: "warning" | "error";
+  // The spec version this finding was judged against. Empty for findings about
+  // the auditor itself, and for audits written before findings carried it.
+  intentId: string;
+  // A suspicion is something the auditor could see but not decide on its own —
+  // an action that *might* have deviated, an instruction that *might* have been
+  // obeyed. It is deliberately weaker than a warning and is rendered as such.
+  type: "warning" | "suspicion" | "error";
   // "audit-health" is the auditor reporting on itself, never a claim about the
   // agent. Kept out of warning counts for that reason.
   category: "intent-check" | "security" | "reliability" | "audit-health";
@@ -195,10 +208,23 @@ export interface AuditTraceStep {
 }
 
 export interface IntentState {
+  // What the agent was told to do, mirrored from its settings. The agent reads
+  // this from its workspace, so it is the source of truth for the objective.
+  instructions: string;
   objective: string;
   extended: string[];
 }
 
+// The kinds of edit a version can record. "instructions" is an edit made in
+// agent settings; "adopted" is a diverged objective written back into them.
+export type IntentUpdateKind =
+  | "seed"
+  | "classified"
+  | "revert"
+  | "instructions"
+  | "adopted"
+  // A person corrected the spec after the run, against the evidence.
+  | "human-correction";
 // The spec a trace was judged against, resolved onto the response so a
 // download does not have to go looking it up by id.
 export interface TraceIntentView extends IntentState {
@@ -208,10 +234,11 @@ export interface TraceIntentView extends IntentState {
 
 export interface IntentUpdate {
   logs: string[];
-  kind: "seed" | "classified" | "revert" | "human-correction";
+  kind: IntentUpdateKind;
   message?: string;
   reason?: string;
   addedConstraints: string[];
+  removedConstraints: string[];
   previousObjective: string | null;
   // The run whose message moved the spec, so the Playground can mark it.
   traceId: string | null;
@@ -221,6 +248,7 @@ export interface IntentUpdate {
 }
 
 export interface IntentVersion {
+  instructions: string;
   objective: string;
   extended: string[];
   createdAt?: string;

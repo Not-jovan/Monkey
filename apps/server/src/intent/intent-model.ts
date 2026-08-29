@@ -1,11 +1,30 @@
 import { z } from "zod";
 
 export const intentStateSchema = z.object({
+  // What the agent was actually told to do. `agent.instructions` is written to
+  // the workspace's AGENTS.md and is the spec the agent follows, so it is the
+  // source of truth here too — mirrored rather than re-derived.
+  instructions: z.string().default(""),
   objective: z.string(),
   extended: z.array(z.string()),
 });
 
 export type IntentState = z.infer<typeof intentStateSchema>;
+
+// Whether the working objective has moved away from the instructions the agent
+// is following. Derived, never stored: a persisted flag would be a third thing
+// that can fall out of step with the two it describes, which is the whole bug.
+//
+// An empty `instructions` means the record predates this field, or the agent
+// was never configured. Neither is a divergence.
+export function hasDivergedObjective(state: {
+  instructions: string;
+  objective: string;
+}) {
+  return (
+    state.instructions.length > 0 && state.objective !== state.instructions
+  );
+}
 
 // Why a version exists, in fields rather than prose.
 //
@@ -16,13 +35,28 @@ export type IntentState = z.infer<typeof intentStateSchema>;
 export const intentUpdateSchema = z.object({
   logs: z.array(z.string()),
   kind: z
-    .enum(["seed", "classified", "revert", "human-correction"])
+    .enum([
+      "seed",
+      "classified",
+      "revert",
+      // The agent's instructions were edited through agent settings. Recorded
+      // so the timeline shows the edit that used to change the agent's spec
+      // without the audit record ever hearing about it.
+      "instructions",
+      // A diverged objective was written back into the instructions.
+      "adopted",
+      // A person corrected the spec after the run, against the evidence.
+      "human-correction",
+    ])
     .default("classified"),
   // The user message that changed the spec.
   message: z.string().optional(),
   // The classifier's own justification.
   reason: z.string().optional(),
   addedConstraints: z.array(z.string()).default([]),
+  // Constraints this version lifted. A spec that can only grow cannot record
+  // the user taking a rule back.
+  removedConstraints: z.array(z.string()).default([]),
   previousObjective: z.string().nullable().default(null),
   // The run this message belonged to, so the Playground can mark the message
   // that moved the spec.
@@ -38,6 +72,11 @@ export const intentUpdateSchema = z.object({
 export type IntentUpdate = z.infer<typeof intentUpdateSchema>;
 
 export const intentVersionSchema = z.object({
+  // What agent.instructions said when this version was written — the spec the
+  // agent was actually following, mirrored here so the record shows that and
+  // not only what the auditor was judging against. Defaulted so intent files
+  // written before this field existed still parse, and read as not diverged.
+  instructions: z.string().default(""),
   objective: z.string(),
   extended: z.array(z.string()),
   createdAt: z.string().optional(),
@@ -55,7 +94,20 @@ export interface IntentVersionEntry extends IntentVersion {
 export const intentFileSchema = z.record(z.string(), intentVersionSchema);
 
 export function describeIntent(state: IntentState) {
-  const lines = ["Objective: " + (state.objective || "(none stated)")];
+  const lines: string[] = [];
+  if (state.instructions.length > 0) {
+    lines.push("Agent instructions: " + state.instructions);
+  }
+  lines.push("Objective: " + (state.objective || "(none stated)"));
+  // Said plainly rather than left for the auditor to infer from two similar
+  // paragraphs: the objective below is what the conversation moved to, and the
+  // instructions above are what the agent is still configured with.
+  if (hasDivergedObjective(state)) {
+    lines.push(
+      "(The objective above came from the conversation and has not been " +
+        "adopted into the agent's instructions. Judge against the objective.)",
+    );
+  }
   if (state.extended.length > 0) {
     lines.push("Standing constraints:");
     for (const entry of state.extended) lines.push("- " + entry);

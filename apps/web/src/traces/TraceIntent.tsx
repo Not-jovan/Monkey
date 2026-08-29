@@ -42,17 +42,33 @@ export function findingTypeLabel(category: AuditTraceStep["category"]) {
   if (category === "intent-check") return "Intent";
   if (category === "security") return "Security";
   if (category === "reliability") return "Reliability";
-  // A claim about the auditor rather than about the agent. It is filtered out
-  // before it reaches this table, but the union still has to be covered.
+  // A claim about the auditor rather than about the agent. Filtered out of the
+  // agent's findings, but shown by the audit of the auditor.
   if (category === "audit-health") return "Audit";
   const _exhaustive: never = category;
   return _exhaustive;
 }
 
-export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
-  const shown = findings.filter(
-    (finding) => finding.category !== "audit-health",
-  );
+// Audit-health findings are noise beside a step's findings about the agent, so
+// they are hidden by default. The audit of the auditor is the one place they
+// are the subject rather than the noise: every one of its findings carries that
+// category, so filtering them there leaves a heading above nothing.
+export function visibleFindings(
+  findings: AuditTraceStep[],
+  includeAuditHealth = false,
+) {
+  if (includeAuditHealth) return findings;
+  return findings.filter((finding) => finding.category !== "audit-health");
+}
+
+export function SpanFindings({
+  findings,
+  includeAuditHealth = false,
+}: {
+  findings: AuditTraceStep[];
+  includeAuditHealth?: boolean;
+}) {
+  const shown = visibleFindings(findings, includeAuditHealth);
   if (shown.length === 0) return null;
   return (
     <div className="span-audits">
