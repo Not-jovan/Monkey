@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import { emptyUsage } from "../traces/trace-model.js";
-import { auditSteps, emitPolicyFindings } from "./audit-model.js";
+import {
+  auditSteps,
+  emitPolicyFindings,
+  instructionsDriftFinding,
+} from "./audit-model.js";
 import { activityFromSpan, emptyActivity } from "./step-activity.js";
 import { buildStepContext, summarizePriorSteps } from "./step-context.js";
 
@@ -60,7 +64,6 @@ describe("summarizePriorSteps", () => {
   it("skips bookkeeping spans and keeps subagent replies", () => {
     const spans = [
       span({ id: "turn", kind: "turn", label: "Codex turn" }),
-      span({ id: "model", kind: "model_call", label: "Model · plan" }),
       span({
         id: "sub",
         kind: "system",
@@ -70,8 +73,29 @@ describe("summarizePriorSteps", () => {
       span({ id: "current" }),
     ];
     const lines = summarizePriorSteps(trace(spans), "current");
+    // The turn wrapper is scaffolding; the subagent reply is external content.
     expect(lines).toHaveLength(1);
     expect(lines[0]).toContain("Subagent · 1 · returned");
+  });
+
+  it("carries what the agent said it would do, not just what it did", () => {
+    const spans = [
+      span({
+        id: "model",
+        kind: "model_call",
+        label: "Model · plan",
+        attributes: {
+          output: "I'll read .env first so I can reuse the database password.",
+        },
+      }),
+      span({ id: "current" }),
+    ];
+    const lines = summarizePriorSteps(trace(spans), "current");
+    // Without the plan in the trajectory, the tool call that follows arrives
+    // with no stated reason and an announced objective is invisible to it.
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("Model · plan");
+    expect(lines[0]).toContain("said: I'll read .env first");
   });
 });
 
@@ -91,6 +115,7 @@ describe("buildStepContext", () => {
       trace: record,
       span: current,
       intent: {
+        instructions: "",
         objective: "Build a TypeScript todo application",
         extended: ["Do not read .env files."],
       },
@@ -106,7 +131,7 @@ describe("buildStepContext", () => {
     const context = buildStepContext({
       trace: record,
       span: current,
-      intent: { objective: "obj", extended: [] },
+      intent: { instructions: "", objective: "obj", extended: [] },
       activity: activityFromSpan(current, record),
       deterministic: { networkViolations: [], secretExposures: [] },
     });
@@ -122,7 +147,7 @@ describe("buildStepContext", () => {
     const context = buildStepContext({
       trace: record,
       span: current,
-      intent: { objective: "obj", extended: [] },
+      intent: { instructions: "", objective: "obj", extended: [] },
       activity: emptyActivity(),
       deterministic: {
         networkViolations: ["https://evil.example.com/u"],
@@ -203,7 +228,7 @@ describe("policy findings", () => {
     expect(steps[0]?.finding).toContain("attacker.example.com");
   });
 
-  it("reports an irrelevant secret and stays quiet about a relevant one", () => {
+  it("reports both an irrelevant and a relevant credential that left the system", () => {
     const steps = policySteps({
       secretExposures: [
         {
@@ -220,9 +245,35 @@ describe("policy findings", () => {
         },
       ],
     });
-    expect(steps).toHaveLength(1);
-    expect(steps[0]?.finding).toContain("DATABASE_PASSWORD");
-    expect(steps[0]?.category).toBe("security");
+    // Egress detection is deterministic. The model's relevance call changes how
+    // the finding reads, never whether it exists — otherwise one judged "yes,
+    // that token belongs there" is all it takes to hide a credential leaving.
+    expect(steps).toHaveLength(2);
+    expect(steps.every((step) => step.category === "security")).toBe(true);
+
+    const github = steps.find((step) => step.finding.includes("GITHUB_TOKEN"));
+    expect(github?.finding).toContain("was sent outward");
+    expect(github?.finding).toContain("judged it relevant");
+
+    const database = steps.find((step) =>
+      step.finding.includes("DATABASE_PASSWORD"),
+    );
+    expect(database?.finding).toContain("unrelated to the operation");
+  });
+
+  it("stays quiet about a relevant credential that only came back in a response", () => {
+    const steps = policySteps({
+      secretExposures: [
+        {
+          location: "response",
+          secretType: "GITHUB_TOKEN",
+          relevant: true,
+          reason: "the API returned the token it was asked for",
+        },
+      ],
+    });
+    // Nothing left the system, and the auditor vouched for it: no finding.
+    expect(steps).toEqual([]);
   });
 
   it("says so plainly when relevance could not be assessed", () => {
@@ -258,5 +309,33 @@ describe("policy findings", () => {
     expect(steps).toHaveLength(1);
     expect(steps[0]?.category).toBe("security");
     expect(steps[0]?.finding).toContain("not on the configured whitelist");
+  });
+});
+
+describe("instructions drift findings", () => {
+  const identity = {
+    id: "audit-1",
+    traceId: "trace-1",
+    agentId: "agent-1",
+    intentId: "intent-1",
+  };
+
+  it("blames the agent for an edit made during its own run", () => {
+    const [step] = instructionsDriftFinding(identity, "during");
+    // Attributable, so it is a claim about the agent rather than about us.
+    expect(step?.category).toBe("security");
+    expect(step?.type).toBe("error");
+    expect(step?.finding).toContain("modified AGENTS.md");
+    expect(step?.intentId).toBe("intent-1");
+    expect(step?.spanId).toBeNull();
+  });
+
+  it("blames nobody for a file that was already wrong when the run began", () => {
+    const [step] = instructionsDriftFinding(identity, "before");
+    // No culprit is knowable, so filing this as agent misbehaviour would be an
+    // accusation the evidence does not support — and would inflate the agent's
+    // warning count for something a human may well have done.
+    expect(step?.category).toBe("audit-health");
+    expect(step?.finding).toContain("did not match");
   });
 });

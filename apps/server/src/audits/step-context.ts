@@ -28,6 +28,13 @@ function isTrajectoryStep(span: TraceSpan) {
   return (
     span.kind === "tool_call" ||
     span.kind === "user_action" ||
+    // What the agent said it was going to do belongs in the trajectory as much
+    // as what it then did. Without it a tool call arrives with no stated
+    // reason, and an objective the agent announced before acting on it was
+    // invisible to every step that followed.
+    span.kind === "model_call" ||
+    // Not emitted today, kept in step with shouldAuditStep so a reinstated
+    // subagent span appears in the trajectory as well as being judged.
     (span.kind === "system" && span.name === "subagent.result")
   );
 }
@@ -46,6 +53,16 @@ export function summarizePriorSteps(
     const args = span.attributes.arguments;
     if (typeof args === "string" && args.length > 0) {
       parts.push(oneLine(args, PRIOR_STEP_CLIP));
+    }
+    // A model call's payload is its output, not its arguments: carrying only
+    // the label would put "Model · plan" in the trajectory and none of the plan.
+    const output = span.attributes.output;
+    if (
+      span.kind === "model_call" &&
+      typeof output === "string" &&
+      output.length > 0
+    ) {
+      parts.push("said: " + oneLine(output, PRIOR_STEP_CLIP));
     }
     if (span.error) parts.push("error: " + oneLine(span.error, 120));
     return parts.join(" | ");
@@ -70,6 +87,8 @@ export function buildStepContext(input: StepContextInput): string {
   const sections: string[] = [];
 
   sections.push("## Original user input\n" + (trace.prompt || "(none)"));
+  // Instructions are part of the intent state itself, so describeIntent renders
+  // them alongside the objective they are the source of truth for.
   sections.push("## Current intent\n" + describeIntent(intent));
   // A step that looks unmotivated in isolation is often finishing something an
   // earlier run started, so withholding this made the auditor over-flag.

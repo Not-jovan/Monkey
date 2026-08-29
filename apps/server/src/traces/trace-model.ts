@@ -85,3 +85,19 @@ export const emptyUsage = () => ({
   reasoningTokens: 0,
   toolTokens: 0,
 });
+
+export function readAttribute(span: TraceSpan, key: string): string {
+  const value = span.attributes[key];
+  return typeof value === "string" ? value : "";
+}
+
+// Whether a span carries any record of what the agent actually did, as opposed
+// to only what it was about to do. A tool span denied at its decision, or
+// interrupted before its result arrived, has a name and nothing else — there is
+// no payload to judge, and judging the name alone reports on the wrong thing.
+// Shared so the recorder and the auditor cannot drift on what "judgeable" means.
+export function hasJudgeableEvidence(span: TraceSpan): boolean {
+  return ["arguments", "output", "prompt", "result"].some(
+    (key) => readAttribute(span, key).length > 0,
+  );
+}

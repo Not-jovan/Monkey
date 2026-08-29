@@ -36,7 +36,14 @@ export class AuditStore {
   private readonly docs = new Map<string, ChatAudit>();
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly directory: string) {}
+  constructor(
+    private readonly directory: string,
+    // Reports a write that did not land. Persistence is deliberately
+    // fire-and-forget so a slow disk cannot stall a run, but swallowing the
+    // error let the in-memory state and the file diverge in silence: after a
+    // restart the data is simply gone, with nothing anywhere having said so.
+    private readonly log?: (message: string, error?: unknown) => void,
+  ) {}
 
   async initialize() {
     await mkdir(this.directory, { recursive: true });
@@ -89,6 +96,22 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
+  // A run-level finding that must not close the run audit out. Intent
+  // classification fails while the run is still in flight, and borrowing
+  // recordRun here would stamp an endTime and make the trace look audited
+  // before the real run-level audit has happened.
+  recordRunFinding(
+    trace: TraceRecord,
+    steps: AuditTraceStep[],
+    intentId: string,
+    health: AuditHealth = "ok",
+  ) {
+    const doc = this.ensure(trace, intentId);
+    doc.runAudit = doc.runAudit.concat(steps);
+    doc.health = worstHealth(doc.health, health);
+    this.persist(trace.id);
+  }
+
   listByTrace(traceId: string) {
     const doc = this.docs.get(traceId);
     if (!doc) return [];
@@ -99,8 +122,28 @@ export class AuditStore {
     return (this.docs.get(traceId)?.summary.endTime ?? 0) > 0;
   }
 
+  // Every spec version this trace's findings were judged against, in the order
+  // they were first used. Derived from the findings rather than read off the
+  // document, whose own field is last-writer-wins and so reports the version
+  // that happened to be current when the final finding landed — wrong for
+  // exactly the runs that matter, the ones that span a spec change.
+  intentIds(traceId: string): string[] {
+    const doc = this.docs.get(traceId);
+    if (!doc) return [];
+    const seen = findingsOf(doc)
+      .map((finding) => finding.intentId)
+      .filter((id) => id.length > 0);
+    const ordered = [...new Set(seen)];
+    // Audits written before findings carried a version still have the document
+    // field, and it is the only answer available for them.
+    if (ordered.length === 0 && doc.intentId.length > 0) return [doc.intentId];
+    return ordered;
+  }
+
+  // The version the run began under: the one a reader means by "the spec this
+  // trace was judged against" when there is only room to name one.
   intentId(traceId: string) {
-    return this.docs.get(traceId)?.intentId ?? null;
+    return this.intentIds(traceId)[0] ?? null;
   }
 
   countStepsForTrace(traceId: string) {
@@ -174,6 +217,8 @@ export class AuditStore {
         });
         await rename(filePath + ".tmp", filePath);
       })
-      .catch(() => undefined);
+      .catch((error) =>
+        this.log?.("failed to persist audit for trace " + chatId, error),
+      );
   }
 }

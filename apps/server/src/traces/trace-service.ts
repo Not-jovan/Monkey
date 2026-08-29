@@ -11,7 +11,7 @@ import type {
   SpanStatus,
   TraceSpan,
 } from "./trace-model.js";
-import { emptyUsage } from "./trace-model.js";
+import { emptyUsage, hasJudgeableEvidence } from "./trace-model.js";
 import { classifyRunFailure, type RunFailure } from "../failures.js";
 import type { TraceStore } from "./trace-store.js";
 
@@ -247,6 +247,11 @@ export class TraceService {
     if (!spanId || text.length === 0) return;
     const redacted = this.redactor.redactText(text);
     if (redacted.length === 0) return;
+    // Only the transition from "no output" to "some output" is announced. The
+    // span is appended before the model has said anything, so that first write
+    // is the moment it becomes judgeable; later appends would re-announce the
+    // same step and have it audited again.
+    let spoke = false;
     this.store.updateSpan(runId, spanId, (span) => {
       if (span.kind !== "model_call") return;
       if (span.status === "error") return;
@@ -257,7 +262,9 @@ export class TraceService {
         return;
       }
       span.attributes.output = redacted;
+      spoke = true;
     });
+    if (spoke) this.store.emitSpan(runId, spanId);
   }
 
   onRunStart(agent: RunStartAgent, run: RunStartInput) {
@@ -587,6 +594,20 @@ export class TraceService {
             })
           : null);
     });
+
+    // Last look for the steps that never got a real one. A tool interrupted
+    // before its result, and one denied at its decision, are both final without
+    // ever having carried a payload — closing them above is silent, so without
+    // this the agent's most interesting steps are the ones nothing ever judged.
+    // Deliberately after updateTrace: the auditor only accepts an evidence-less
+    // span once the run has a final status, so emitting earlier would be
+    // ignored.
+    for (const span of this.store.get(runId)?.spans ?? []) {
+      if (span.kind !== "tool_call") continue;
+      if (hasJudgeableEvidence(span)) continue;
+      this.store.emitSpan(runId, span.id);
+    }
+
     if (this.activeRunByAgent.get(state.agentId) === runId) {
       this.activeRunByAgent.delete(state.agentId);
     }

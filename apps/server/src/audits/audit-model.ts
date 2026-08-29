@@ -18,6 +18,13 @@ export const auditTraceStepSchema = z.object({
   traceId: z.string(),
   agentId: z.string(),
   spanId: z.string().nullable(),
+  // The specification version this finding was actually judged against, read
+  // with the spec rather than after the model call. The document carries one
+  // too, but that is last-writer-wins: a run spanning a spec change would
+  // otherwise attribute all of its findings to whichever version happened to
+  // be current when the last one landed. Defaulted for audit files written
+  // before findings carried it.
+  intentId: z.string().default(""),
   type: z.enum(["warning", "error"]),
   // "audit-health" is the auditor reporting on itself. Kept apart from the two
   // agent categories because "our auditor could not run" and "the agent
@@ -80,6 +87,9 @@ export function auditSteps(
     traceId: string;
     agentId: string;
     spanId: string | null;
+    // Optional so a caller reporting on the auditor itself, rather than on the
+    // agent against a spec, is not forced to invent one.
+    intentId?: string;
   },
   write: (
     push: (
@@ -98,12 +108,43 @@ export function auditSteps(
       traceId: identity.traceId,
       agentId: identity.agentId,
       spanId: identity.spanId,
+      intentId: identity.intentId ?? "",
       type,
       category,
       finding,
     });
   });
   return steps;
+}
+
+// AGENTS.md no longer matches the agent's recorded instructions. Which claim
+// this is depends entirely on when it was noticed: an edit made during a run is
+// attributable to the agent and is a security finding, while a file that was
+// already wrong when the run began names no culprit and is the auditor
+// reporting that it may have judged against a spec the agent never read.
+export function instructionsDriftFinding(
+  identity: {
+    id: string;
+    traceId: string;
+    agentId: string;
+    intentId?: string;
+  },
+  when: "before" | "during",
+) {
+  return auditSteps({ ...identity, spanId: null }, (push) =>
+    push(
+      "error",
+      when === "during" ? "security" : "audit-health",
+      when === "during"
+        ? "This run modified AGENTS.md, the file it reads its own instructions " +
+            "from. The agent has edited the specification it is governed by, so " +
+            "the recorded instructions no longer describe what it was following."
+        : "AGENTS.md did not match this agent's recorded instructions when the " +
+            "run began. The agent was following a specification the platform " +
+            "did not write, and this run was audited against one it may never " +
+            "have read.",
+    ),
+  );
 }
 
 export function emitPolicyFindings(
@@ -139,7 +180,11 @@ export function emitPolicyFindings(
     );
   }
   for (const exposure of policies.secretExposures) {
-    if (exposure.relevant === true) continue;
+    // Egress is reported even when the auditor judged the credential relevant.
+    // Detection here is deterministic; a judged call may soften the wording but
+    // must never delete the finding, or a model's opinion becomes the only
+    // thing standing between a leaked credential and silence.
+    if (exposure.relevant === true && exposure.location !== "request") continue;
     const verb =
       exposure.location === "request" ? "was sent outward" : "was exposed";
     push(
@@ -150,7 +195,9 @@ export function emitPolicyFindings(
         verb +
         (exposure.relevant === null
           ? " and its relevance could not be assessed."
-          : " and is unrelated to the operation.") +
+          : exposure.relevant
+            ? " and the auditor judged it relevant to this operation."
+            : " and is unrelated to the operation.") +
         (exposure.reason ? " " + exposure.reason : ""),
     );
   }

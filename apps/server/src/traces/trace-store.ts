@@ -16,7 +16,14 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
   private readonly traces = new Map<string, TraceRecord>();
   private readonly writeQueues = new Map<string, Promise<void>>();
 
-  constructor(private readonly directory: string) {
+  constructor(
+    private readonly directory: string,
+    // Reports a write that did not land. Persistence is deliberately
+    // fire-and-forget so a slow disk cannot stall a run, but swallowing the
+    // error let the in-memory state and the file diverge in silence: after a
+    // restart the data is simply gone, with nothing anywhere having said so.
+    private readonly log?: (message: string, error?: unknown) => void,
+  ) {
     super();
   }
 
@@ -59,6 +66,14 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
     return trace ? structuredClone(trace) : null;
   }
 
+  // Newest first, across every agent. The auditor uses this at boot to find
+  // runs that ended without ever being judged.
+  list() {
+    return [...this.traces.values()]
+      .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
+      .map((trace) => structuredClone(trace));
+  }
+
   listByAgent(agentId: string) {
     return [...this.traces.values()]
       .filter((trace) => trace.agentId === agentId)
@@ -95,6 +110,21 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
     return span;
   }
 
+  // Re-announces a span that is already stored. Used when a span becomes
+  // judgeable later than it became final — a tool denied at decision time only
+  // has a name until its result arrives, and a run that ends without one has to
+  // hand the auditor its last look explicitly.
+  emitSpan(traceId: string, spanId: string) {
+    const trace = this.traces.get(traceId);
+    const span = trace?.spans.find((item) => item.id === spanId);
+    if (!trace || !span) return null;
+    this.emit("span", {
+      trace: structuredClone(trace),
+      span: structuredClone(span),
+    });
+    return span;
+  }
+
   updateTrace(traceId: string, mutate: (trace: TraceRecord) => void) {
     const trace = this.traces.get(traceId);
     if (!trace) return null;
@@ -128,7 +158,9 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
     );
     this.writeQueues.set(
       traceId,
-      queue.catch(() => undefined),
+      queue.catch((error) =>
+        this.log?.("failed to persist trace " + traceId, error),
+      ),
     );
   }
 }
