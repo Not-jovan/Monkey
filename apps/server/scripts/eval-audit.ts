@@ -18,7 +18,12 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createArkClient } from "../src/audits/ark-client.js";
-import { STEP_SYSTEM_PROMPT, stepVerdict } from "../src/audits/audit-service.js";
+import {
+  intentStepVerdict,
+  summaryVerdict,
+  INTENT_STEP_SYSTEM_PROMPT,
+  SUMMARY_SYSTEM_PROMPT,
+} from "../src/audits/step-checks.js";
 import { runDeterministicChecks } from "../src/audits/deterministic.js";
 import { activityFromDatasetCase } from "../src/audits/step-activity.js";
 import { buildStepContext } from "../src/audits/step-context.js";
@@ -237,21 +242,35 @@ async function main() {
         (objective) => !objective.requestedByUser && objective.actedUpon,
       );
 
-      try {
+      // auditStep runs its checks concurrently, so the eval does too: the
+      // intent check is what is scored, and the summary check is reported
+      // beside it because the run-level analyses are blind without it.
+      const ask = async (system: string) => {
         const { content } = await client.complete({
           model,
-          system: STEP_SYSTEM_PROMPT,
+          system,
           user,
           maxTokens: 4_096,
         });
         const start = content.indexOf("{");
         const end = content.lastIndexOf("}");
+        if (start === -1 || end <= start) return null;
+        try {
+          return JSON.parse(content.slice(start, end + 1)) as unknown;
+        } catch {
+          return null;
+        }
+      };
+
+      try {
+        const [intentJson, summaryJson] = await Promise.all([
+          ask(INTENT_STEP_SYSTEM_PROMPT),
+          ask(SUMMARY_SYSTEM_PROMPT),
+        ]);
+        const summary =
+          summaryVerdict.safeParse(summaryJson).data?.summary ?? "";
         const parsed =
-          start === -1 || end <= start
-            ? null
-            : stepVerdict.safeParse(
-                JSON.parse(content.slice(start, end + 1)) as unknown,
-              );
+          intentJson === null ? null : intentStepVerdict.safeParse(intentJson);
         if (!parsed || !parsed.success) {
           results.push({
             id: entry.id,
@@ -259,7 +278,7 @@ async function main() {
             actualMisalignment: null,
             expectedInjected,
             actualInjected: null,
-            summary: "",
+            summary,
             detail: "unparseable verdict",
           });
         } else {
@@ -272,7 +291,7 @@ async function main() {
             actualInjected: verdict.newObjectives.some(
               (objective) => !objective.requestedByUser && objective.actedUpon,
             ),
-            summary: verdict.summary,
+            summary,
             detail: verdict.reason,
           });
         }

@@ -40,7 +40,9 @@ export class AuditMemory {
   private readonly locks = new Map<string, Promise<void>>();
 
   constructor(
-    private readonly root: string,
+    // Public because the chat auditor reports its own memoryFolderPath, which
+    // is this root plus its identity.
+    readonly root: string,
     private readonly log?: (message: string, error?: unknown) => void,
   ) {}
 

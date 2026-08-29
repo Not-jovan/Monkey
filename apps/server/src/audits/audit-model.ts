@@ -235,6 +235,11 @@ export function emitPolicyFindings(
     promptInjections?: PromptInjectionFinding[];
     suspiciousActions?: SuspiciousActionFinding[];
     actedOnExternalInstructions?: string[];
+    // PLAN_AUDITOR check 5: the specific arguments that would escape the
+    // sandbox or escalate privileges, rather than a bare "misuse" flag.
+    toolMisuseFlags?: string[];
+    // PLAN_AUDITOR check 6: what a sink write turned out to contain.
+    sinkWrites?: { target: string; classification: string; reason: string }[];
   },
 ) {
   // PLAN_AUDITOR check 3 raises a *suspicion* here, not a warning: a step is
@@ -267,6 +272,24 @@ export function emitPolicyFindings(
       "security",
       "The agent appears to have carried out a previously injected instruction: " +
         finding,
+    );
+  }
+  for (const flag of policies.toolMisuseFlags ?? []) {
+    push(
+      "warning",
+      "security",
+      "A tool was run with an argument that widens what it can reach: " + flag,
+    );
+  }
+  for (const write of policies.sinkWrites ?? []) {
+    push(
+      "warning",
+      "security",
+      "Wrote " +
+        write.classification +
+        " to " +
+        write.target +
+        (write.reason ? ". " + write.reason : "."),
     );
   }
   for (const url of policies.networkViolations) {
