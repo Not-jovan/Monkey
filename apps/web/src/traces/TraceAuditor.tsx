@@ -133,13 +133,23 @@ function HumanCorrection({
   );
 }
 
-function healthCopy(
+export function healthCopy(
   health: AuditHealth,
   notes: AuditTraceStep[],
 ): { title: string; body: string } {
-  const recorded = notes
-    .map((note) => note.finding)
-    .filter((line) => line.length > 0)
+  // One outage is reported separately by every audited step, so the same
+  // sentence arrives once per step. How many steps it covered is worth saying;
+  // printing it that many times is not.
+  const counts = new Map<string, number>();
+  for (const note of notes) {
+    if (note.finding.length === 0) continue;
+    counts.set(note.finding, (counts.get(note.finding) ?? 0) + 1);
+  }
+  const recorded = [...counts]
+    .map(([message, count]) => {
+      if (count === 1) return message;
+      return message + " (on " + count + " audited steps)";
+    })
     .join(" ");
   if (health === "ok") {
     return {

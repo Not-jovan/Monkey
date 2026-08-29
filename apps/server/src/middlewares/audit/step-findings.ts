@@ -131,10 +131,25 @@ export function reportForStep(
   ].flatMap((check) => (check === null ? [] : [check]));
 
   const status = worstStatus(ran);
+  // Grouped by message rather than listed per check: one unavailable model
+  // fails every check with the same words, and printing it once per label
+  // turned a single provider error into a paragraph. Naming the question that
+  // went unanswered still earns its place when the checks disagree about why.
+  // Nothing is lost when it does not: every call keeps its own auditor span,
+  // labelled and carrying its own error.
+  const failures = new Map<string, string[]>();
+  for (const check of ran) {
+    if (!check.failure) continue;
+    const labels = failures.get(check.failure) ?? [];
+    labels.push(check.label);
+    failures.set(check.failure, labels);
+  }
   const failure =
-    ran
-      .filter((check) => check.failure)
-      .map((check) => check.label + ": " + check.failure)
+    [...failures]
+      .map(([message, labels]) => {
+        if (labels.length === ran.length) return message;
+        return labels.join(", ") + ": " + message;
+      })
       .join(" · ") || null;
 
   // Check 1. Detection is deterministic and already done; the check only

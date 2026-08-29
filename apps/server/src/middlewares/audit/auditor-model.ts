@@ -53,6 +53,23 @@ export function describeError(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The same error as {@link describeError}, minus the parts the provider stamps
+ * per response. Ark ends every failure with its own request id, so one outage
+ * reported by seven checks is seven strings that differ only in that id —
+ * nothing downstream can tell it is one outage, and the auditor's health then
+ * repeats the same sentence once per check.
+ *
+ * Used for what a check *reports*. The id is not lost: the attempt keeps the
+ * full message, which is what the auditor's own span carries and what the log
+ * line below prints.
+ */
+export function summarizeError(error: unknown) {
+  return describeError(error)
+    .replace(/\s*Request id:\s*\S+/gi, "")
+    .trim();
+}
+
 // One attempt, as a span in the agent's own shape. That compatibility is what
 // makes the auditor's own trace auditable by the machinery that judges an agent.
 export function auditorCallSpan(input: {
@@ -96,7 +113,12 @@ export class AuditorModel {
   // process. Remembering it turns "one wasted request per check" into one
   // wasted request per boot. Held here rather than per chat, because a model
   // that does not exist for this account does not exist for the next chat.
-  private readonly unavailable = new Set<string>();
+  //
+  // Keyed by model, holding why: a check that skips the call still reports the
+  // reason the first one was given, so one outage reads as one sentence
+  // instead of as the provider's explanation and a bare "not available",
+  // decided by which check happened to run first.
+  private readonly unavailable = new Map<string, string>();
 
   constructor(
     private readonly client: ArkClient,
@@ -158,13 +180,14 @@ export class AuditorModel {
     const hasFallback = Boolean(fallbackModel) && fallbackModel !== primaryModel;
 
     // Already known to be unavailable, so the primary is not tried at all.
-    if (hasFallback && this.unavailable.has(primaryModel)) {
+    const remembered = this.unavailable.get(primaryModel);
+    if (hasFallback && remembered !== undefined) {
       return this.attempt(fallbackModel!, attempts, runAttempt, {
         onSuccess: {
           status: "degraded",
-          failure: "Primary audit model " + primaryModel + " is not available",
+          failure: "Primary audit model unavailable: " + remembered,
         },
-        onFailure: (error) => describeError(error),
+        onFailure: (error) => summarizeError(error),
       });
     }
 
@@ -177,14 +200,16 @@ export class AuditorModel {
         attempts,
       };
     } catch (primaryError) {
-      const primaryFailure = describeError(primaryError);
+      const primaryFailure = summarizeError(primaryError);
       if (isPermanentlyUnavailable(primaryError)) {
-        this.unavailable.add(primaryModel);
+        this.unavailable.set(primaryModel, primaryFailure);
+        // The log keeps the request id the report drops: this is the line an
+        // operator takes to the provider.
         this.log?.(
           "audit model " +
             primaryModel +
             " is unavailable; falling back for the rest of this process: " +
-            primaryFailure,
+            describeError(primaryError),
         );
       }
       if (hasFallback) {
@@ -194,7 +219,7 @@ export class AuditorModel {
             failure: "Primary audit model unavailable: " + primaryFailure,
           },
           onFailure: (error) =>
-            "Primary: " + primaryFailure + " · Fallback: " + describeError(error),
+            "Primary: " + primaryFailure + " · Fallback: " + summarizeError(error),
         });
       }
       return {

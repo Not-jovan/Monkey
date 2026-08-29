@@ -322,6 +322,55 @@ describe("AuditService", () => {
     expect(responder.calls.at(-1)?.user).toContain("read .env");
   });
 
+  // The provider stamps a fresh request id on every failure, so the three
+  // checks that fall back report three strings that are the same outage in
+  // different clothes. Without normalising, nothing can tell they are one
+  // outage and the banner prints the whole sentence once per check.
+  it("says one outage once even though each response carries its own id", async () => {
+    const stores = await makeStores();
+    let requests = 0;
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (model) => {
+        if (model === "sec-model") {
+          requests += 1;
+          throw new ArkApiError(
+            "Your account has not activated the model sec-model. Please " +
+              "activate the model service in the Ark Console. Request id: " +
+              "request-id-" + requests,
+            "ModelNotOpen",
+            404,
+          );
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-ids");
+    stores.traceStore.appendSpan("trace-ids", promptSpan("trace-ids", "hello"));
+    await service.idle();
+
+    expect(requests).toBeGreaterThan(1);
+    const healthNotes = stores.auditStore
+      .listByTrace("trace-ids")
+      .filter((step) => step.category === "audit-health");
+    expect(healthNotes).toHaveLength(1);
+    expect(healthNotes[0]?.finding).toBe(
+      "Primary audit model unavailable: ModelNotOpen: Your account has not " +
+        "activated the model sec-model. Please activate the model service in " +
+        "the Ark Console.",
+    );
+    // The id is still on record, one per call, where the auditor's own steps
+    // show it.
+    const errors = stores.auditStore
+      .listAuditorSpans("trace-ids")
+      .flatMap((span) => (span.error ? [span.error] : []));
+    expect(errors.length).toBeGreaterThan(1);
+    expect(new Set(errors).size).toBe(errors.length);
+    expect(errors.every((error) => error.includes("Request id:"))).toBe(true);
+  });
+
   it("degrades to the fallback model when the primary is not activated", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
@@ -347,6 +396,12 @@ describe("AuditService", () => {
     expect(healthNotes).toHaveLength(1);
     expect(healthNotes[0]?.type).toBe("warning");
     expect(healthNotes[0]?.finding).toMatch(/Primary audit model/i);
+    // Every check fell back for the same reason, and the note says so once.
+    // It used to repeat the reason per check, once for each of Summarize,
+    // Intent and Injection.
+    expect(healthNotes[0]?.finding.match(/Primary audit model/gi)).toHaveLength(
+      1,
+    );
     expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
       true,
     );

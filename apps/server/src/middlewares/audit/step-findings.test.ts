@@ -84,6 +84,24 @@ describe("reportForStep", () => {
     expect(report.failure).toContain("Injection: primary model unavailable");
   });
 
+  // The bug this guards: an unavailable model fails every check with the same
+  // words, and the step's failure used to repeat that error once per check
+  // label — seven copies of one sentence in the auditor's health banner.
+  it("states one shared failure once rather than once per check", () => {
+    const outage = "InvalidEndpointOrModel: ep-primary does not exist";
+    const report = reportForStep(
+      nothingFound(),
+      checks({
+        summary: unanswered("Summarize · Read src/index.ts", outage),
+        intent: unanswered("Intent · Read src/index.ts", outage),
+        injection: unanswered("Injection · Read src/index.ts", outage),
+      }),
+    );
+
+    expect(report.failure).toBe(outage);
+    expect(report.failure).not.toContain("Summarize");
+  });
+
   // A conditional check that never ran must not drag the step's health down —
   // there was nothing for it to judge.
   it("ignores checks the step gave no subject", () => {
