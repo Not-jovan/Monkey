@@ -172,6 +172,33 @@ const RULES: Rule[] = [
     pattern:
       /context.{0,10}(length|window).{0,20}exceed|maximum context length/i,
   },
+  // Ahead of the Ark rule below because the two overlap on bare status codes,
+  // and the remedy is what makes attribution worth computing: pointing a
+  // Claude Code operator at ARK_API_KEY sends them to the wrong file. Matched
+  // on the shapes Claude Code actually emits, verified against a live run —
+  // note `authentication_failed` with an underscore, which the Ark rule's
+  // `authentication failed` does not match.
+  {
+    layer: "provider",
+    kind: "auth-rejected",
+    retryability: "user-action",
+    title: "The Agent runtime is not authenticated",
+    remedy:
+      "Set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ANTHROPIC_API_KEY, then restart the control plane.",
+    pattern: /authentication_failed|not logged in|please run \/login/i,
+  },
+  // A credential that authenticates but cannot pay is the provider refusing
+  // the work, not the platform failing — and the operator, not the agent, is
+  // who can fix it.
+  {
+    layer: "provider",
+    kind: "billing-rejected",
+    retryability: "user-action",
+    title: "The provider rejected the request for billing reasons",
+    remedy:
+      "Top up the account behind the runtime's credential, or switch to a credential with available balance.",
+    pattern: /billing_error|credit balance is too low|insufficient (quota|credit|balance)/i,
+  },
   {
     layer: "provider",
     kind: "auth-rejected",

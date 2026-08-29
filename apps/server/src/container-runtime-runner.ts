@@ -197,6 +197,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    let modelReported = false;
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -212,6 +213,10 @@ export class ContainerRuntimeRunner implements AgentRunner {
         stdout = lines.pop() ?? "";
         for (const line of lines) {
           this.runtime.parseEventLine(line, parsed, request.onEvent);
+          if (parsed.model && !modelReported) {
+            modelReported = true;
+            request.onModel?.(parsed.model);
+          }
         }
       } else {
         transcript.recordStderr(chunk.toString("utf8"));

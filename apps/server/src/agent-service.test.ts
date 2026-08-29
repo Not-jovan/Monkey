@@ -246,3 +246,42 @@ describe("trace model handoff", () => {
     expect(store.get(run.id)?.model).toBe("ep-authoritative");
   });
 });
+
+// A run that fails never returns a RunnerResult, so a model carried only on
+// the result was lost exactly when it mattered most — the trace for a failed
+// run showed no model even though the runtime had announced one and it was
+// sitting in the failure transcript. onModel reports it as soon as it is
+// known, before the turn does any work.
+describe("model reported by a failing run", () => {
+  class FailingRunnerThatNamesItsModel implements AgentRunner {
+    async run(request: RunnerRequest): Promise<RunnerResult> {
+      request.onModel?.("claude-opus-5[1m]");
+      throw new Error("Not logged in · Please run /login");
+    }
+    async cancel(): Promise<boolean> {
+      return false;
+    }
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  }
+
+  it("keeps the model on the trace and in systemInfo after the run fails", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
+    temporaryDirectories.push(root);
+    const store = new TraceStore(path.join(root, "data", "traces"));
+    await store.initialize();
+    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const service = await makeService(
+      new FailingRunnerThatNamesItsModel(),
+      traces,
+      { AGENT_RUNTIME: "claude-code", ANTHROPIC_API_KEY: "sk-ant-test" },
+    );
+    const agent = await service.createAgent({ name: "Failing" });
+    const { run } = await service.sendMessage(agent.id, "say hi");
+    await expect.poll(() => service.getRun(run.id).status).toBe("failed");
+
+    expect(store.get(run.id)?.model).toBe("claude-opus-5[1m]");
+    expect((await service.systemInfo()).agentModel).toBe("claude-opus-5[1m]");
+  });
+});

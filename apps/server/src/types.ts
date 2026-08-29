@@ -87,6 +87,11 @@ export interface RunnerRequest {
   // Applied to the transcript before it touches disk, so a debug artifact
   // never becomes the one place a credential survives unmasked.
   redact?: ((text: string) => string) | undefined;
+  // Fires as soon as the runtime names the model it is running on, which is
+  // before the turn does any work. Reported this way rather than on
+  // RunnerResult because a run that fails never returns one, and a failed run
+  // is exactly when knowing the model matters.
+  onModel?: ((model: string) => void) | undefined;
   // Streams every parsed Codex JSONL event to the caller while the run is
   // still in flight (trace middleware binds thread ids through this).
   onEvent?: ((event: Record<string, unknown>) => void) | undefined;

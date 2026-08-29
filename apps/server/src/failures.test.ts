@@ -199,3 +199,46 @@ describe("isPermanentProviderError", () => {
     expect(isPermanentProviderError(500, null)).toBe(false);
   });
 });
+
+// Both strings are captured verbatim from live Claude Code runs. Before these
+// rules existed the same class of failure attributed differently per runtime:
+// a Codex credential failure was provider/auth-rejected with an actionable
+// remedy, while the Claude Code one fell through to platform/unknown — and
+// "platform" points the reader at the launchpad for something only the
+// operator's credential can fix.
+describe("runtime-neutral provider failures", () => {
+  it("attributes a Claude Code auth failure to the provider, not the platform", () => {
+    const failure = classifyRunFailure(
+      "assistant error: authentication_failed · Not logged in · Please run /login",
+      { exitCode: 1, source: "process-exit" },
+    );
+    expect(failure.layer).toBe("provider");
+    expect(failure.kind).toBe("auth-rejected");
+    expect(failure.retryability).toBe("user-action");
+    // The remedy has to name the credential this runtime actually uses.
+    expect(failure.remedy).toContain("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(failure.remedy).not.toContain("ARK_API_KEY");
+  });
+
+  it("attributes a billing refusal to the provider", () => {
+    const failure = classifyRunFailure(
+      "assistant error: billing_error · Credit balance is too low · api_error_status=400",
+      { exitCode: 1, source: "process-exit" },
+    );
+    expect(failure.layer).toBe("provider");
+    expect(failure.kind).toBe("billing-rejected");
+    expect(failure.retryability).toBe("user-action");
+  });
+
+  // The new rules sit ahead of the Ark one and overlap it on status codes, so
+  // Ark's own wording has to survive.
+  it("still gives an Ark credential failure Ark's remedy", () => {
+    const failure = classifyRunFailure(
+      "unexpected status 401 Unauthorized: The API key format is incorrect",
+      { exitCode: 1, source: "process-exit" },
+    );
+    expect(failure.kind).toBe("auth-rejected");
+    expect(failure.title).toBe("Ark rejected the credentials");
+    expect(failure.remedy).toContain("ARK_API_KEY");
+  });
+});

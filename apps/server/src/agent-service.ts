@@ -304,6 +304,10 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
+    // Set by onModel below, which fires before the turn does any work — so a
+    // run that fails still knows what it was running on.
+    let observedModel: string | null = null;
+
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
@@ -315,11 +319,18 @@ export class AgentService {
         threadId: agentAtStart.codexThreadId,
         runId: run.id,
         redact: (text) => this.redact(text),
+        onModel: (model) => {
+          observedModel = model;
+          this.lastRuntimeModel = model;
+        },
         onEvent: (event) => this.traces?.onRunnerEvent(run.id, event),
       });
       const completedAt = now();
       const safeOutput = this.redact(result.output);
-      if (result.model) this.lastRuntimeModel = result.model;
+      if (result.model) {
+        observedModel = result.model;
+        this.lastRuntimeModel = result.model;
+      }
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find(
@@ -346,7 +357,7 @@ export class AgentService {
       this.traces?.onRunEnd(run.id, {
         status: "completed",
         output: safeOutput,
-        model: result.model,
+        model: observedModel,
       });
     } catch (error) {
       const completedAt = now();
@@ -378,6 +389,7 @@ export class AgentService {
         status: cancelled ? "cancelled" : "failed",
         error: message,
         failure,
+        model: observedModel,
       });
     }
   }
