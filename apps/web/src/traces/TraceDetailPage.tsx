@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus, type TraceDetail } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { formatDuration, spanDuration } from "./format";
@@ -176,9 +176,13 @@ function SpanDetails({
 
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [view, setView] = useState<StepView>(readStoredView);
-  const [pane, setPane] = useState<TracePane>(readStoredPane);
+  const [pane, setPane] = useState<TracePane>(() =>
+    searchParams.get("pane") === "auditor" ? "auditor" : readStoredPane(),
+  );
+  const focusedFindingId = searchParams.get("finding");
 
   const authQuery = useQuery({ queryKey: ["auth"], queryFn: api.auth });
   const locked = authQuery.data?.required === true && !hasAuthToken();
@@ -390,6 +394,7 @@ export function TraceDetailPage() {
           context={detailQuery.data?.context ?? null}
           auditorSpans={auditorQuery.data?.spans ?? []}
           onShowStep={showStep}
+          focusedFindingId={focusedFindingId}
         />
       )}
 

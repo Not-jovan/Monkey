@@ -196,6 +196,35 @@ test("Trace 4 should warn about the non-whitelisted GitHub domain", async () => 
   expect(securityText).toMatch(/github\.com/i);
 });
 
+test("A human can turn Trace 4 evidence into a reversible correction", async () => {
+  const detail = traces[3]!;
+  const finding = detail.findings.find(
+    (entry) =>
+      entry.category === "security" && /github\.com/i.test(entry.finding),
+  );
+  expect(finding, "the network finding is the evidence for this correction").toBeTruthy();
+
+  const correction =
+    "Do not contact hosts outside the configured network whitelist.";
+  await page.goto(`/traces/${detail.trace.id}`);
+  await page.getByRole("tab", { name: /View Auditor/ }).click();
+  const findingRow = page.locator(
+    `.findings-table tbody tr[data-finding-id="${finding!.id}"]`,
+  );
+  await findingRow.getByRole("button", { name: "Correct this" }).click();
+  await findingRow.getByLabel("Correction for future runs").fill(correction);
+  await findingRow.getByRole("button", { name: "Apply correction" }).click();
+  await expect(findingRow.getByText(/Applied as intent v\d+/i)).toBeVisible();
+
+  const intent = await getIntent(page.request, agent.id);
+  expect(intent.intent.extended).toContain(correction);
+  expect(intent.versions.at(-1)?.update).toMatchObject({
+    kind: "human-correction",
+    sourceFindingId: finding!.id,
+    traceId: detail.trace.id,
+  });
+});
+
 test("Trace 5 should apply the HTML intent update", async () => {
   const detail = traces[4]!;
   const intent = await getIntent(page.request, agent.id);
@@ -253,10 +282,11 @@ test("An intent version can be restored without losing history", async () => {
     expect(after.versions.some((entry) => entry.id === version.id)).toBe(true);
   }
 
-  // Put the HTML rule back, so the agent is left as this suite found it.
-  const htmlVersion = before.versions.at(-1)!;
-  const restored = await revertIntent(page.request, agent.id, htmlVersion.id);
-  expect(restored.intent.extended).toEqual(htmlVersion.extended);
+  // Put the latest rules (including the human correction) back, so the Agent
+  // is left as this suite found it.
+  const latestVersion = before.versions.at(-1)!;
+  const restored = await revertIntent(page.request, agent.id, latestVersion.id);
+  expect(restored.intent.extended).toEqual(latestVersion.extended);
 });
 
 test.describe("A denied action is diagnosable", () => {

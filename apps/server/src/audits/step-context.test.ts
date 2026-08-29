@@ -330,6 +330,6 @@ describe("policy findings", () => {
     });
     expect(steps).toHaveLength(1);
     expect(steps[0]?.category).toBe("security");
-    expect(steps[0]?.finding).toContain("not on the configured whitelist");
+    expect(steps[0]?.finding).toContain("outside the configured whitelist");
   });
 });

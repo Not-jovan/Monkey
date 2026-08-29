@@ -230,6 +230,96 @@ describe("IntentService", () => {
     expect(service.view(AGENT).versions).toHaveLength(2);
   });
 
+  it("applies a human correction with evidence provenance exactly once", async () => {
+    const { store } = await makeStore();
+    const { service } = makeService(store, []);
+    service.seed(AGENT, OBJECTIVE);
+
+    const first = service.applyHumanCorrection(AGENT, {
+      correction: "  Do not contact hosts outside the network whitelist.  ",
+      traceId: "trace-2",
+      findingId: "finding-2",
+      spanId: "span-7",
+    });
+
+    expect(first.created).toBeTruthy();
+    expect(first.view.intent.extended).toEqual([
+      "Do not contact hosts outside the network whitelist.",
+    ]);
+    const applied = first.view.versions.at(-1);
+    expect(applied?.update?.kind).toBe("human-correction");
+    expect(applied?.update?.traceId).toBe("trace-2");
+    expect(applied?.update?.sourceFindingId).toBe("finding-2");
+    expect(applied?.update?.sourceSpanId).toBe("span-7");
+
+    const duplicate = service.applyHumanCorrection(AGENT, {
+      correction: "A different correction must not replace the first one.",
+      traceId: "trace-2",
+      findingId: "finding-2",
+      spanId: "span-7",
+    });
+    expect(duplicate.created).toBeNull();
+    expect(service.view(AGENT).versions).toHaveLength(2);
+  });
+
+  it("removes persisted intent when an Agent is forgotten", async () => {
+    const { store, directory } = await makeStore();
+    const { service } = makeService(store, []);
+    service.seed(AGENT, OBJECTIVE);
+    await store.flush();
+
+    service.forget(AGENT);
+    await store.flush();
+
+    const reopened = new IntentStore(path.join(directory, "intent"));
+    await reopened.initialize();
+    expect(reopened.list(AGENT)).toEqual([]);
+  });
+
+  it("does not resurrect a forgotten Agent when queued classification finishes", async () => {
+    const { store, directory } = await makeStore();
+    let markStarted!: () => void;
+    let release!: (value: { content: string }) => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const response = new Promise<{ content: string }>((resolve) => {
+      release = resolve;
+    });
+    const client: ArkClient = {
+      complete: async () => {
+        markStarted();
+        return response;
+      },
+    };
+    const service = new IntentService({
+      store,
+      client,
+      model: "intent-model",
+      enabled: true,
+    });
+    service.seed(AGENT, OBJECTIVE);
+    service.observe(AGENT, OBJECTIVE, {
+      content: "From now on, use HTML instead of Markdown.",
+      messageId: "msg-delete",
+      traceId: "trace-delete",
+    });
+    await started;
+
+    service.forget(AGENT);
+    release({
+      content:
+        '{"classification":"INTENT_UPDATE","reason":"rule","extendedIntent":["Use HTML, not Markdown."]}',
+    });
+    await service.idle();
+    await store.flush();
+
+    expect(service.view(AGENT).versions).toEqual([]);
+    const reopened = new IntentStore(path.join(directory, "intent"));
+    await reopened.initialize();
+    expect(reopened.list(AGENT)).toEqual([]);
+  });
+
   it("replaces the objective on a full pivot and keeps the previous version", async () => {
     const { store } = await makeStore();
     const { service } = makeService(store, [

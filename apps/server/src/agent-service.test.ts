@@ -47,6 +47,7 @@ async function makeService(
   runner: AgentRunner = new FakeRunner(),
   traces?: TraceService,
   envOverrides: Record<string, string> = {},
+  activeIntent?: (agentId: string) => string,
 ): Promise<AgentService> {
   const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
   temporaryDirectories.push(root);
@@ -65,6 +66,7 @@ async function makeService(
     new WorkspaceManager(path.join(root, "workspaces")),
     runner,
     traces,
+    activeIntent,
   );
   await service.initialize();
   return service;
@@ -92,6 +94,52 @@ describe("Agent lifecycle", () => {
     expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
     expect(messages[1]?.content).toContain("write hello world");
     expect(service.getAgent(agent.id).codexThreadId).toBe("fake-thread");
+  });
+
+  it("applies the active intent to future runtime prompts", async () => {
+    let runtimePrompt = "";
+    let intentReads = 0;
+    const runner: AgentRunner = {
+      run: async (request) => {
+        runtimePrompt = request.prompt;
+        return { output: "done", threadId: "thread", usage: null, model: null };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    const service = await makeService(
+      runner,
+      undefined,
+      {},
+      () => {
+        intentReads += 1;
+        return "Objective: Write installation documentation\nStanding constraints:\n- Use Markdown for all documentation.\n- Do not contact hosts outside the whitelist.";
+      },
+    );
+    const agent = await service.createAgent({ name: "Corrected" });
+    const { run } = await service.sendMessage(
+      agent.id,
+      "From now on, use HTML instead of Markdown.",
+    );
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(runtimePrompt).toContain("Standing intent for this Agent:");
+    expect(runtimePrompt).toContain("Use Markdown for all documentation.");
+    expect(runtimePrompt).toContain("Do not contact hosts outside the whitelist.");
+    expect(runtimePrompt).toContain(
+      "Current user request:\nFrom now on, use HTML instead of Markdown.",
+    );
+    expect(runtimePrompt).toContain(
+      "If the current user request explicitly states that it changes or relaxes the standing intent, follow that change",
+    );
+    expect(runtimePrompt).toContain(
+      "A conflicting task does not by itself override the standing intent",
+    );
+    expect(intentReads).toBe(1);
+    // The transcript remains the human's message, not the middleware envelope.
+    expect(service.getMessages(agent.id)[0]?.content).toBe(
+      "From now on, use HTML instead of Markdown.",
+    );
   });
 
   it("atomically accepts only one concurrent run per Agent", async () => {

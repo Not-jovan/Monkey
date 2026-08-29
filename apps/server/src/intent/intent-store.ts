@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import path from "node:path";
 import {
   intentFileSchema,
@@ -123,6 +130,15 @@ export class IntentStore {
 
   remove(agentId: string) {
     this.records.delete(agentId);
+    const filePath = path.join(this.directory, agentId + ".json");
+    this.queue = this.queue
+      .then(async () => {
+        await Promise.all([
+          rm(filePath, { force: true }),
+          rm(filePath + ".tmp", { force: true }),
+        ]);
+      })
+      .catch(() => undefined);
   }
 
   async flush() {

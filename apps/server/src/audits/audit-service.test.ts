@@ -353,7 +353,7 @@ describe("AuditService", () => {
     );
     expect(
       findings.some((step) =>
-        step.finding.includes("not on the configured whitelist"),
+        step.finding.includes("outside the configured whitelist"),
       ),
     ).toBe(true);
   });
@@ -611,6 +611,66 @@ describe("AuditService", () => {
         step.finding.includes("read .env despite the current intent"),
       ),
     ).toBe(true);
+  });
+
+  it("pins queued audits to the intent active when the trace began", async () => {
+    const stores = await makeStores();
+    const directory = await mkdtemp(path.join(tmpdir(), "audit-pinned-intent-"));
+    const intentStore = new IntentStore(path.join(directory, "intent"));
+    await intentStore.initialize();
+    cleanups.push(async () => {
+      await intentStore.flush();
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    });
+    const intent = new IntentService({
+      store: intentStore,
+      client: fakeClient({ calls: [], respond: () => "" }),
+      model: "intent-model",
+      enabled: false,
+    });
+    intent.seed("agent-1", "Write installation documentation");
+    intent.applyHumanCorrection("agent-1", {
+      correction: "Use Markdown for all documentation.",
+      traceId: "source-trace",
+      findingId: "source-finding",
+      spanId: null,
+    });
+    const pinnedIntentId = intent.currentId("agent-1");
+
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (model) =>
+        model === "intent-model"
+          ? '{"aligned":true,"deviation":null,"context_summary":"Documentation run."}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder, null, intent);
+    const trace = seedTrace(stores.traceStore, "trace-pinned");
+    stores.traceStore.appendSpan(
+      trace.id,
+      promptSpan(trace.id, "Add an installation example"),
+    );
+
+    // Change the active intent while the trace's audits are still queued.
+    // Both its step and run-level audit must retain the earlier snapshot.
+    intent.applyHumanCorrection("agent-1", {
+      correction: "Use HTML for all documentation.",
+      traceId: "later-trace",
+      findingId: "later-finding",
+      spanId: null,
+    });
+    stores.traceStore.updateTrace(trace.id, (record) => {
+      record.status = "completed";
+      record.endedAt = "2026-08-26T12:00:10.000Z";
+    });
+    await service.idle();
+
+    expect(stores.auditStore.intentId(trace.id)).toBe(pinnedIntentId);
+    expect(responder.calls).toHaveLength(2);
+    for (const call of responder.calls) {
+      expect(call.user).toContain("Use Markdown for all documentation.");
+      expect(call.user).not.toContain("Use HTML for all documentation.");
+    }
   });
 
   it("audits a subagent reply, and only warns once the agent acts on it", async () => {

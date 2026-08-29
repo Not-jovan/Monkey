@@ -15,7 +15,9 @@ export type IntentState = z.infer<typeof intentStateSchema>;
 // before the timeline existed still parse.
 export const intentUpdateSchema = z.object({
   logs: z.array(z.string()),
-  kind: z.enum(["seed", "classified", "revert"]).default("classified"),
+  kind: z
+    .enum(["seed", "classified", "revert", "human-correction"])
+    .default("classified"),
   // The user message that changed the spec.
   message: z.string().optional(),
   // The classifier's own justification.
@@ -27,6 +29,10 @@ export const intentUpdateSchema = z.object({
   traceId: z.string().nullable().default(null),
   // Set when this version restores an earlier one.
   revertedFrom: z.string().nullable().default(null),
+  // A human correction is evidence-backed: these fields lead back to the
+  // audit finding and step the operator reviewed before changing the spec.
+  sourceFindingId: z.string().nullable().optional(),
+  sourceSpanId: z.string().nullable().optional(),
 });
 
 export type IntentUpdate = z.infer<typeof intentUpdateSchema>;

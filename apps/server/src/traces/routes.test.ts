@@ -10,15 +10,11 @@ import { ContextService } from "../context/context-service.js";
 import { ContextStore } from "../context/context-store.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
+import { HttpError } from "../errors.js";
 import { createRedactor } from "./redaction.js";
 import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
-
-const service = {
-  listAgents: () => [],
-  systemInfo: async () => ({}),
-} as unknown as AgentService;
 
 const fixture = JSON.parse(
   await readFile(new URL("./__fixtures__/otlp-logs.json", import.meta.url), "utf8"),
@@ -33,6 +29,15 @@ afterEach(async () => {
 });
 
 async function makeApp(environment: Record<string, string> = {}) {
+  const agents = new Set([AGENT_ID]);
+  const service = {
+    listAgents: () => [],
+    getAgent: (id: string) => {
+      if (!agents.has(id)) throw new HttpError(404, "Agent not found");
+      return { id };
+    },
+    systemInfo: async () => ({}),
+  } as unknown as AgentService;
   const directory = await mkdtemp(path.join(tmpdir(), "glassbox-routes-"));
   const traceStore = new TraceStore(path.join(directory, "traces"));
   await traceStore.initialize();
@@ -89,6 +94,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     intentStore,
     intentService,
     contextStore,
+    agents,
   };
 }
 
@@ -476,6 +482,223 @@ describe("Glassbox routes", () => {
       payload: { intentId: "not-a-version" },
     });
     expect(conflict.statusCode).toBe(409);
+  });
+
+  it("turns an audited finding into a human-authored intent constraint", async () => {
+    const { app, traceService, traceStore, auditStore, intentStore, agents } =
+      await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    intentStore.seed(AGENT_ID, "Write installation documentation");
+    startRun(traceService);
+    traceService.onRunEnd(RUN_ID, { status: "completed" });
+    const trace = traceStore.get(RUN_ID)!;
+
+    const beforeAudit = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(beforeAudit.statusCode).toBe(409);
+    expect(beforeAudit.json<{ error: string }>().error).toContain(
+      "audit to finish",
+    );
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-network-1",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "warning",
+          category: "security",
+          finding:
+            "Contacted github.com, which is outside the configured whitelist.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+
+    const activeRunId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    traceService.onRunStart(
+      {
+        id: AGENT_ID,
+        name: "Builder",
+        instructions: "",
+        codexThreadId: null,
+      },
+      { id: activeRunId, prompt: "A newer task" },
+    );
+    const duringActiveRun = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(duringActiveRun.statusCode).toBe(409);
+    expect(duringActiveRun.json<{ error: string }>().error).toContain(
+      "active run",
+    );
+    traceService.onRunEnd(activeRunId, { status: "completed" });
+
+    const applied = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(applied.statusCode).toBe(201);
+    const body = applied.json<{
+      intent: { extended: string[] };
+      versions: {
+        update?: {
+          kind: string;
+          sourceFindingId?: string | null;
+          traceId: string | null;
+        };
+      }[];
+    }>();
+    expect(body.intent.extended).toContain(
+      "Do not contact hosts outside the configured whitelist.",
+    );
+    expect(body.versions.at(-1)?.update).toMatchObject({
+      kind: "human-correction",
+      sourceFindingId: "finding-network-1",
+      traceId: RUN_ID,
+    });
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Try to apply it twice.",
+      },
+    });
+    expect(duplicate.statusCode).toBe(409);
+
+    const invented = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "not-real",
+        correction: "Do not accept findings invented by the browser.",
+      },
+    });
+    expect(invented.statusCode).toBe(404);
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-secret-2",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "warning",
+          category: "security",
+          finding: "A credential was sent to an unrelated service.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    const secret = "ghp_example_secret";
+    const masked = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-secret-2",
+        correction: "Never send " + secret + " to unrelated services.",
+      },
+    });
+    expect(masked.statusCode).toBe(201);
+    expect(masked.body).not.toContain(secret);
+    expect(masked.body).toContain("ghp");
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-auditor-health",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "error",
+          category: "audit-health",
+          finding: "The auditor could not complete.",
+        },
+        {
+          id: "finding-missing-span",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: "span-that-does-not-exist",
+          type: "warning",
+          category: "reliability",
+          finding: "The agent repeated a failed command.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    const auditorHealth = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-auditor-health",
+        correction: "Change the Agent because its auditor was unavailable.",
+      },
+    });
+    expect(auditorHealth.statusCode).toBe(400);
+
+    const missingSpan = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-missing-span",
+        correction: "Change approach before retrying a failed command.",
+      },
+    });
+    expect(missingSpan.statusCode).toBe(404);
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-after-delete",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          type: "warning",
+          category: "reliability",
+          finding: "The agent repeated a failed command.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    agents.delete(AGENT_ID);
+    const deletedAgent = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-after-delete",
+        correction: "Change approach before retrying a failed command.",
+      },
+    });
+    expect(deletedAgent.statusCode).toBe(404);
+    expect(deletedAgent.json<{ error: string }>().error).toBe("Agent not found");
   });
 
   it("serves prior context and the thread position with a trace", async () => {

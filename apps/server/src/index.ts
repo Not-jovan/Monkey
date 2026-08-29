@@ -10,6 +10,7 @@ import { ContextService } from "./context/context-service.js";
 import { ContextStore } from "./context/context-store.js";
 import { IntentService } from "./intent/intent-service.js";
 import { IntentStore } from "./intent/intent-store.js";
+import { describeIntent } from "./intent/intent-model.js";
 import { createRunner } from "./runner-factory.js";
 import { selectRuntime } from "./runtimes/index.js";
 import { JsonStore } from "./store.js";
@@ -79,6 +80,12 @@ const service = new AgentService(
   workspaces,
   runner,
   traceService,
+  (agentId) => {
+    const intent = intentService.state(agentId);
+    return intent.objective.length > 0 || intent.extended.length > 0
+      ? describeIntent(intent)
+      : "";
+  },
 );
 await service.initialize();
 

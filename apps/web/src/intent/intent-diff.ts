@@ -13,7 +13,7 @@ export interface IntentChange {
   // 1-based, and the number a reader sees. Position in the list is the version.
   version: number;
   createdAt: string | null;
-  kind: "seed" | "classified" | "revert";
+  kind: "seed" | "classified" | "revert" | "human-correction";
   // The message that caused the change, when one did.
   trigger: string | null;
   reason: string | null;
@@ -26,6 +26,8 @@ export interface IntentChange {
   // The version this one restores, for a revert.
   revertedFrom: string | null;
   revertedFromVersion: number | null;
+  sourceFindingId: string | null;
+  sourceSpanId: string | null;
   isCurrent: boolean;
 }
 
@@ -70,6 +72,8 @@ export function intentChanges(
       revertedFromVersion: revertedFrom
         ? (positionById.get(revertedFrom) ?? null)
         : null,
+      sourceFindingId: update?.sourceFindingId ?? null,
+      sourceSpanId: update?.sourceSpanId ?? null,
       isCurrent: index === versions.length - 1,
     };
   });
@@ -98,6 +102,7 @@ export function describeChange(change: IntentChange): string {
       ? "Restored version " + change.revertedFromVersion
       : "Restored an earlier version";
   }
+  if (change.kind === "human-correction") return "Human correction applied";
   if (change.version === 1) return "Spec set from the agent's instructions";
   const parts: string[] = [];
   if (change.objectiveBefore !== null) parts.push("objective replaced");
@@ -129,7 +134,14 @@ export function versionByTrace(
 ): Map<string, IntentChange> {
   const byTrace = new Map<string, IntentChange>();
   for (const change of changes) {
-    if (change.traceId && hasVisibleChange(change)) {
+    // Human corrections point at the evidence trace, not at a user message
+    // that changed the spec. Marking that original message as the trigger
+    // would misstate who made the correction and when.
+    if (
+      change.kind !== "human-correction" &&
+      change.traceId &&
+      hasVisibleChange(change)
+    ) {
       byTrace.set(change.traceId, change);
     }
   }

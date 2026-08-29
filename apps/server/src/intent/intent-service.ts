@@ -16,8 +16,16 @@ export interface IntentObserveInput {
   traceId: string;
 }
 
+export interface HumanCorrectionInput {
+  correction: string;
+  traceId: string;
+  findingId: string;
+  spanId: string | null;
+}
+
 export class IntentService {
   private chain = Promise.resolve();
+  private readonly forgotten = new Set<string>();
 
   constructor(private readonly deps: IntentServiceDeps) {}
 
@@ -80,15 +88,62 @@ export class IntentService {
     return { created, view: this.view(agentId) };
   }
 
+  applyHumanCorrection(agentId: string, input: HumanCorrectionInput) {
+    const correction = input.correction.trim();
+    const view = this.view(agentId);
+    if (!this.canApplyHumanCorrection(agentId, input.findingId, correction)) {
+      return { created: null, view };
+    }
+    const created = this.deps.store.append(agentId, {
+      objective: view.intent.objective,
+      extended: [...view.intent.extended, correction],
+      update: {
+        kind: "human-correction",
+        logs: [
+          "Human correction applied from audit finding " + input.findingId,
+          "Added constraint: " + correction,
+        ],
+        message: correction,
+        reason: "Applied by a human after reviewing Glass Box evidence.",
+        addedConstraints: [correction],
+        previousObjective: null,
+        traceId: input.traceId,
+        revertedFrom: null,
+        sourceFindingId: input.findingId,
+        sourceSpanId: input.spanId,
+      },
+    });
+    return { created, view: this.view(agentId) };
+  }
+
+  canApplyHumanCorrection(
+    agentId: string,
+    findingId: string,
+    correction: string,
+  ) {
+    const view = this.view(agentId);
+    return (
+      !this.forgotten.has(agentId) &&
+      correction.trim().length > 0 &&
+      !view.intent.extended.includes(correction.trim()) &&
+      !view.versions.some(
+        (entry) => entry.update?.sourceFindingId === findingId,
+      )
+    );
+  }
+
   forget(agentId: string) {
+    this.forgotten.add(agentId);
     this.deps.store.remove(agentId);
   }
 
   seed(agentId: string, instructions: string) {
+    if (this.forgotten.has(agentId)) return;
     this.deps.store.seed(agentId, instructions.trim());
   }
 
   observe(agentId: string, instructions: string, input: IntentObserveInput) {
+    if (this.forgotten.has(agentId)) return;
     const trimmedInstructions = instructions.trim();
     const message = input.content.trim();
     if (trimmedInstructions.length > 0) {
@@ -112,6 +167,7 @@ export class IntentService {
   }
 
   private async classify(agentId: string, message: string, traceId?: string) {
+    if (this.forgotten.has(agentId)) return;
     const state = this.state(agentId);
     const result = await classifyIntent(
       this.deps.client,
@@ -128,6 +184,9 @@ export class IntentService {
       );
       return;
     }
+    // The model call can finish after Agent deletion. Do not recreate the
+    // in-memory or persisted intent that forget() just removed.
+    if (this.forgotten.has(agentId)) return;
     const { classification, reason, extendedIntent, objective } =
       result.classification;
     if (classification === "NO_CHANGE") return;

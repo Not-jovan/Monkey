@@ -238,12 +238,22 @@ interface AuditServiceDeps {
   log?: (message: string, error?: unknown) => void;
 }
 
+interface AuditIntentSnapshot {
+  intentId: string;
+  state: IntentState;
+}
+
 // The auditor is a deliberately separate stage: it subscribes to trace store
 // notifications, re-reads persisted (already redacted) trace data, and writes
 // only to its own store. It never mutates traces and a failure here never
 // blocks a run.
 export class AuditService {
   private chain = Promise.resolve();
+  // A correction applied later must never rewrite the specification an older
+  // trace appears to have been judged against. Capture synchronously when the
+  // first auditable event arrives, before the queued model call can observe a
+  // newer intent version.
+  private readonly intentByTrace = new Map<string, AuditIntentSnapshot>();
   // A model the account has not activated will not start working inside this
   // process. Remembering it turns "one wasted request per step" into one
   // wasted request per boot.
@@ -255,10 +265,12 @@ export class AuditService {
     if (!this.deps.enabled) return;
     this.deps.traceStore.on("span", ({ trace, span }) => {
       if (!this.shouldAuditStep(span)) return;
-      this.enqueue(() => this.stepAudit(trace.id, span.id));
+      const intent = this.intentSnapshot(trace.id, trace.agentId);
+      this.enqueue(() => this.stepAudit(trace.id, span.id, intent));
     });
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
-      this.enqueue(() => this.intentAudit(trace.id));
+      const intent = this.intentSnapshot(trace.id, trace.agentId);
+      this.enqueue(() => this.intentAudit(trace.id, intent));
     });
   }
 
@@ -284,12 +296,21 @@ export class AuditService {
     return span.kind === "tool_call" && span.status !== "running";
   }
 
-  private intentState(agentId: string): IntentState {
-    const state = this.deps.intent?.state(agentId);
-    return state ? { ...state, extended: [...state.extended] } : {
-      objective: "",
-      extended: [],
+  private intentSnapshot(traceId: string, agentId: string) {
+    const existing = this.intentByTrace.get(traceId);
+    if (existing) return existing;
+    const view = this.deps.intent?.view(agentId);
+    const snapshot: AuditIntentSnapshot = {
+      intentId: view?.intentId ?? "",
+      state: view
+        ? {
+            objective: view.intent.objective,
+            extended: [...view.intent.extended],
+          }
+        : { objective: "", extended: [] },
     };
+    this.intentByTrace.set(traceId, snapshot);
+    return snapshot;
   }
 
   private priorPromptInjectionQuotes(traceId: string): string[] {
@@ -302,7 +323,11 @@ export class AuditService {
       .filter((finding) => finding.length > 0);
   }
 
-  private async stepAudit(traceId: string, spanId: string) {
+  private async stepAudit(
+    traceId: string,
+    spanId: string,
+    intentSnapshot: AuditIntentSnapshot,
+  ) {
     const trace = this.deps.traceStore.get(traceId);
     const span = trace?.spans.find((item) => item.id === spanId);
     if (!trace || !span) return;
@@ -320,7 +345,10 @@ export class AuditService {
     const deterministic = runDeterministicChecks(activity, {
       whitelist: this.deps.networkWhitelist,
     });
-    const intent = this.intentState(trace.agentId);
+    const intent = {
+      objective: intentSnapshot.state.objective,
+      extended: [...intentSnapshot.state.extended],
+    };
     // Falls back to the run's own prompt for agents created before intent
     // tracking existed, so a step is never judged against an empty spec.
     if (intent.objective.length === 0) intent.objective = trace.prompt;
@@ -348,6 +376,7 @@ export class AuditService {
       prompt: stepPrompt,
       attempts,
       usedFallback: status === "degraded",
+      intentId: intentSnapshot.intentId,
     });
 
     const relevanceByType = new Map(
@@ -454,12 +483,15 @@ export class AuditService {
           pushAuditorStatus(push, status, failure);
         },
       ),
-      this.deps.intent?.currentId(trace.agentId) ?? "",
+      intentSnapshot.intentId,
       healthOf(status),
     );
   }
 
-  private async intentAudit(traceId: string) {
+  private async intentAudit(
+    traceId: string,
+    intentSnapshot: AuditIntentSnapshot,
+  ) {
     const trace = this.deps.traceStore.get(traceId);
     if (!trace) return;
     const root = trace.spans.find((span) => span.name === "agent.run");
@@ -469,7 +501,10 @@ export class AuditService {
         : "";
     const prior = this.deps.context?.priorFor(traceId) ?? null;
     const priorContext = prior?.summary ?? "";
-    const intent = this.intentState(trace.agentId);
+    const intent = {
+      objective: intentSnapshot.state.objective,
+      extended: [...intentSnapshot.state.extended],
+    };
 
     const steps = trace.spans
       .filter((span) => span.kind !== "run")
@@ -519,6 +554,7 @@ export class AuditService {
       prompt: user,
       attempts,
       usedFallback: status === "degraded",
+      intentId: intentSnapshot.intentId,
     });
 
     // Upgrades the deterministic digest to the model's compression. A blank or
@@ -555,7 +591,7 @@ export class AuditService {
         },
       ),
       verdict?.context_summary ?? "",
-      this.deps.intent?.currentId(trace.agentId) ?? "",
+      intentSnapshot.intentId,
       healthOf(status),
     );
   }
@@ -569,6 +605,7 @@ export class AuditService {
       prompt: string;
       attempts: AuditorCallAttempt[];
       usedFallback: boolean;
+      intentId: string;
     },
   ) {
     const spans = input.attempts.map((attempt, index) => {
@@ -586,7 +623,7 @@ export class AuditService {
     this.deps.auditStore.appendAuditorSpans(
       trace,
       spans,
-      this.deps.intent?.currentId(trace.agentId) ?? "",
+      input.intentId,
     );
   }
 
