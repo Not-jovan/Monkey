@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 import { api } from "../api";
 import type {
   AuditHealth,
@@ -287,8 +287,9 @@ export function TraceAuditor({
   intent,
   context,
   auditorSpans,
-  metaAudit,
-  metaAuditedAt,
+  auditTraceId,
+  legacyMetaAudit,
+  legacyMetaAuditedAt,
   onShowStep,
   focusedFindingId,
 }: {
@@ -298,25 +299,35 @@ export function TraceAuditor({
   intent: TraceIntentView | null;
   context: ContextView | null;
   auditorSpans: TraceSpan[];
-  metaAudit: AuditTraceStep[];
-  metaAuditedAt: string | null;
+  auditTraceId: string | null;
+  legacyMetaAudit: AuditTraceStep[];
+  legacyMetaAuditedAt: string | null;
   onShowStep: (spanId: string) => void;
   focusedFindingId?: string | null;
 }) {
   const [view, setView] = useState<AuditorView>("list");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const queryClient = useQueryClient();
-  const runMetaAudit = useMutation({
-    mutationFn: () => api.auditAuditor(trace.id),
+  const navigate = useNavigate();
+  // Judges the auditor whose steps are shown below — which is a trace like any
+  // other, so this is the same call at every depth. The answer lands on that
+  // trace, which is where we then go.
+  const auditTheAuditor = useMutation({
+    mutationFn: () => {
+      if (auditTraceId === null) {
+        throw new Error("This run has not been audited yet.");
+      }
+      return api.audit(auditTraceId);
+    },
     onSuccess: () => {
-      // The findings live on the auditor payload, so re-read it rather than
-      // keeping a second copy here that can disagree with the server. The key
-      // has to be the one TraceDetailPage reads under, or the meta-audit lands
-      // on the server and the panel stays empty until a manual reload.
-      void queryClient.invalidateQueries({ queryKey: ["audit", trace.id] });
+      // Both keys, because the destination page reads under both and would
+      // otherwise show the state from before this audit ran.
+      void queryClient.invalidateQueries({ queryKey: ["audit", auditTraceId] });
+      void queryClient.invalidateQueries({ queryKey: ["trace", auditTraceId] });
+      void navigate("/traces/" + auditTraceId);
     },
   });
-  const metaAudit_pending = runMetaAudit.isPending;
+  const auditPending = auditTheAuditor.isPending;
   const healthNotes = findings.filter(
     (finding) => finding.category === "audit-health",
   );
@@ -353,27 +364,31 @@ export function TraceAuditor({
         <p className="auditor-health-body">{copy.body}</p>
       </section>
 
-      {(metaAudit.length > 0 || runMetaAudit.isError) && (
+      {auditTheAuditor.isError && (
+        <p className="intent-change-error" role="alert">
+          {auditTheAuditor.error instanceof Error
+            ? auditTheAuditor.error.message
+            : "The auditor could not be audited."}
+        </p>
+      )}
+
+      {/* Recorded when an audit of the auditor lived on the audited run's own
+          document, before the auditor's work became a trace. Read-only, and
+          shown only where one was actually taken: a finding already recorded
+          should not vanish because the shape around it changed. */}
+      {legacyMetaAudit.length > 0 && (
         <section className="meta-audit" aria-labelledby="meta-audit-heading">
           <div className="trace-steps-head">
             <h2 className="eyebrow" id="meta-audit-heading">
-              Audit of the auditor
+              Audit of the auditor · recorded by an earlier version
             </h2>
-            {metaAuditedAt && (
+            {legacyMetaAuditedAt && (
               <span className="muted-cell">
-                {new Date(metaAuditedAt).toLocaleString()}
+                {new Date(legacyMetaAuditedAt).toLocaleString()}
               </span>
             )}
           </div>
-          {runMetaAudit.isError ? (
-            <p className="intent-change-error" role="alert">
-              {runMetaAudit.error instanceof Error
-                ? runMetaAudit.error.message
-                : "The meta-audit could not be run."}
-            </p>
-          ) : (
-            <SpanFindings findings={metaAudit} includeAuditHealth />
-          )}
+          <SpanFindings findings={legacyMetaAudit} includeAuditHealth />
         </section>
       )}
 
@@ -386,16 +401,28 @@ export function TraceAuditor({
             Auditor steps
           </h2>
           <div className="auditor-actions">
-            {/* Deliberately a button and not something that happens on its own:
-                auditing the auditor produces auditor steps, so doing it
-                automatically would keep feeding itself. */}
+            {/* The steps below belong to a run of their own, which reads like
+                any other trace — so it opens like one, at any depth. */}
+            {auditTraceId && (
+              <Link
+                className="button button-ghost"
+                to={"/traces/" + auditTraceId}
+              >
+                Open this auditor&rsquo;s trace
+              </Link>
+            )}
+            {/* Deliberately a button and not something that happens on its own.
+                An auditor's steps are real trace spans, so judging them
+                produces more of the same; if this ran automatically it would
+                feed itself without limit. Every level is one click, and the
+                stack goes as deep as someone chooses to take it. */}
             <button
               type="button"
               className="button button-ghost"
-              disabled={metaAudit_pending || auditorSpans.length === 0}
-              onClick={() => runMetaAudit.mutate()}
+              disabled={auditPending || auditTraceId === null}
+              onClick={() => auditTheAuditor.mutate()}
             >
-              {metaAudit_pending ? "Auditing…" : "Audit this auditor"}
+              {auditPending ? "Auditing…" : "Audit this auditor"}
             </button>
             <a
               className="button button-ghost"

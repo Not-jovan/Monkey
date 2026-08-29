@@ -15,6 +15,10 @@ interface TraceStoreEvents {
 export class TraceStore extends EventEmitter<TraceStoreEvents> {
   private readonly traces = new Map<string, TraceRecord>();
   private readonly writeQueues = new Map<string, Promise<void>>();
+  // audited trace id -> the auditor trace that judged it. An index rather than
+  // a scan because every trace detail request asks the question, and the answer
+  // is one entry per audit.
+  private readonly auditorOf = new Map<string, string>();
 
   constructor(
     private readonly directory: string,
@@ -49,6 +53,7 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
           }
         }
         this.traces.set(trace.id, trace);
+        this.indexAudit(trace);
       } catch {
         // Skip unreadable files rather than refusing to boot.
       }
@@ -57,8 +62,35 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
 
   create(trace: TraceRecord) {
     this.traces.set(trace.id, trace);
+    this.indexAudit(trace);
     this.persistTrace(trace.id);
     return trace;
+  }
+
+  // The auditor trace that judged this one, if any. Re-auditing replaces the
+  // previous answer rather than accumulating, so this is the newest audit.
+  auditorTraceFor(traceId: string) {
+    return this.auditorOf.get(traceId) ?? null;
+  }
+
+  // The chain from this trace up to the agent run at the root of it, oldest
+  // first. Walks auditOf with a seen-set: a corrupted file that pointed a
+  // trace at itself would otherwise hang the request that read it.
+  auditChain(traceId: string): TraceRecord[] {
+    const chain: TraceRecord[] = [];
+    const seen = new Set<string>();
+    let current = this.traces.get(traceId);
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      chain.unshift(structuredClone(current));
+      current = current.auditOf ? this.traces.get(current.auditOf) : undefined;
+    }
+    return chain;
+  }
+
+  private indexAudit(trace: TraceRecord) {
+    if (trace.auditOf === null) return;
+    this.auditorOf.set(trace.auditOf, trace.id);
   }
 
   get(traceId: string) {

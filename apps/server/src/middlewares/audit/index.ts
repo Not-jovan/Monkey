@@ -1,21 +1,27 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { ArkClient } from "../../ark-client.js";
+import { ArkRunner } from "../../ark-runner.js";
 import type { AppConfig } from "../../config.js";
 import type { InstructionsDrift } from "../../agent-service.js";
 import type { ContextStore } from "../context/context-store.js";
 import type { IntentMiddleware } from "../intent/index.js";
+import type { TraceService } from "../trace/trace-service.js";
 import type { TraceStore } from "../trace/trace-store.js";
 import { AuditMemory } from "./audit-memory.js";
 import { auditSteps, instructionsDriftFinding } from "./audit-model.js";
 import { AuditService } from "./audit-service.js";
 import { AuditStore } from "./audit-store.js";
+import { VERDICT_MAX_TOKENS } from "./auditor-model.js";
 
 export async function createAuditMiddleware(input: {
   config: AppConfig;
   client: ArkClient;
   enabled: boolean;
   traceStore: TraceStore;
+  // Records the auditor's own run as a trace, which is what makes that run
+  // openable, and so auditable in turn.
+  traceService: TraceService;
   contextStore: ContextStore;
   intent: IntentMiddleware;
   onStoreError: (message: string, error?: unknown) => void;
@@ -86,8 +92,13 @@ export async function createAuditMiddleware(input: {
   const auditService = new AuditService({
     traceStore,
     auditStore,
+    traceService: input.traceService,
     context: input.contextStore,
-    client: input.client,
+    // The auditor runs through the same interface an Agent does. In-process
+    // rather than by spawning a CLI, because step audits fire while the run
+    // they judge is still going and have to keep up with it — but through the
+    // interface all the same, so the trace pipeline records what it did.
+    runner: new ArkRunner(input.client, config, VERDICT_MAX_TOKENS),
     securityModel: config.auditSecurityModel,
     intentModel: config.auditIntentModel,
     networkWhitelist: config.auditNetworkWhitelist,

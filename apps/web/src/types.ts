@@ -142,6 +142,10 @@ export interface TraceRecord {
   recoveredErrorCount: number;
   evidenceComplete: boolean;
   unrecognizedEvents: number;
+  // Set when this run is an audit of another trace, and how many audits deep
+  // that makes it. An agent's own run is depth 0 with no target.
+  auditOf: string | null;
+  auditDepth: number;
   spans: TraceSpan[];
 }
 
@@ -183,10 +187,15 @@ export interface AuditorTrace {
   agentId: string;
   health: AuditHealth;
   spans: TraceSpan[];
-  // Findings from auditing the auditor. Empty until someone asks: this never
-  // runs on its own, because its output would otherwise be the next run's input.
-  metaAudit: AuditTraceStep[];
-  metaAuditedAt: string | null;
+  // The auditor's own run. Present once this trace has been audited, and what
+  // "open this auditor's trace" navigates to — the level above reads it exactly
+  // as this level reads the Agent's run.
+  auditTraceId: string | null;
+  // An audit of the auditor recorded before that run had a trace of its own.
+  // Read-only: nothing writes here any more, but a finding already recorded
+  // should not vanish because the shape around it changed.
+  legacyMetaAudit: AuditTraceStep[];
+  legacyMetaAuditedAt: string | null;
 }
 
 export interface AuditTraceStep {

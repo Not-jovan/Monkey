@@ -2,6 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { blamesAgent } from "../../failures.js";
+import { isAuditorTrace } from "./trace-model.js";
 import { HttpError } from "../../errors.js";
 import type { MiddlewareDeps } from "../types.js";
 
@@ -43,38 +44,44 @@ export function registerTraceRoutes(
     const { id } = idParams.parse(request.params);
     const auditCounts = deps.auditStore.countsByTrace();
     const health = deps.auditStore.healthByTrace();
-    const traces = deps.traceStore.listByAgent(id).map((trace) => {
-      let errorCount = 0;
-      for (const span of trace.spans) {
-        if (span.status === "error") errorCount += 1;
-      }
-      return {
-        id: trace.id,
-        agentId: trace.agentId,
-        status: trace.status,
-        startedAt: trace.startedAt,
-        endedAt: trace.endedAt,
-        prompt: trace.prompt,
-        model: trace.model,
-        usage: trace.usage,
-        spanCount: trace.spans.length,
-        errorCount,
-        failingSpanId: trace.failingSpanId,
-        // Why it failed, not merely that it did.
-        failure: trace.failure,
-        // A run that succeeded on the fifth attempt is not a clean run.
-        recoveredErrorCount: trace.recoveredErrorCount,
-        evidenceComplete: trace.evidenceComplete,
-        warningCount: auditCounts.get(trace.id)?.warnings ?? 0,
-        // Apart from warningCount for the same reason auditHealth is: the
-        // auditor saying "I could not settle this" is not the auditor saying
-        // the agent did something wrong.
-        suspicionCount: auditCounts.get(trace.id)?.suspicions ?? 0,
-        // Reported apart from warningCount: an auditor outage is not an agent
-        // defect, and counting the two together made every outage look like one.
-        auditHealth: health.get(trace.id) ?? "ok",
-      };
-    });
+    // Auditor runs share the agent's id, because that is who they are about.
+    // They are not runs of the Agent though, so they are not in its run list —
+    // you reach one by opening the run it judged.
+    const traces = deps.traceStore
+      .listByAgent(id)
+      .filter((trace) => !isAuditorTrace(trace))
+      .map((trace) => {
+        let errorCount = 0;
+        for (const span of trace.spans) {
+          if (span.status === "error") errorCount += 1;
+        }
+        return {
+          id: trace.id,
+          agentId: trace.agentId,
+          status: trace.status,
+          startedAt: trace.startedAt,
+          endedAt: trace.endedAt,
+          prompt: trace.prompt,
+          model: trace.model,
+          usage: trace.usage,
+          spanCount: trace.spans.length,
+          errorCount,
+          failingSpanId: trace.failingSpanId,
+          // Why it failed, not merely that it did.
+          failure: trace.failure,
+          // A run that succeeded on the fifth attempt is not a clean run.
+          recoveredErrorCount: trace.recoveredErrorCount,
+          evidenceComplete: trace.evidenceComplete,
+          warningCount: auditCounts.get(trace.id)?.warnings ?? 0,
+          // Apart from warningCount for the same reason auditHealth is: the
+          // auditor saying "I could not settle this" is not the auditor saying
+          // the agent did something wrong.
+          suspicionCount: auditCounts.get(trace.id)?.suspicions ?? 0,
+          // Reported apart from warningCount: an auditor outage is not an agent
+          // defect, and counting the two together made every outage look like one.
+          auditHealth: health.get(trace.id) ?? "ok",
+        };
+      });
     return { traces };
   });
 
@@ -166,6 +173,16 @@ export function registerTraceRoutes(
       intentId,
       intent: deps.intentService?.forTrace(trace.agentId, intentId) ?? null,
       context: deps.contextService?.view(id) ?? null,
+      // The auditor that judged this trace, if it has been judged.
+      auditTraceId: deps.traceStore.auditorTraceFor(id),
+      // Everything this trace is an audit of, up to the Agent run at the root,
+      // oldest first. Resolved here rather than by the client walking auditOf
+      // one request at a time — the chain has no ceiling, and the breadcrumb
+      // needs all of it at once.
+      auditChain: deps.traceStore.auditChain(id).map((entry) => ({
+        id: entry.id,
+        auditDepth: entry.auditDepth,
+      })),
     };
   }
 }

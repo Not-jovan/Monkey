@@ -53,6 +53,7 @@ const audit = await createAuditMiddleware({
   client: arkClient,
   enabled: auditingAvailable,
   traceStore: trace.traceStore,
+  traceService: trace.traceService,
   contextStore: context.contextStore,
   intent,
   onStoreError,

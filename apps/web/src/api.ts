@@ -23,6 +23,12 @@ export interface TraceDetail {
   intentId: string | null;
   intent: TraceIntentView | null;
   context: ContextView | null;
+  // The auditor that judged this trace, if it has been judged.
+  auditTraceId: string | null;
+  // Everything this trace is an audit of, up to the Agent run at the root of
+  // it, oldest first. Resolved server-side because the chain has no ceiling and
+  // the breadcrumb needs all of it at once.
+  auditChain: { id: string; auditDepth: number }[];
 }
 
 export interface IntentView {
@@ -172,11 +178,12 @@ export const api = {
       "/api/traces/" + id + "/download",
     ),
   auditor: (id: string) => request<AuditorTrace>("/api/audits/" + id),
-  // Audits the auditor's own run. Manual by design; the server has no path
-  // that reaches this on its own.
-  auditAuditor: (id: string) =>
-    request<{ traceId: string; findings: AuditTraceStep[]; auditedAt: string | null }>(
-      "/api/audits/" + id + "/meta",
+  // Audits any trace, whatever produced it: an Agent's run, or the run of the
+  // auditor that judged it, however deep the stack goes. Manual by design — the
+  // server audits depth 0 on its own and nothing else, ever.
+  audit: (id: string) =>
+    request<{ traceId: string; auditTraceId: string | null }>(
+      "/api/traces/" + id + "/audit",
       { method: "POST" },
     ),
   auditArchiveUrl: (id: string) => "/api/audits/" + id + "/archive",

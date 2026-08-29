@@ -47,7 +47,9 @@ async function makeApp(environment: Record<string, string> = {}) {
   const log = () => {};
   // Auditing off: these tests write the findings they assert on directly into
   // the store, and a live auditor would queue a model call per completed run.
-  const client = { complete: async () => ({ content: "" }) };
+  const client = {
+    complete: async () => ({ content: "", usage: null, model: null }),
+  };
 
   const trace = await createTraceMiddleware({
     config,
@@ -71,6 +73,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     client,
     enabled: false,
     traceStore: trace.traceStore,
+    traceService: trace.traceService,
     contextStore: context.contextStore,
     intent,
     onStoreError,
@@ -256,7 +259,7 @@ describe("Glassbox routes", () => {
   });
 
   it("serves the auditor trace separately from the agent trace", async () => {
-    const { app, auditStore, traceStore } = await makeApp();
+    const { app, traceStore } = await makeApp();
     cleanups.push(async () => {
       await app.close();
     });
@@ -282,17 +285,40 @@ describe("Glassbox routes", () => {
       recoveredErrorCount: 0,
       evidenceComplete: true,
       unrecognizedEvents: 0,
+      auditOf: null,
+      auditDepth: 0,
       spans: [],
     });
-    const trace = traceStore.get(RUN_ID);
-    expect(trace).toBeTruthy();
-    if (!trace) return;
-    auditStore.appendAuditorSpans(
-      trace,
-      [
+    // The auditor's work is a trace of its own, pointed at the run it judged.
+    const AUDIT_TRACE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    traceStore.create({
+      version: 1,
+      id: AUDIT_TRACE_ID,
+      agentId: AGENT_ID,
+      conversationId: null,
+      status: "completed",
+      startedAt: "2026-08-28T00:00:00.100Z",
+      endedAt: "2026-08-28T00:00:00.400Z",
+      prompt: "Audit of trace " + RUN_ID,
+      model: null,
+      usage: {
+        inputTokens: 0,
+        cachedTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        toolTokens: 0,
+      },
+      failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      auditOf: RUN_ID,
+      auditDepth: 1,
+      spans: [
         {
           id: "auditor-span-1",
-          traceId: RUN_ID,
+          traceId: AUDIT_TRACE_ID,
           parentId: null,
           name: "audit.step",
           label: "Step audit · Prompt",
@@ -312,8 +338,7 @@ describe("Glassbox routes", () => {
           error: null,
         },
       ],
-      "",
-    );
+    });
 
     const agentTrace = await app.inject({
       method: "GET",
@@ -340,6 +365,17 @@ describe("Glassbox routes", () => {
     expect(auditorBody.spans).toHaveLength(1);
     expect(auditorBody.spans[0]?.label).toBe("Step audit · Prompt");
     expect(auditorBody.spans[0]?.attributes.context).toContain("cat .env");
+
+    // The auditor's run shares the agent's id, because it is about that agent —
+    // but it is not a run of the Agent, so it is not in the Agent's run list.
+    // You reach it by opening the run it judged.
+    const runs = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces",
+    });
+    const listed = runs.json<{ traces: { id: string }[] }>().traces;
+    expect(listed.map((entry) => entry.id)).toContain(RUN_ID);
+    expect(listed.map((entry) => entry.id)).not.toContain(AUDIT_TRACE_ID);
 
     const missing = await app.inject({
       method: "GET",
@@ -430,6 +466,8 @@ describe("Glassbox routes", () => {
       recoveredErrorCount: 0,
       evidenceComplete: true,
       unrecognizedEvents: 0,
+      auditOf: null,
+      auditDepth: 0,
       spans: [],
     });
     const trace = traceStore.get(RUN_ID);
@@ -748,6 +786,8 @@ describe("Glassbox routes", () => {
         recoveredErrorCount: 0,
         evidenceComplete: true,
         unrecognizedEvents: 0,
+        auditOf: null,
+        auditDepth: 0,
         spans: [],
       });
       traceStore.updateTrace(id, (trace) => {
@@ -824,6 +864,8 @@ describe("Glassbox routes", () => {
         recoveredErrorCount: 0,
         evidenceComplete: true,
         unrecognizedEvents: 0,
+        auditOf: null,
+        auditDepth: 0,
         spans: [],
       });
     }

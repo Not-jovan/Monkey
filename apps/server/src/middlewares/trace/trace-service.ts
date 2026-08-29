@@ -14,7 +14,11 @@ import type {
   SpanStatus,
   TraceSpan,
 } from "./trace-model.js";
-import { emptyUsage, hasJudgeableEvidence } from "./trace-model.js";
+import {
+  emptyUsage,
+  hasJudgeableEvidence,
+  isAuditorTrace,
+} from "./trace-model.js";
 import { classifyRunFailure, type RunFailure } from "../../failures.js";
 import type { TraceStore } from "./trace-store.js";
 
@@ -28,6 +32,11 @@ interface RunStartAgent {
 interface RunStartInput {
   id: string;
   prompt: string;
+  // Set when this run is an audit of another trace. Carried onto the record so
+  // the automatic audit subscription can tell an agent's run from an auditor's
+  // and fire only for the former.
+  auditOf?: string | null | undefined;
+  auditDepth?: number | undefined;
 }
 
 interface RunEndInput {
@@ -280,6 +289,7 @@ export class TraceService {
     const prompt = this.redactor.redactText(run.prompt);
     const rootSpanId = randomUUID();
     const promptSpanId = randomUUID();
+    const auditOf = run.auditOf ?? null;
     this.store.create({
       version: 1,
       id: run.id,
@@ -296,6 +306,8 @@ export class TraceService {
       recoveredErrorCount: 0,
       evidenceComplete: true,
       unrecognizedEvents: 0,
+      auditOf: run.auditOf ?? null,
+      auditDepth: run.auditDepth ?? 0,
       spans: [],
     });
     this.store.appendSpan(run.id, {
@@ -303,7 +315,11 @@ export class TraceService {
       traceId: run.id,
       parentId: null,
       name: "agent.run",
-      label: "Agent run · " + agent.name,
+      // An auditor's run is named for what it judged. "Agent run · Auditor"
+      // read as though the Agent were called Auditor.
+      label: auditOf
+        ? "Audit of run " + auditOf.slice(0, 8)
+        : "Agent run · " + agent.name,
       kind: "run",
       actor: "agent",
       status: "running",
@@ -329,7 +345,15 @@ export class TraceService {
       startedAt,
       endedAt: startedAt,
       durationMs: 0,
-      attributes: { prompt, promptLength: prompt.length },
+      attributes: {
+        prompt,
+        promptLength: prompt.length,
+        // Nobody prompted the auditor. Its prompt is a sentence this service
+        // wrote to open the trace, so it is kept for the record but is not a
+        // step the auditor took — layoutOnly is what the step list, the
+        // timeline and the canvas all read to tell those apart.
+        ...(auditOf ? { layoutOnly: true } : {}),
+      },
       error: null,
     });
     this.runs.set(run.id, {
@@ -344,7 +368,13 @@ export class TraceService {
       conversationSpawn: new Map(),
       completed: false,
     });
-    this.activeRunByAgent.set(agent.id, run.id);
+    // An auditor's run shares the Agent's id but is not the Agent running, so
+    // it must not become what "the Agent's active run" resolves to. Terminating
+    // an Agent mid-audit would otherwise file the intervention on the auditor's
+    // trace instead of on the run the user was actually stopping.
+    if (!isAuditorTrace({ auditOf: run.auditOf ?? null })) {
+      this.activeRunByAgent.set(agent.id, run.id);
+    }
     if (agent.codexThreadId) {
       this.bindConversation(agent.codexThreadId, run.id);
     }
@@ -633,9 +663,13 @@ export class TraceService {
   }
 
   onUserIntervention(agentId: string, action: "terminate") {
+    // Newest first, and an auditor's run is newer than the Agent run it judged,
+    // so the fallback has to skip them for the same reason the line above does.
     const runId =
       this.activeRunByAgent.get(agentId) ??
-      this.store.listByAgent(agentId)[0]?.id;
+      this.store
+        .listByAgent(agentId)
+        .find((trace) => !isAuditorTrace(trace))?.id;
     if (!runId) return null;
     const trace = this.store.get(runId);
     if (!trace) return null;
@@ -1104,6 +1138,33 @@ export class TraceService {
         }
       });
     }
+  }
+
+  // An in-process run has no event stream to normalize: the caller made the
+  // call itself and already holds the span describing it. Parented directly
+  // under the run rather than under a turn, because an auditor does not take
+  // turns — it asks a fixed set of questions about one trace and stops.
+  //
+  // Usage is rolled up here so an auditor's run accounts for its tokens the
+  // way a runtime's run does, where the same numbers arrive over OTLP.
+  recordModelCall(runId: string, span: TraceSpan) {
+    const state = this.runs.get(runId);
+    if (!state) return null;
+    const appended = this.store.appendSpan(runId, {
+      ...span,
+      traceId: runId,
+      parentId: state.rootSpanId,
+    });
+    if (!appended) return null;
+    const input = span.attributes.inputTokens;
+    const output = span.attributes.outputTokens;
+    if (typeof input === "number" || typeof output === "number") {
+      this.store.updateTrace(runId, (trace) => {
+        if (typeof input === "number") trace.usage.inputTokens += input;
+        if (typeof output === "number") trace.usage.outputTokens += output;
+      });
+    }
+    return appended;
   }
 
   private ensureTurn(runId: string, state: RunState, timestamp: string) {

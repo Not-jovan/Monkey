@@ -1,4 +1,15 @@
 import { z } from "zod";
+import type { RunUsage } from "./types.js";
+
+// Every field is optional and read defensively: a malformed or absent usage
+// block must never cost the caller the verdict it came with.
+const usageResponse = z.object({
+  prompt_tokens: z.number().optional(),
+  completion_tokens: z.number().optional(),
+  prompt_tokens_details: z
+    .object({ cached_tokens: z.number().optional() })
+    .optional(),
+});
 
 const completionResponse = z.object({
   choices: z
@@ -10,6 +21,11 @@ const completionResponse = z.object({
       }),
     )
     .min(1),
+  usage: usageResponse.optional(),
+  // What actually served the request, which is not always what was asked for:
+  // Ark resolves an endpoint id to a concrete model. Reported so an auditor
+  // run can name its model the way a runtime run does.
+  model: z.string().optional(),
 });
 
 const errorResponse = z.object({
@@ -36,6 +52,20 @@ function isAbortError(error: unknown) {
   return error.name === "AbortError";
 }
 
+function readUsage(usage: z.infer<typeof usageResponse> | undefined): RunUsage | null {
+  if (!usage) return null;
+  const cached = usage.prompt_tokens_details?.cached_tokens;
+  return {
+    ...(usage.prompt_tokens !== undefined
+      ? { inputTokens: usage.prompt_tokens }
+      : {}),
+    ...(cached !== undefined ? { cachedInputTokens: cached } : {}),
+    ...(usage.completion_tokens !== undefined
+      ? { outputTokens: usage.completion_tokens }
+      : {}),
+  };
+}
+
 interface ArkClientConfig {
   arkBaseUrl: string;
   arkApiKey: string;
@@ -47,9 +77,15 @@ export function createArkClient(config: ArkClientConfig, timeoutMs = 60_000) {
     system: string;
     user: string;
     maxTokens?: number;
+    // Cancels this request. Provided by a caller that owns cancellation for a
+    // whole run rather than for one call, so the timer below stays the only
+    // deadline this client imposes.
+    signal?: AbortSignal;
   }) => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const abort = () => controller.abort();
+    input.signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, timeoutMs);
     try {
       const response = await fetch(config.arkBaseUrl + "/chat/completions", {
         method: "POST",
@@ -80,9 +116,18 @@ export function createArkClient(config: ArkClientConfig, timeoutMs = 60_000) {
         );
       }
       const parsed = completionResponse.parse(body);
-      return { content: parsed.choices[0]?.message.content ?? "" };
+      return {
+        content: parsed.choices[0]?.message.content ?? "",
+        usage: readUsage(parsed.usage),
+        model: parsed.model ?? null,
+      };
     } catch (error) {
       if (isAbortError(error)) {
+        // A caller-driven cancellation is not a timeout, and reporting it as
+        // one would blame the provider for something the platform did.
+        if (input.signal?.aborted) {
+          throw new Error("Audit model request was cancelled");
+        }
         throw new Error(
           "Audit model timed out after " + timeoutMs / 1000 + "s",
         );
@@ -90,6 +135,7 @@ export function createArkClient(config: ArkClientConfig, timeoutMs = 60_000) {
       throw error;
     } finally {
       clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abort);
     }
   };
   return { complete };

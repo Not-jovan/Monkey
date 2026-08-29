@@ -4,6 +4,7 @@ import { describeIntent, type IntentState } from "../intent/intent-model.js";
 import type { IntentService } from "../intent/intent-service.js";
 import {
   hasJudgeableEvidence,
+  isAuditorTrace,
   readAttribute,
   type TraceRecord,
   type TraceSpan,
@@ -11,8 +12,8 @@ import {
 import type { TraceStore } from "../trace/trace-store.js";
 import { detectSecretBindings } from "../trace/secrets.js";
 import type { ContextStore } from "../context/context-store.js";
-import { isPermanentProviderError } from "../../failures.js";
-import type { ArkClient } from "../../ark-client.js";
+import type { AgentRunner } from "../../types.js";
+import type { TraceService } from "../trace/trace-service.js";
 import {
   auditorCallSpan,
   AuditorModel,
@@ -33,6 +34,7 @@ import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js
 import { reportForStep } from "./step-findings.js";
 import {
   backTraceVerdict,
+  buildAuditorStepContext,
   buildMetaContext,
   describeFollowThrough,
   followThroughVerdict,
@@ -43,8 +45,8 @@ import {
   BACK_TRACE_SYSTEM_PROMPT,
   FORWARD_TRACE_SYSTEM_PROMPT,
   INTENT_SYSTEM_PROMPT,
+  META_STEP_SYSTEM_PROMPT,
   META_SYSTEM_PROMPT,
-  type FollowThrough,
   type OpenQuestion,
 } from "./run-checks.js";
 import { activityFromSpan } from "./step-activity.js";
@@ -72,6 +74,14 @@ import {
 } from "./step-checks.js";
 const MAX_STEP_AUDITS_PER_TRACE = 30;
 
+// The budget for an audit someone asked for, which is a different thing from
+// the automatic one above. That one runs alongside a live run and has to keep
+// up with it; this one is deliberate, one-shot, and judging an auditor means
+// judging every question it asked. An auditor's trace holds roughly seven spans
+// per Agent step, so the automatic cap would truncate anything past a four-step
+// run.
+const MAX_REQUESTED_STEP_AUDITS = 150;
+
 // The forward-trace shows the model every directive against every later step,
 // so both sides are bounded. The step cap keeps the newest steps: an
 // instruction is carried out soon after it is read far more often than at the
@@ -87,6 +97,17 @@ const MAX_RESUMED_RUN_AUDITS = 20;
 // A run whose auditor fell back to the secondary model is not the same as one
 // whose auditor worked, and neither is a defect in the agent. Recorded so the
 // UI can say which of the three happened.
+// Said the same way whether the step had a verdict to weigh or not, so one
+// masking failure does not read as two different problems.
+function leakedCredentialFinding(span: TraceSpan) {
+  return (
+    "A credential is readable in the auditor's own record for " +
+    span.label +
+    ". Masking runs before a span is stored, so this reached the auditor " +
+    "unmasked."
+  );
+}
+
 function healthOf(status: "completed" | "degraded" | "failed"): AuditHealth {
   if (status === "completed") return "ok";
   return status;
@@ -95,7 +116,12 @@ function healthOf(status: "completed" | "degraded" | "failed"): AuditHealth {
 interface AuditServiceDeps {
   traceStore: TraceStore;
   auditStore: AuditStore;
-  client: ArkClient;
+  // The auditor executes through the same interface an Agent does, so its own
+  // work is recorded as a trace and can be audited in turn.
+  runner: AgentRunner;
+  // Opens and closes the auditor's own trace. Optional so a test that only
+  // cares about findings does not have to stand up the trace pipeline.
+  traceService?: TraceService;
   securityModel: string;
   intentModel: string;
   // null disables the network policy check; [] denies every destination.
@@ -109,6 +135,10 @@ interface AuditServiceDeps {
   // cares about findings does not have to provide a filesystem.
   memory?: AuditMemory;
   enabled: boolean;
+  // How many of an auditor's steps a requested audit will judge. Defaulted so
+  // existing callers need no change, and tunable for the same reason the batch
+  // settings are: what is affordable depends on the deployment.
+  requestedStepBudget?: number;
   // BatchCaller tuning. Defaulted so existing callers need no change.
   batchSize?: number;
   batchIntervalSeconds?: number;
@@ -210,7 +240,7 @@ export class AuditService {
   private readonly auditors = new Map<string, AgentChatAuditor>();
 
   constructor(private readonly deps: AuditServiceDeps) {
-    this.model = new AuditorModel(deps.client, deps.log);
+    this.model = new AuditorModel(deps.runner, deps.log);
     this.batch = new BatchCaller({
       bufferSize: deps.batchSize ?? DEFAULT_BATCH_SIZE,
       bufferInterval: deps.batchIntervalSeconds ?? DEFAULT_BATCH_INTERVAL,
@@ -222,6 +252,7 @@ export class AuditService {
   start() {
     if (!this.deps.enabled) return;
     this.deps.traceStore.on("span", ({ trace, span }) => {
+      if (isAuditorTrace(trace)) return;
       if (!this.shouldAuditStep(span, trace)) return;
       const chat = this.auditorFor(trace);
       // Pinned here, synchronously, rather than when the audit runs: a
@@ -234,6 +265,7 @@ export class AuditService {
       );
     });
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
+      if (isAuditorTrace(trace)) return;
       const chat = this.auditorFor(trace);
       chat.pinIntent(() => this.captureIntent(trace));
       this.enqueue(() => chat.auditAll());
@@ -253,6 +285,7 @@ export class AuditService {
       .list()
       .filter(
         (trace) =>
+          !isAuditorTrace(trace) &&
           trace.status !== "running" &&
           !this.deps.auditStore.isRunComplete(trace.id),
       );
@@ -289,7 +322,7 @@ export class AuditService {
       {
         runStepAudit: (chat, spanId) => this.stepAudit(chat, spanId),
         runAll: (chat) => this.intentAudit(chat),
-        runMetaAudit: (chat) => this.metaAudit(chat),
+        runRequestedAudit: (chat) => this.requestedAudit(chat),
       },
     );
     this.auditors.set(trace.id, created);
@@ -641,6 +674,17 @@ export class AuditService {
   // One check: its own model call, its own auditor span, its own verdict. The
   // label travels with the result so a failure can say which question went
   // unanswered.
+  // Who the auditor is running as, for the runner. The workspace is the chat's
+  // memory folder — the in-process runner ignores it, but it is where this
+  // auditor's artifacts already go, so it is the honest answer rather than a
+  // placeholder.
+  private auditorRun(trace: TraceRecord) {
+    return {
+      agentId: trace.agentId,
+      workspacePath: this.auditorFor(trace).memoryFolderPath,
+    };
+  }
+
   private async stepCheck<Schema extends z.ZodType>(
     trace: TraceRecord,
     spanId: string,
@@ -653,6 +697,7 @@ export class AuditService {
     },
   ) {
     const { verdict, status, failure, attempts } = await this.model.complete(
+      this.auditorRun(trace),
       this.deps.securityModel,
       this.deps.intentModel,
       check.system,
@@ -760,6 +805,7 @@ export class AuditService {
     ].join("\n");
 
     const { verdict, status, failure, attempts } = await this.model.complete(
+      this.auditorRun(trace),
       this.deps.securityModel,
       this.deps.intentModel !== this.deps.securityModel
         ? this.deps.intentModel
@@ -830,7 +876,7 @@ export class AuditService {
     trace: TraceRecord,
     intentId: string,
     open: OpenQuestion[],
-  ): Promise<AuditTraceStep[]> {
+  ) {
     const identity = {
       id: randomUUID(),
       traceId: trace.id,
@@ -878,6 +924,7 @@ export class AuditService {
     ].join("\n");
 
     const { verdict, status, failure, attempts } = await this.model.complete(
+      this.auditorRun(trace),
       this.deps.securityModel,
       this.deps.intentModel !== this.deps.securityModel
         ? this.deps.intentModel
@@ -996,6 +1043,7 @@ export class AuditService {
       .join("\n");
 
     const { verdict, status, failure, attempts } = await this.model.complete(
+      this.auditorRun(trace),
       this.deps.intentModel,
       null,
       INTENT_SYSTEM_PROMPT,
@@ -1080,8 +1128,18 @@ export class AuditService {
       intentId,
       healthOf(status),
     );
+    // The run-level pass is the last thing an auditor does for a chat, so this
+    // is where its own run ends. Until it does the auditor's trace reads as
+    // still running, and a trace that never ends is one nobody can audit.
+    this.closeAuditTrace(chat);
   }
 
+  // Every model attempt this auditor made, as spans on the auditor's own trace.
+  //
+  // They used to be stashed in an array on the audited trace's document, which
+  // made them unreachable by everything that understands a trace — including
+  // the auditor itself. Recording them here is what makes an auditor's run a
+  // thing that can be opened, read and judged like any other.
   private recordAuditorAttempts(
     trace: TraceRecord,
     input: {
@@ -1093,72 +1151,240 @@ export class AuditService {
       usedFallback: boolean;
     },
   ) {
-    const spans = input.attempts.map((attempt, index) => {
+    const traceService = this.deps.traceService;
+    if (!traceService) return;
+    const auditTraceId = this.openAuditTrace(trace);
+    if (auditTraceId === null) return;
+    input.attempts.forEach((attempt, index) => {
       const fallback = input.usedFallback && index === input.attempts.length - 1;
-      return auditorCallSpan({
-        traceId: trace.id,
-        name: input.name,
-        label: fallback ? input.label + " (fallback)" : input.label,
-        targetSpanId: input.targetSpanId,
-        prompt: input.prompt,
-        attempt,
-        fallback,
-      });
-    });
-    this.deps.auditStore.appendAuditorSpans(
-      trace,
-      spans,
-      // The chat's pinned spec, not whatever is current now: this call stamps
-      // the audit document, so reading fresh here would let a correction made
-      // mid-run relabel the whole run.
-      this.auditorFor(trace).intentId,
-    );
-  }
-
-  // Distinguishes "this model does not exist for us" from a transient failure:
-  // only the former is worth remembering, because rate limits and outages do
-  // recover.
-
-  // Audits the auditor's own run. Manual only: there is no subscription that
-  // reaches this, and it writes to metaAudit rather than auditorSpans, so its
-  // output can never become another meta-audit's input.
-  //
-  // The auditor's steps are already TraceSpans in the agent's own shape, so the
-  // trace it produced is auditable by the same machinery that judges an agent —
-  // that compatibility is what makes this possible at all.
-  async auditAuditor(chatId: string) {
-    const trace = this.deps.traceStore.get(chatId);
-    if (!trace) return null;
-    // The one-at-a-time guard lives on the chat's own auditor, so a second
-    // trigger cannot judge a half-written record.
-    const outcome = await this.auditorFor(trace).auditAuditor();
-    if (outcome === "in-flight") return "in-flight" as const;
-    return this.deps.auditStore.metaAudit(chatId);
-  }
-
-  private async metaAudit(chat: AgentChatAuditor) {
-    const trace = this.deps.traceStore.get(chat.chatId);
-    if (!trace) return;
-    // A snapshot, taken once. Anything appended while this runs belongs to the
-    // next meta-audit, not this one.
-    const auditorSpans = this.deps.auditStore.listAuditorSpans(chat.chatId);
-    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
-    await this.batch.queue(async () => {
-      const steps = await this.metaFindings(trace, auditorSpans, intentId);
-      this.deps.auditStore.recordMetaAudit(
-        trace,
-        steps,
-        intentId,
-        new Date().toISOString(),
+      traceService.recordModelCall(
+        auditTraceId,
+        auditorCallSpan({
+          traceId: auditTraceId,
+          name: input.name,
+          label: fallback ? input.label + " (fallback)" : input.label,
+          // Still the span on the *audited* trace, not on this one. It is the
+          // question's subject, and the UI resolves it against the trace this
+          // auditor was judging.
+          targetSpanId: input.targetSpanId,
+          prompt: input.prompt,
+          attempt,
+          fallback,
+        }),
       );
     });
   }
 
-  private async metaFindings(
+  // The auditor's own trace for this chat, opened on first use. One per audited
+  // chat rather than one per check: an auditor's run is the whole pass it makes
+  // over a trace, which is the unit AgentChatAuditor already bounds.
+  private openAuditTrace(trace: TraceRecord): string | null {
+    const traceService = this.deps.traceService;
+    if (!traceService) return null;
+    const chat = this.auditorFor(trace);
+    return chat.openAuditTrace(() => {
+      const auditTraceId = randomUUID();
+      traceService.onRunStart(
+        {
+          // The audited agent's own id. An auditor is not a separate agent —
+          // it has no workspace and no instructions of its own — and sharing
+          // the id keeps its findings, its memory folder and its archive
+          // filed with the run they are about. What separates the two is
+          // auditOf, which is also what the depth-0 gate reads.
+          id: trace.agentId,
+          name: "Auditor",
+          instructions:
+            "Judges trace " + trace.id + " against the specification it was run under.",
+          codexThreadId: null,
+        },
+        {
+          id: auditTraceId,
+          prompt: "Audit of trace " + trace.id,
+          auditOf: trace.id,
+          auditDepth: trace.auditDepth + 1,
+        },
+      );
+      return auditTraceId;
+    });
+  }
+
+  // Closes the auditor's trace once its pass over the run is finished. Called
+  // from the run-level audit, which is the last thing any pass does.
+  private closeAuditTrace(chat: AgentChatAuditor) {
+    const auditTraceId = chat.closeAuditTrace();
+    if (!auditTraceId) return;
+    this.deps.traceService?.onRunEnd(auditTraceId, {
+      status: "completed",
+      output: "Audit of trace " + chat.chatId + " complete.",
+    });
+  }
+
+  // Audits any trace on request, whatever produced it.
+  //
+  // This is the only entry point above depth 0, and it is uniform: auditing an
+  // Agent's run and auditing an auditor's run are the same operation on
+  // different traces. Level N+1 is this method called on the trace level N
+  // produced, so the stack goes as deep as someone chooses to click and stops
+  // the moment they stop.
+  //
+  // Returns the auditor trace it wrote, which is what the caller navigates to.
+  async audit(traceId: string) {
+    const trace = this.deps.traceStore.get(traceId);
+    if (!trace) return null;
+    // The one-at-a-time guard lives on the chat's own auditor, so a second
+    // trigger cannot judge a half-written record.
+    const outcome = await this.auditorFor(trace).auditOnRequest();
+    if (outcome === "in-flight") return "in-flight" as const;
+    return {
+      traceId,
+      auditTraceId: this.deps.traceStore.auditorTraceFor(traceId),
+    };
+  }
+
+  private async requestedAudit(chat: AgentChatAuditor) {
+    const trace = this.deps.traceStore.get(chat.chatId);
+    if (!trace) return;
+    // An Agent's run is re-judged the way it was judged the first time. An
+    // auditor's run gets the questions that are worth asking of an auditor —
+    // whether it claimed more than its evidence supports, and what it walked
+    // past — because those are the only ones its spans can answer.
+    if (!isAuditorTrace(trace)) {
+      // Asking again answers the same question again. The automatic pass runs
+      // once per run and appends; this one can be repeated, so the previous
+      // answer goes first rather than being doubled.
+      this.deps.auditStore.clearRunAudit(trace.id);
+      await this.intentAudit(chat);
+      return;
+    }
+    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
+    // Asking again answers the same questions again, at both levels.
+    this.deps.auditStore.clearSpanAudits(trace.id);
+    this.deps.auditStore.clearRunAudit(trace.id);
+
+    // A snapshot, taken once. Anything appended while this runs belongs to the
+    // next audit of this trace, not to this one.
+    //
+    // The model calls only: a trace also carries the run and prompt spans the
+    // pipeline opens it with, and those are not steps the auditor took.
+    const auditorSpans = trace.spans.filter(
+      (span) => span.kind === "model_call",
+    );
+
+    // Judged one at a time, each attributed to the step it is about — the same
+    // shape the automatic pass produces for an Agent's steps. Judging the trace
+    // as a whole and nothing else made an auditor's entire run read as a single
+    // step, however much work it had done.
+    const budget = auditorSpans.slice(
+      0,
+      this.deps.requestedStepBudget ?? MAX_REQUESTED_STEP_AUDITS,
+    );
+    const unjudged = auditorSpans.length - budget.length;
+    for (const span of budget) {
+      chat.openStep();
+      this.enqueue(() =>
+        this.auditorStepAudit(chat, trace, span, intentId).finally(() =>
+          chat.closeStep(),
+        ),
+      );
+    }
+
+    await this.batch.queue(async () => {
+      // The run-level pass reads every step, so it must not start while the
+      // step audits are still in flight — the same ordering the Agent-level
+      // run audit keeps for the same reason.
+      await chat.awaitSteps();
+      const { steps, status } = await this.auditorFindings(
+        trace,
+        auditorSpans,
+        intentId,
+        unjudged,
+      );
+      this.deps.auditStore.recordRequestedAudit(
+        trace,
+        steps,
+        intentId,
+        healthOf(status),
+      );
+      this.closeAuditTrace(chat);
+    });
+  }
+
+  // One step of an auditor's run, judged on its own. Deterministic first, so a
+  // failed call or a leaked credential is still reported when the audit model
+  // is unreachable; the model is asked only where there is a verdict to weigh.
+  private async auditorStepAudit(
+    chat: AgentChatAuditor,
+    trace: TraceRecord,
+    span: TraceSpan,
+    intentId: string,
+  ) {
+    const identity = {
+      id: randomUUID(),
+      traceId: trace.id,
+      agentId: trace.agentId,
+      spanId: span.id,
+      intentId,
+    };
+    // The auditor's prompt embeds step content. Redaction runs before a span is
+    // stored, so a credential surfacing here means masking missed it on the way
+    // into the auditor — worth knowing, and not something a model should judge.
+    const seen =
+      readAttribute(span, "context") + "\n" + readAttribute(span, "output");
+    const leaked = detectSecretBindings(seen).length > 0;
+
+    // A call that failed returned no verdict, so there is nothing to weigh and
+    // no reason to spend a model on it.
+    if (readAttribute(span, "output").length === 0) {
+      const steps = auditSteps(identity, (push) => {
+        push(
+          "warning",
+          "audit-health",
+          "This auditor step produced no verdict: " +
+            (span.error ?? "no output was recorded"),
+        );
+        if (leaked) push("warning", "security", leakedCredentialFinding(span));
+      });
+      this.deps.auditStore.recordSpan(trace, span.id, steps, intentId, "degraded");
+      return;
+    }
+
+    const { verdict, status, failure } = await this.stepCheck(trace, span.id, {
+      name: "audit.auditor.step",
+      label: "Auditor step · " + span.label,
+      system: META_STEP_SYSTEM_PROMPT,
+      user: buildAuditorStepContext(trace, span),
+      schema: metaVerdict,
+    });
+
+    const steps = auditSteps(identity, (push) => {
+      if (leaked) push("warning", "security", leakedCredentialFinding(span));
+      for (const entry of verdict?.unsupportedFindings ?? []) {
+        push("warning", "audit-health", "Unsupported finding: " + entry);
+      }
+      for (const entry of verdict?.missedSignals ?? []) {
+        push("suspicion", "audit-health", "Possibly missed: " + entry);
+      }
+      pushAuditorStatus(push, status, failure);
+    });
+    this.deps.auditStore.recordSpan(
+      trace,
+      span.id,
+      steps,
+      intentId,
+      healthOf(status),
+    );
+  }
+
+  private async auditorFindings(
     trace: TraceRecord,
     auditorSpans: TraceSpan[],
     intentId: string,
-  ): Promise<AuditTraceStep[]> {
+    // Steps the budget stopped this pass from judging. Reported here rather
+    // than through reportStepCap: that says its piece once per chat and writes
+    // where this pass then replaces, so a repeated audit would drop the notice
+    // and read as though it had looked at everything.
+    unjudged = 0,
+  ) {
     const identity = {
       id: randomUUID(),
       traceId: trace.id,
@@ -1167,7 +1393,7 @@ export class AuditService {
       intentId,
     };
     if (auditorSpans.length === 0) {
-      return auditSteps(identity, (push) =>
+      const steps = auditSteps(identity, (push) =>
         push(
           "warning",
           "audit-health",
@@ -1176,47 +1402,52 @@ export class AuditService {
             "while it ran.",
         ),
       );
+      return { steps, status: "completed" as const };
     }
 
-    // Deterministic first, so a model outage still leaves a usable answer.
-    const failed = auditorSpans.filter((span) => span.status === "error");
-    // The auditor's prompt embeds step content. Redaction runs before a span is
-    // stored, so a credential surfacing here means masking missed it on the way
-    // into the auditor — worth knowing, and not something a model should judge.
-    const leaked = auditorSpans.filter((span) => {
-      const seen = readAttribute(span, "context") + "\n" + readAttribute(span, "output");
-      return detectSecretBindings(seen).length > 0;
-    });
-
-    const { verdict, status, failure } = await this.model.complete(
+    // Failed steps and leaked credentials are reported by the per-step pass,
+    // which can name the step each belongs to. What is left for this one is the
+    // question no single step can answer: what the auditor missed across all of
+    // them.
+    const prompt = buildMetaContext(trace, auditorSpans);
+    const { verdict, status, failure, attempts } = await this.model.complete(
+      this.auditorRun(trace),
       this.deps.securityModel,
       this.deps.intentModel !== this.deps.securityModel
         ? this.deps.intentModel
         : null,
       META_SYSTEM_PROMPT,
-      buildMetaContext(trace, auditorSpans),
+      prompt,
       metaVerdict,
     );
+    // The pass that judges an auditor leaves its own record, exactly as the
+    // pass that judges an Agent does. Without this an audit of an audit would
+    // produce findings out of nothing an audit above it could read, and the
+    // stack would stop dead at this level.
+    this.recordAuditorAttempts(trace, {
+      name: "audit.auditor",
+      // Named for symmetry with the Agent-level "Run audit": this is the pass
+      // over the whole run, sitting beneath the per-step rows rather than
+      // standing in for them.
+      label: "Auditor run audit",
+      targetSpanId: null,
+      prompt,
+      attempts,
+      usedFallback: status === "degraded",
+    });
 
-    return auditSteps(identity, (push) => {
-      for (const span of failed) {
+    const steps = auditSteps(identity, (push) => {
+      if (unjudged > 0) {
         push(
           "warning",
           "audit-health",
-          "An auditor step failed and produced no verdict (" +
-            span.label +
-            "): " +
-            (span.error ?? "unknown error"),
-        );
-      }
-      for (const span of leaked) {
-        push(
-          "warning",
-          "security",
-          "A credential is readable in the auditor's own record for " +
-            span.label +
-            ". Masking runs before a span is stored, so this reached the " +
-            "auditor unmasked.",
+          "The step budget stopped this audit after " +
+            (auditorSpans.length - unjudged) +
+            " of " +
+            auditorSpans.length +
+            " auditor steps, so " +
+            unjudged +
+            " went unexamined.",
         );
       }
       for (const entry of verdict?.unsupportedFindings ?? []) {
@@ -1227,6 +1458,6 @@ export class AuditService {
       }
       pushAuditorStatus(push, status, failure);
     });
+    return { steps, status };
   }
-
 }

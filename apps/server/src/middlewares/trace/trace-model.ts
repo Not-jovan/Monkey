@@ -73,6 +73,17 @@ export const traceRecordSchema = z.object({
   // silently rest on evidence the platform knows it discarded.
   evidenceComplete: z.boolean().default(true),
   unrecognizedEvents: z.number(),
+  // The trace this one audits, and how many audits deep that makes it. An
+  // agent's own run is depth 0 with no target; the auditor that judged it is
+  // depth 1, the auditor that judged *that* is depth 2, and so on with no
+  // ceiling. Defaulted so traces written before auditors had traces still
+  // parse as what they are.
+  //
+  // Load-bearing for more than display: the automatic audit subscription fires
+  // only at depth 0. Everything above it is judged when someone asks and never
+  // otherwise, which is the whole reason auditing an auditor cannot run away.
+  auditOf: z.string().nullable().default(null),
+  auditDepth: z.number().default(0),
   spans: z.array(traceSpanSchema),
 });
 
@@ -85,6 +96,18 @@ export const emptyUsage = () => ({
   reasoningTokens: 0,
   toolTokens: 0,
 });
+
+// Whether this trace is an auditor's own run rather than an Agent's, which is
+// true exactly when it names the trace it audits.
+//
+// This is the recursion guard, so it is deliberately narrow: an auditor's spans
+// are real trace spans and raise the same events an Agent's do, and anything
+// looser here would let the first of them enqueue an audit of the auditor that
+// wrote it, without limit. Shared so the recorder, the run list and the auditor
+// cannot disagree about which runs are judged on their own.
+export function isAuditorTrace(trace: Pick<TraceRecord, "auditOf">): boolean {
+  return typeof trace.auditOf === "string" && trace.auditOf.length > 0;
+}
 
 export function readAttribute(span: TraceSpan, key: string): string {
   const value = span.attributes[key];

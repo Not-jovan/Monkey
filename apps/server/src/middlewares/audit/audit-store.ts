@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
+import type { TraceRecord } from "../trace/trace-model.js";
 import {
   chatAuditSchema,
   worstHealth,
@@ -139,35 +139,54 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
-  appendAuditorSpans(
-    trace: TraceRecord,
-    spans: TraceSpan[],
-    intentId: string,
-  ) {
-    if (spans.length === 0) return;
-    const doc = this.ensure(trace, intentId);
-    doc.auditorSpans = doc.auditorSpans.concat(spans);
-    this.persist(trace.id);
+  // Drops the previous per-step answers, for the same reason clearRunAudit
+  // drops the run-level one. Only the requested path writes step findings it
+  // will write again; the automatic pass writes each step once, and clearing
+  // those would throw away work nothing is going to redo.
+  clearSpanAudits(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return;
+    doc.spanAudit = {};
+    this.persist(traceId);
   }
 
-  // Replaces the previous meta-audit rather than appending: re-auditing the
-  // auditor answers the same question again, it does not accumulate history.
-  //
-  // Writes only to metaAudit. It must never touch auditorSpans, because those
-  // are this method's own input — appending there would make each meta-audit
-  // produce material for the next one, without limit.
-  recordMetaAudit(
+  // Drops the previous run-level answer, so re-running the pass that writes it
+  // replaces rather than stacks. Step findings are left alone: they are keyed
+  // by span and re-auditing does not revisit them.
+  clearRunAudit(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return;
+    doc.runAudit = [];
+    this.persist(traceId);
+  }
+
+  // Replaces the run audit rather than appending to it. The automatic pass
+  // happens once per run and so concatenates; an audit someone asked for can be
+  // asked for again, and answering the same question twice must give one answer
+  // rather than two stacked.
+  recordRequestedAudit(
     trace: TraceRecord,
     steps: AuditTraceStep[],
     intentId: string,
-    at: string,
+    health: AuditHealth = "ok",
   ) {
     const doc = this.ensure(trace, intentId);
-    doc.metaAudit = [...steps];
-    doc.metaAuditedAt = at;
+    doc.runAudit = [...steps];
+    // Reset rather than merged: the previous answer is gone, so keeping the
+    // health it reported would outlive the findings that explained it.
+    doc.health = health;
+    this.syncFromTrace(doc, trace);
+    if (trace.status !== "running") {
+      doc.summary.endTime = Date.parse(trace.endedAt ?? trace.startedAt);
+    }
     this.persist(trace.id);
   }
 
+  // Read-only from here on. An auditor's steps are spans on its own trace now,
+  // and an audit of an auditor is an ordinary audit of that trace — so nothing
+  // writes either of these fields any more. They are still read because
+  // documents written by the earlier version have them, and a finding already
+  // recorded should not disappear because the shape around it changed.
   metaAudit(traceId: string) {
     const doc = this.docs.get(traceId);
     if (!doc) return { findings: [], auditedAt: null };

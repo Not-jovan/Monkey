@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import { isPermanentProviderError } from "../../failures.js";
 import type { TraceSpan } from "../trace/trace-model.js";
-import { ArkApiError, type ArkClient } from "../../ark-client.js";
+import { ArkApiError } from "../../ark-client.js";
+import type { AgentRunner, RunUsage } from "../../types.js";
 
 // Everything about asking the audit model a question and living with the
 // answer: the fallback, what counts as a permanent failure, and the record of
@@ -11,8 +12,9 @@ import { ArkApiError, type ArkClient } from "../../ark-client.js";
 // misbehaves.
 
 // Reasoning and the answer share this budget. The default left a reasoning
-// model no room to finish the JSON it had started.
-const VERDICT_MAX_TOKENS = 4_096;
+// model no room to finish the JSON it had started. Exported because the runner
+// that applies it is constructed by the middleware, not by this file.
+export const VERDICT_MAX_TOKENS = 4_096;
 
 export interface AuditorCallAttempt {
   model: string;
@@ -21,6 +23,15 @@ export interface AuditorCallAttempt {
   durationMs: number;
   content: string;
   error: string | null;
+  usage: RunUsage | null;
+}
+
+// Who the auditor is running as. An in-process runner ignores the workspace,
+// but AgentRunner requires one, and the chat's memory folder is the honest
+// answer: it is where this auditor's artifacts already go.
+export interface AuditorRun {
+  agentId: string;
+  workspacePath: string;
 }
 
 export type AuditorCallStatus = "completed" | "degraded" | "failed";
@@ -101,6 +112,12 @@ export function auditorCallSpan(input: {
       // and backtrace read every step at once, so they belong with the run.
       phase: input.name.startsWith("audit.step") ? "step" : "run",
       laneId: "auditor",
+      ...(input.attempt.usage?.inputTokens !== undefined
+        ? { inputTokens: input.attempt.usage.inputTokens }
+        : {}),
+      ...(input.attempt.usage?.outputTokens !== undefined
+        ? { outputTokens: input.attempt.usage.outputTokens }
+        : {}),
       ...(input.fallback ? { fallback: true } : {}),
       ...(input.targetSpanId ? { targetSpanId: input.targetSpanId } : {}),
     },
@@ -121,13 +138,14 @@ export class AuditorModel {
   private readonly unavailable = new Map<string, string>();
 
   constructor(
-    private readonly client: ArkClient,
+    private readonly runner: AgentRunner,
     private readonly log?: (message: string, error?: unknown) => void,
   ) {}
 
   // Never throws: a failed audit is a finding, not an exception, and every
   // caller needs the attempts either way to record what the auditor tried.
   async complete<Schema extends z.ZodType>(
+    run: AuditorRun,
     primaryModel: string,
     fallbackModel: string | null,
     system: string,
@@ -138,19 +156,35 @@ export class AuditorModel {
     const runAttempt = async (model: string) => {
       const startedAt = new Date().toISOString();
       const startedMs = Date.now();
+      let usage: RunUsage | null = null;
       try {
-        const { content } = await this.client.complete({
-          model,
+        // Through the runner rather than the provider client: an auditor that
+        // executes the way an Agent does is one the trace pipeline can record,
+        // and a recorded auditor is one that can itself be audited.
+        const result = await this.runner.run({
+          agentId: run.agentId,
+          workspacePath: run.workspacePath,
+          prompt: user,
+          threadId: null,
           system,
-          user,
-          maxTokens: VERDICT_MAX_TOKENS,
+          model,
         });
+        usage = result.usage;
+        const content = result.output;
         const parsed = schema.safeParse(extractJson(content));
         const endedAt = new Date().toISOString();
         const durationMs = Date.now() - startedMs;
         if (!parsed.success) {
           const error = "Audit model returned an unparseable verdict";
-          attempts.push({ model, startedAt, endedAt, durationMs, content, error });
+          attempts.push({
+            model,
+            startedAt,
+            endedAt,
+            durationMs,
+            content,
+            error,
+            usage,
+          });
           throw new Error(error);
         }
         attempts.push({
@@ -160,6 +194,7 @@ export class AuditorModel {
           durationMs,
           content,
           error: null,
+          usage,
         });
         return parsed.data as z.infer<Schema>;
       } catch (error) {
@@ -171,6 +206,7 @@ export class AuditorModel {
             durationMs: Date.now() - startedMs,
             content: "",
             error: describeError(error),
+            usage,
           });
         }
         throw error;

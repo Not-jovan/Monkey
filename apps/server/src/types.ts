@@ -81,6 +81,11 @@ export interface RunnerRequest {
   workspacePath: string;
   prompt: string;
   threadId: string | null;
+  // A CLI runtime resolves its own model and system prompt from its config and
+  // the workspace; an in-process runner has to be told both. Optional so the
+  // process runners, which have no use for either, are unaffected.
+  system?: string | undefined;
+  model?: string | undefined;
   // Names the failure transcript written when a run fails. Optional so tests
   // and any caller that does not need post-mortem logs can omit it.
   runId?: string | undefined;

@@ -22,7 +22,7 @@ function fakeClient(replies: string[]) {
       const reply = replies.shift();
       if (reply === undefined) throw new Error("no reply queued");
       if (reply === "THROW") throw new Error("model offline");
-      return { content: reply };
+      return { content: reply, usage: null, model: null };
     },
   };
   return { client, calls };
@@ -531,13 +531,15 @@ describe("IntentService", () => {
   it("does not resurrect a forgotten Agent when queued classification finishes", async () => {
     const { store, directory } = await makeStore();
     let markStarted!: () => void;
-    let release!: (value: { content: string }) => void;
+    let release!: (value: Awaited<ReturnType<ArkClient["complete"]>>) => void;
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const response = new Promise<{ content: string }>((resolve) => {
-      release = resolve;
-    });
+    const response = new Promise<Awaited<ReturnType<ArkClient["complete"]>>>(
+      (resolve) => {
+        release = resolve;
+      },
+    );
     const client: ArkClient = {
       complete: async () => {
         markStarted();
@@ -562,6 +564,8 @@ describe("IntentService", () => {
     release({
       content:
         '{"classification":"INTENT_UPDATE","reason":"rule","extendedIntent":["Use HTML, not Markdown."]}',
+      usage: null,
+      model: null,
     });
     await service.idle();
     await store.flush();

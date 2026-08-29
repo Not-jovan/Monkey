@@ -26,7 +26,7 @@ export interface PinnedIntent {
 export interface ChatAuditorWork {
   runStepAudit(chat: AgentChatAuditor, spanId: string): Promise<void>;
   runAll(chat: AgentChatAuditor): Promise<void>;
-  runMetaAudit(chat: AgentChatAuditor): Promise<void>;
+  runRequestedAudit(chat: AgentChatAuditor): Promise<void>;
 }
 
 export class AgentChatAuditor {
@@ -56,7 +56,31 @@ export class AgentChatAuditor {
   private open = 0;
   private waiters: (() => void)[] = [];
   private capped = false;
-  private metaRunning = false;
+  private requestRunning = false;
+  // This auditor's own run, as a trace. Opened lazily on the first model call
+  // it makes, not at construction: a chat whose audits were all answered
+  // deterministically never asked a model anything, and should not leave an
+  // empty trace behind claiming it did.
+  private auditTrace: string | null = null;
+
+  get auditTraceId() {
+    return this.auditTrace;
+  }
+
+  openAuditTrace(open: () => string): string {
+    if (this.auditTrace === null) this.auditTrace = open();
+    return this.auditTrace;
+  }
+
+  // Ends the current pass and returns the trace it wrote, so the next one
+  // starts a new trace rather than appending to a finished run. One trace per
+  // pass: re-auditing is the auditor doing the work again, not the earlier run
+  // growing new steps after it ended.
+  closeAuditTrace(): string | null {
+    const closing = this.auditTrace;
+    this.auditTrace = null;
+    return closing;
+  }
 
   constructor(
     readonly agentId: string,
@@ -104,16 +128,21 @@ export class AgentChatAuditor {
     return this.work.runAll(this);
   }
 
-  // Auditing the auditor is manual and one at a time: a second trigger while
-  // the first is running would judge a half-written record.
-  async auditAuditor(): Promise<"in-flight" | "done"> {
-    if (this.metaRunning) return "in-flight";
-    this.metaRunning = true;
+  // An audit someone asked for, as opposed to one the subscription raised.
+  // One at a time: a second trigger while the first is running would judge a
+  // half-written record.
+  //
+  // This is the only way a trace above depth 0 is ever judged. Auditing an
+  // auditor, and auditing that auditor in turn, all arrive here — the depth is
+  // whatever the caller has clicked through, and nothing reaches it on its own.
+  async auditOnRequest(): Promise<"in-flight" | "done"> {
+    if (this.requestRunning) return "in-flight";
+    this.requestRunning = true;
     try {
-      await this.work.runMetaAudit(this);
+      await this.work.runRequestedAudit(this);
       return "done";
     } finally {
-      this.metaRunning = false;
+      this.requestRunning = false;
     }
   }
 }

@@ -44,6 +44,8 @@ function trace(spans: TraceSpan[]): TraceRecord {
     recoveredErrorCount: 0,
     evidenceComplete: true,
     unrecognizedEvents: 0,
+    auditOf: null,
+    auditDepth: 0,
     spans,
   };
 }

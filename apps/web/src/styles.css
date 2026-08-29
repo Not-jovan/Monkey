@@ -2033,6 +2033,32 @@ textarea:focus {
   overflow: auto;
 }
 
+/* Where this trace sits in the stack of audits above the Agent run at the root.
+   Wraps rather than scrolls: the stack has no ceiling, and a deep one should
+   still be readable on a narrow window. */
+.audit-chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.audit-chain a {
+  color: var(--muted);
+}
+
+.audit-chain-separator {
+  padding: 0 2px;
+  color: var(--line);
+}
+
+.audit-chain-current {
+  color: var(--ink);
+  font-weight: 600;
+}
+
 .trace-instruction {
   display: -webkit-box;
   -webkit-line-clamp: 2;

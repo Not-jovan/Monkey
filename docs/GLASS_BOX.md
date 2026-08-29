@@ -333,6 +333,60 @@ run-level backtrace — which can read what led up to it — promotes it to a
 warning. The deterministic findings are not affected: a credential that left the
 system is a fact, and facts are warnings immediately.
 
+### Auditing the auditor
+
+An auditor's work is a run like any other, so it gets a trace like any other.
+Every model call it makes is a span on a `TraceRecord` of its own, which carries
+two extra fields: `auditOf`, naming the trace it judged, and `auditDepth`,
+counting how many audits deep that makes it. An Agent's run is depth 0 with no
+target; the auditor that judged it is depth 1, the auditor that judged *that* is
+depth 2, and there is no ceiling.
+
+That uniformity is the point. Auditing an Agent's run and auditing an auditor's
+run are the same operation on different traces — `POST /api/traces/:id/audit` —
+so level N+1 is that call made on the trace level N produced. The stack goes as
+deep as someone chooses to click and stops the moment they stop.
+
+An audit someone asked for judges the trace the way the automatic pass judges an
+Agent's run: one model call per step, each attributed to the step it is about,
+then a run-level pass over the whole thing for the questions no single step can
+answer. So an auditor's run reads as the sequence of questions it asked, not as
+one lump. Its budget is separate from the automatic one —
+`MAX_REQUESTED_STEP_AUDITS` rather than `MAX_STEP_AUDITS_PER_TRACE` — because a
+requested audit is deliberate and one-shot, while the automatic pass has to keep
+up with a run that is still going. When the budget does stop it short, the
+run-level pass says so: an audit reporting nothing must never mean it stopped
+looking.
+
+**Nothing above depth 0 is ever audited on its own.** The automatic subscription
+reads `isAuditorTrace` and returns before doing anything:
+
+```ts
+traceStore.on("span", ({ trace, span }) => {
+  if (isAuditorTrace(trace)) return;
+  ...
+});
+```
+
+This is the whole recursion guard, and it has to be there. An auditor's spans
+are real trace spans and raise the same events an Agent's do; without it the
+first auditor span would enqueue an audit of the auditor that wrote it, which
+would write more spans, without limit.
+
+Auditor runs share the audited Agent's id, because that is who they are about —
+an auditor has no workspace and no instructions of its own. They are not runs of
+the Agent, though, so they are filtered out of `GET /api/agents/:id/traces`. You
+reach one by opening the run it judged and following "Open this auditor's trace",
+and the trace detail page renders the chain back to the Agent run as a
+breadcrumb.
+
+An earlier version kept an audit of the auditor in a `metaAudit` field on the
+audited run's own document, specifically so its output could never become
+another audit's input. That field is still read, so nothing already recorded
+disappears, but nothing writes it any more: the guard now sits on the trigger
+rather than on the destination, which is what makes arbitrary depth safe instead
+of capping it at one.
+
 ## Intent
 
 The specification an Agent is judged against is not fixed at creation.
@@ -452,8 +506,8 @@ the continuation of earlier work is not flagged as unmotivated.
 | `POST /api/traces/:id/intent/correct` | Apply a human-authored constraint from a finding. Body: `{ "findingId": "...", "correction": "..." }`. |
 | `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, the pinned intent, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
-| `GET /api/audits/:id` | The auditor's own trace for that run: model calls, prompts, verdicts, and timing. Not included in the agent trace API. |
-| `POST /api/audits/:id/meta` | Audit the auditor: judge its own steps for unsupported findings and missed signals. Manual only — nothing subscribes to it, and it writes to a separate field, so its output can never become another meta-audit's input. 409 while one is running. |
+| `GET /api/audits/:id` | The auditor's own trace for that run: model calls, prompts, verdicts, and timing, plus `auditTraceId` naming the auditor's run. Not included in the agent trace API. |
+| `POST /api/traces/:id/audit` | Audit any trace, whatever produced it — an Agent's run, or the run of the auditor that judged it, or the run of the auditor that judged *that*. Returns the auditor trace it wrote. Manual at every depth: nothing subscribes to this, and the automatic pass fires for depth 0 alone. 409 while one is running for that trace. |
 | `GET /api/audits/:id/archive` | Everything the auditor wrote for that run as a zip: the per-step records under `memory/`, plus `audit.json`. |
 
 Intent versions are served as an **ordered list**, not a map: version order is
@@ -471,7 +525,8 @@ trace data. All three write atomically (temp file plus rename, mode `0600`)
 under `APP_DATA_DIR`:
 
 ```
-.data/traces/<chatId>.json    one TraceRecord per chat / AgentRun
+.data/traces/<chatId>.json    one TraceRecord per chat / AgentRun, and one
+                              per auditor pass, keyed on auditOf
 .data/audits/<chatId>.json    intent-pinned findings for that chat
 .data/intent/<agentId>.json   insertion-ordered map of intent versions
 .data/context/<chatId>.json   what that run carried out, for the next one
@@ -483,8 +538,8 @@ under `APP_DATA_DIR`:
 That folder belongs to the chat's own auditor. There is one `AgentChatAuditor`
 per `(agentId, chatId)`, holding the identity its findings are stamped with, the
 path above, and the state its checks have to agree about: whether the step
-budget ran out, whether a meta-audit is running, and how many step audits are
-still in flight — the last of which is what the run-level checks wait on. What
+budget ran out, whether a requested audit is running, and how many step audits
+are still in flight — the last of which is what the run-level checks wait on. What
 stays process-wide is what only works that way: the batch caller, because a
 provider rate limit is shared across every chat, and the memo of models the
 account has not activated, because a model that does not exist for one chat does

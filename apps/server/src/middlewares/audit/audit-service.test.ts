@@ -6,6 +6,10 @@ import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
 import { emptyUsage } from "../trace/trace-model.js";
 import { TraceStore } from "../trace/trace-store.js";
 import { ArkApiError, type ArkClient } from "../../ark-client.js";
+import type { AgentRunner } from "../../types.js";
+import { TraceService } from "../trace/trace-service.js";
+import { createRedactor } from "../trace/redaction.js";
+import { codexRuntime } from "../../runtimes/codex.js";
 import { AuditMemory } from "./audit-memory.js";
 import { AuditService } from "./audit-service.js";
 import { AuditStore } from "./audit-store.js";
@@ -43,7 +47,46 @@ function checkOf(system: string): string {
   return "run";
 }
 
-function fakeClient(responder: FakeResponder): ArkClient {
+// The fakes answer as a provider, which is the boundary a test wants to hold.
+// The auditor talks to a runner, so they are adapted here — the same shape
+// ArkRunner produces in production, minus the config it resolves a model from.
+interface FakeClient {
+  complete: (input: {
+    model: string;
+    system: string;
+    user: string;
+  }) => Promise<{ content: string }>;
+}
+
+// IntentService still talks to the provider directly, so its fake answers as
+// one. Only the auditor moved onto a runner.
+function arkClientFor(client: FakeClient): ArkClient {
+  return {
+    complete: async (input) => ({
+      ...(await client.complete(input)),
+      usage: null,
+      model: null,
+    }),
+  };
+}
+
+function runnerFor(client: FakeClient): AgentRunner {
+  return {
+    run: async ({ model, prompt, system }) => {
+      const named = model ?? "";
+      const { content } = await client.complete({
+        model: named,
+        system: system ?? "",
+        user: prompt,
+      });
+      return { output: content, threadId: null, usage: null, model: named };
+    },
+    cancel: async () => false,
+    isAvailable: async () => true,
+  };
+}
+
+function fakeClient(responder: FakeResponder): FakeClient {
   return {
     complete: async ({ model, user, system }) => {
       responder.calls.push({ model, user, system, check: checkOf(system) });
@@ -56,6 +99,11 @@ async function makeStores() {
   const directory = await mkdtemp(path.join(tmpdir(), "audit-service-"));
   const traceStore = new TraceStore(path.join(directory, "traces"));
   await traceStore.initialize();
+  const traceService = new TraceService(
+    traceStore,
+    createRedactor([]),
+    codexRuntime.trace,
+  );
   const auditStore = new AuditStore(path.join(directory, "audits"));
   await auditStore.initialize();
   const contextStore = new ContextStore(path.join(directory, "context"));
@@ -71,7 +119,26 @@ async function makeStores() {
     await auditMemory.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
-  return { traceStore, auditStore, contextStore, auditMemory, directory };
+  return {
+    traceStore,
+    traceService,
+    auditStore,
+    contextStore,
+    auditMemory,
+    directory,
+  };
+}
+
+// What the auditor did while judging this trace: the spans of its own run.
+function auditorSpansOf(
+  stores: Awaited<ReturnType<typeof makeStores>>,
+  traceId: string,
+) {
+  const auditTraceId = stores.traceStore.auditorTraceFor(traceId);
+  if (auditTraceId === null) return [];
+  return (stores.traceStore.get(auditTraceId)?.spans ?? []).filter(
+    (span) => span.kind === "model_call",
+  );
 }
 
 function seedTrace(traceStore: TraceStore, id: string, agentId = "agent-1") {
@@ -91,6 +158,8 @@ function seedTrace(traceStore: TraceStore, id: string, agentId = "agent-1") {
     recoveredErrorCount: 0,
     evidenceComplete: true,
     unrecognizedEvents: 0,
+    auditOf: null,
+    auditDepth: 0,
     spans: [],
   };
   traceStore.create(trace);
@@ -144,16 +213,19 @@ function makeAudit(
   responder: FakeResponder,
   networkWhitelist: string[] | null = null,
   intent?: IntentService,
+  requestedStepBudget?: number,
 ) {
   const service = new AuditService({
     traceStore: stores.traceStore,
     auditStore: stores.auditStore,
+    traceService: stores.traceService,
     context: stores.contextStore,
-    client: fakeClient(responder),
+    runner: runnerFor(fakeClient(responder)),
     securityModel: "sec-model",
     intentModel: "intent-model",
     networkWhitelist,
     ...(intent ? { intent } : {}),
+    ...(requestedStepBudget === undefined ? {} : { requestedStepBudget }),
     memory: stores.auditMemory,
     enabled: true,
   });
@@ -196,7 +268,7 @@ describe("AuditService", () => {
       "intent",
       "summary",
     ]);
-    const auditorSpans = stores.auditStore.listAuditorSpans("trace-1");
+    const auditorSpans = auditorSpansOf(stores, "trace-1");
     // One span per check, so the auditor's own trace says which question was
     // asked and what it answered rather than collapsing them into one call.
     expect(auditorSpans).toHaveLength(3);
@@ -363,9 +435,9 @@ describe("AuditService", () => {
     );
     // The id is still on record, one per call, where the auditor's own steps
     // show it.
-    const errors = stores.auditStore
-      .listAuditorSpans("trace-ids")
-      .flatMap((span) => (span.error ? [span.error] : []));
+    const errors = auditorSpansOf(stores, "trace-ids").flatMap((span) =>
+      span.error ? [span.error] : [],
+    );
     expect(errors.length).toBeGreaterThan(1);
     expect(new Set(errors).size).toBe(errors.length);
     expect(errors.every((error) => error.includes("Request id:"))).toBe(true);
@@ -405,7 +477,7 @@ describe("AuditService", () => {
     expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
       true,
     );
-    const auditorSpans = stores.auditStore.listAuditorSpans("trace-3");
+    const auditorSpans = auditorSpansOf(stores, "trace-3");
     expect(auditorSpans.length).toBeGreaterThanOrEqual(2);
     expect(auditorSpans.some((span) => span.status === "error")).toBe(true);
     expect(
@@ -435,7 +507,7 @@ describe("AuditService", () => {
     expect(findings.some((step) => step.finding.includes("InternalError"))).toBe(
       true,
     );
-    const auditorSpans = stores.auditStore.listAuditorSpans("trace-4");
+    const auditorSpans = auditorSpansOf(stores, "trace-4");
     expect(auditorSpans.length).toBeGreaterThan(0);
     expect(auditorSpans.some((span) => span.status === "error")).toBe(true);
     expect(auditorSpans.some((span) => span.error?.includes("InternalError"))).toBe(
@@ -467,7 +539,7 @@ describe("AuditService", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.category).toBe("intent-check");
     expect(findings[0]?.finding).toContain("read credentials");
-    const auditorSpans = stores.auditStore.listAuditorSpans("trace-5");
+    const auditorSpans = auditorSpansOf(stores, "trace-5");
     expect(auditorSpans.some((span) => span.name === "audit.run")).toBe(true);
     expect(
       auditorSpans.some(
@@ -580,7 +652,7 @@ describe("AuditService", () => {
     });
     const intent = new IntentService({
       store: intentStore,
-      client: fakeClient({ calls: [], respond: () => "" }),
+      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
       model: "intent-model",
       enabled: false,
     });
@@ -796,7 +868,7 @@ describe("AuditService", () => {
     });
     const intent = new IntentService({
       store: intentStore,
-      client: fakeClient({ calls: [], respond: () => "" }),
+      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
       model: "intent-model",
       enabled: false,
     });
@@ -863,7 +935,7 @@ describe("AuditService", () => {
     });
     const intent = new IntentService({
       store: intentStore,
-      client: fakeClient({ calls: [], respond: () => "" }),
+      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
       model: "intent-model",
       enabled: false,
     });
@@ -1068,95 +1140,252 @@ describe("AuditService", () => {
   });
 });
 
-// PLAN_AUDITOR asks for the auditor to be auditable. Auditing it produces
-// findings about auditor steps, which are themselves auditor steps — so the one
-// thing that must hold is that the output can never become the next input.
+// PLAN_AUDITOR asks for the auditor to be auditable. An auditor's steps are
+// now spans on a trace of its own, which is what makes that possible at any
+// depth — and is exactly why the automatic pass must never reach one.
 describe("auditing the auditor", () => {
-  it("never appends to the spans it just read", async () => {
+  // The whole recursion guard, in one test. An auditor's spans raise the same
+  // events an Agent's do; if the subscription acted on them, the first auditor
+  // span would enqueue an audit of the auditor that wrote it, forever.
+  it("never audits an auditor's own run on its own", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-guard");
+    stores.traceStore.appendSpan(
+      "trace-guard",
+      promptSpan("trace-guard", "count the files"),
+    );
+    await service.idle();
+    stores.traceStore.updateTrace("trace-guard", (trace) => {
+      trace.status = "completed";
+    });
+    await service.idle();
+
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-guard");
+    expect(auditTraceId).toBeTruthy();
+    // The auditor really did leave a trace with real spans...
+    expect(auditorSpansOf(stores, "trace-guard").length).toBeGreaterThan(0);
+    // ...and nothing has judged it, because nobody asked.
+    expect(stores.auditStore.listByTrace(auditTraceId!)).toHaveLength(0);
+    expect(stores.traceStore.auditorTraceFor(auditTraceId!)).toBeNull();
+  });
+
+  it("records the auditor's own run as a trace that points at what it judged", async () => {
+    const stores = await makeStores();
+    const service = makeAudit(stores, { calls: [], respond: () => SAFE_VERDICT });
+
+    seedTrace(stores.traceStore, "trace-own");
+    stores.traceStore.appendSpan(
+      "trace-own",
+      promptSpan("trace-own", "count the files"),
+    );
+    await service.idle();
+
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-own")!;
+    const auditTrace = stores.traceStore.get(auditTraceId)!;
+    expect(auditTrace.auditOf).toBe("trace-own");
+    expect(auditTrace.auditDepth).toBe(1);
+    // The audited agent's own id: an auditor is not a separate agent.
+    expect(auditTrace.agentId).toBe("agent-1");
+  });
+
+  // The point of the whole change: however deep the stack goes is up to whoever
+  // is clicking, and every level is a trace like any other.
+  it("audits an auditor, and that auditor, and that one", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: () =>
-        '{"unsupportedFindings":["claimed a leak with no credential in evidence"],"missedSignals":[],"reason":"overreach"}',
+      respond: (_model, _user, system) =>
+        checkOf(system) === "meta"
+          ? '{"unsupportedFindings":["claimed more than the evidence shows"],"missedSignals":[],"reason":"overreach"}'
+          : SAFE_VERDICT,
     };
     const service = makeAudit(stores, responder);
 
-    seedTrace(stores.traceStore, "trace-meta");
-    const trace = stores.traceStore.get("trace-meta")!;
-    stores.auditStore.appendAuditorSpans(
-      trace,
-      [
-        {
-          id: "auditor-span-1",
-          traceId: "trace-meta",
-          parentId: null,
-          name: "audit.step",
-          label: "Audit · step",
-          kind: "model_call",
-          actor: "system",
-          status: "ok",
-          startedAt: "2026-08-30T00:00:00.000Z",
-          endedAt: "2026-08-30T00:00:01.000Z",
-          durationMs: 1_000,
-          attributes: { context: "cat /etc/passwd", output: "{}" },
-          error: null,
-        },
-      ],
-      "",
+    seedTrace(stores.traceStore, "trace-deep");
+    stores.traceStore.appendSpan(
+      "trace-deep",
+      promptSpan("trace-deep", "count the files"),
     );
-    const before = stores.auditStore.listAuditorSpans("trace-meta").length;
-
-    await service.auditAuditor("trace-meta");
+    await service.idle();
+    stores.traceStore.updateTrace("trace-deep", (trace) => {
+      trace.status = "completed";
+    });
     await service.idle();
 
-    // The guard: auditing the auditor writes to metaAudit, never back into
-    // auditorSpans. If this count ever grows, every meta-audit manufactures
-    // material for the next one and the feature eats itself.
-    expect(stores.auditStore.listAuditorSpans("trace-meta")).toHaveLength(before);
+    const depths: number[] = [];
+    let target = stores.traceStore.auditorTraceFor("trace-deep")!;
+    for (let level = 0; level < 3; level += 1) {
+      const result = await service.audit(target);
+      await service.idle();
+      expect(result).not.toBeNull();
+      expect(result).not.toBe("in-flight");
+      // Judging it produced findings, and produced them from a real pass.
+      expect(stores.auditStore.listByTrace(target).length).toBeGreaterThan(0);
+      const next = stores.traceStore.auditorTraceFor(target);
+      expect(next).toBeTruthy();
+      depths.push(stores.traceStore.get(next!)!.auditDepth);
+      target = next!;
+    }
 
-    const meta = stores.auditStore.metaAudit("trace-meta");
-    expect(meta.findings.length).toBeGreaterThan(0);
-    expect(meta.auditedAt).toBeTruthy();
+    // Each level is one deeper than the last, and none of it happened on its own.
+    expect(depths).toEqual([2, 3, 4]);
+  });
+
+  it("leaves a record of its own pass, so the level above it has something to read", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, _user, system) =>
+        checkOf(system) === "meta"
+          ? '{"unsupportedFindings":["one"],"missedSignals":[],"reason":"r"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-evidence");
+    stores.traceStore.appendSpan(
+      "trace-evidence",
+      promptSpan("trace-evidence", "count the files"),
+    );
+    await service.idle();
+    const first = stores.traceStore.auditorTraceFor("trace-evidence")!;
+
+    await service.audit(first);
+    await service.idle();
+
+    // The old meta-audit discarded its attempts, so a second level had nothing
+    // to look at. Every pass leaves its own spans now.
+    expect(auditorSpansOf(stores, first).length).toBeGreaterThan(0);
+    expect(
+      auditorSpansOf(stores, first).some((span) => span.name === "audit.auditor"),
+    ).toBe(true);
+  });
+
+  // The complaint that prompted this: an auditor's whole run collapsed into a
+  // single "Auditor audit" row, however many questions it had asked.
+  it("judges each of the auditor's steps separately, not the run as one lump", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, _user, system) =>
+        checkOf(system) === "meta"
+          ? '{"unsupportedFindings":["claimed more than the evidence shows"],"missedSignals":[],"reason":"overreach"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-per-step");
+    stores.traceStore.appendSpan(
+      "trace-per-step",
+      promptSpan("trace-per-step", "count the files"),
+    );
+    await service.idle();
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-per-step")!;
+    const judged = auditorSpansOf(stores, "trace-per-step");
+    expect(judged.length).toBeGreaterThan(1);
+
+    await service.audit(auditTraceId);
+    await service.idle();
+
+    const meta = auditorSpansOf(stores, auditTraceId);
+    const perStep = meta.filter((span) => span.name === "audit.auditor.step");
+    // One row per step the audited auditor took, not one for the whole run.
+    expect(perStep).toHaveLength(judged.length);
+    // Each names the step it is about, which is what lets the UI attribute it.
+    expect(perStep.map((span) => span.attributes.targetSpanId).sort()).toEqual(
+      judged.map((span) => span.id).sort(),
+    );
+    expect(
+      perStep.every((span) => String(span.label).startsWith("Auditor step · ")),
+    ).toBe(true);
+    // And the run-level pass is still there beside them, as at level 0.
+    expect(meta.some((span) => span.name === "audit.auditor")).toBe(true);
+
+    // Findings attach to the step they are about rather than to the run.
+    const findings = stores.auditStore.listByTrace(auditTraceId);
+    const attributed = findings.filter((finding) => finding.spanId !== null);
+    expect(attributed.length).toBeGreaterThan(0);
+    expect(
+      attributed.every((finding) =>
+        judged.some((span) => span.id === finding.spanId),
+      ),
+    ).toBe(true);
+  });
+
+  // A step whose call failed has no verdict to weigh, so spending a model on it
+  // would buy nothing — but staying silent about it would be worse.
+  it("reports an auditor step that produced no verdict without asking a model", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-no-verdict");
+    stores.traceStore.updateTrace("trace-no-verdict", (trace) => {
+      trace.auditOf = "trace-somewhere";
+      trace.auditDepth = 1;
+    });
+    stores.traceStore.appendSpan("trace-no-verdict", {
+      id: "failed-call",
+      traceId: "trace-no-verdict",
+      parentId: null,
+      name: "audit.step.intent",
+      label: "Intent · Model · plan",
+      kind: "model_call",
+      actor: "system",
+      status: "error",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes: { context: "some evidence", output: "" },
+      error: "Audit model timed out",
+    });
+
+    await service.audit("trace-no-verdict");
+    await service.idle();
+
+    const onStep = stores.auditStore
+      .listByTrace("trace-no-verdict")
+      .filter((finding) => finding.spanId === "failed-call");
+    expect(onStep).toHaveLength(1);
+    expect(onStep[0]?.finding).toContain("no verdict");
+    expect(onStep[0]?.finding).toContain("timed out");
+    // No per-step model call was made for it; only the run-level pass ran.
+    expect(
+      responder.calls.filter((call) => call.check === "meta"),
+    ).toHaveLength(1);
   });
 
   it("re-auditing replaces the previous answer rather than accumulating", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: () =>
-        '{"unsupportedFindings":["one"],"missedSignals":[],"reason":"r"}',
+      respond: (_model, _user, system) =>
+        checkOf(system) === "meta"
+          ? '{"unsupportedFindings":["one"],"missedSignals":[],"reason":"r"}'
+          : SAFE_VERDICT,
     };
     const service = makeAudit(stores, responder);
-    seedTrace(stores.traceStore, "trace-meta-2");
-    const trace = stores.traceStore.get("trace-meta-2")!;
-    stores.auditStore.appendAuditorSpans(
-      trace,
-      [
-        {
-          id: "auditor-span-1",
-          traceId: "trace-meta-2",
-          parentId: null,
-          name: "audit.step",
-          label: "Audit · step",
-          kind: "model_call",
-          actor: "system",
-          status: "ok",
-          startedAt: "2026-08-30T00:00:00.000Z",
-          endedAt: "2026-08-30T00:00:01.000Z",
-          durationMs: 1_000,
-          attributes: { context: "ls", output: "{}" },
-          error: null,
-        },
-      ],
-      "",
-    );
 
-    await service.auditAuditor("trace-meta-2");
-    const first = stores.auditStore.metaAudit("trace-meta-2").findings.length;
-    await service.auditAuditor("trace-meta-2");
-    const second = stores.auditStore.metaAudit("trace-meta-2").findings.length;
+    seedTrace(stores.traceStore, "trace-repeat");
+    stores.traceStore.appendSpan(
+      "trace-repeat",
+      promptSpan("trace-repeat", "count the files"),
+    );
+    await service.idle();
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-repeat")!;
+
+    await service.audit(auditTraceId);
+    await service.idle();
+    const first = stores.auditStore.listByTrace(auditTraceId).length;
+    await service.audit(auditTraceId);
+    await service.idle();
+    const second = stores.auditStore.listByTrace(auditTraceId).length;
 
     // Same question asked twice gives one answer, not two stacked.
+    expect(first).toBeGreaterThan(0);
     expect(second).toBe(first);
   });
 
@@ -1164,29 +1393,132 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = { calls: [], respond: () => "{}" };
     const service = makeAudit(stores, responder);
-    seedTrace(stores.traceStore, "trace-meta-3");
+    // An auditor run that opened and asked nothing. It still carries the run
+    // and prompt spans the pipeline opens every trace with, which are not steps
+    // the auditor took — so it has to read as empty despite having spans.
+    seedTrace(stores.traceStore, "trace-empty");
+    stores.traceStore.updateTrace("trace-empty", (trace) => {
+      trace.auditOf = "trace-somewhere";
+      trace.auditDepth = 1;
+    });
+    stores.traceStore.appendSpan("trace-empty", {
+      id: "audit-root",
+      traceId: "trace-empty",
+      parentId: null,
+      name: "agent.run",
+      label: "Agent run · Auditor",
+      kind: "run",
+      actor: "agent",
+      status: "ok",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes: {},
+      error: null,
+    });
 
-    await service.auditAuditor("trace-meta-3");
+    await service.audit("trace-empty");
+    await service.idle();
 
-    const meta = stores.auditStore.metaAudit("trace-meta-3");
-    expect(meta.findings).toHaveLength(1);
-    expect(meta.findings[0]?.category).toBe("audit-health");
-    expect(meta.findings[0]?.finding).toContain("no auditor steps");
+    const findings = stores.auditStore.listByTrace("trace-empty");
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.category).toBe("audit-health");
+    expect(findings[0]?.finding).toContain("no auditor steps");
     // No model call: there was nothing to show it.
     expect(responder.calls).toHaveLength(0);
+  });
+
+  // The endpoint is uniform over traces, so it reaches an Agent's run too.
+  // Asking twice there must not double what the first answer said.
+  it("re-auditing an agent run replaces its run-level answer", async () => {
+    const stores = await makeStores();
+    const service = makeAudit(stores, { calls: [], respond: () => SAFE_VERDICT });
+
+    seedTrace(stores.traceStore, "trace-again");
+    stores.traceStore.appendSpan(
+      "trace-again",
+      promptSpan("trace-again", "count the files"),
+    );
+    await service.idle();
+    stores.traceStore.updateTrace("trace-again", (trace) => {
+      trace.status = "completed";
+    });
+    await service.idle();
+    const first = stores.auditStore.listByTrace("trace-again").length;
+
+    await service.audit("trace-again");
+    await service.idle();
+
+    expect(stores.auditStore.listByTrace("trace-again")).toHaveLength(first);
+  });
+
+  // An audit that reports nothing must mean it found nothing, never that it
+  // stopped looking — the same rule the automatic pass follows.
+  it("says so when the step budget stops it short", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, _user, system) =>
+        checkOf(system) === "meta"
+          ? '{"unsupportedFindings":[],"missedSignals":[],"reason":"sound"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder, null, undefined, 1);
+
+    seedTrace(stores.traceStore, "trace-budget");
+    stores.traceStore.updateTrace("trace-budget", (trace) => {
+      trace.auditOf = "trace-somewhere";
+      trace.auditDepth = 1;
+    });
+    for (const id of ["call-1", "call-2", "call-3"]) {
+      stores.traceStore.appendSpan("trace-budget", {
+        id,
+        traceId: "trace-budget",
+        parentId: null,
+        name: "audit.step.intent",
+        label: "Intent · " + id,
+        kind: "model_call",
+        actor: "system",
+        status: "ok",
+        startedAt: "2026-08-30T00:00:00.000Z",
+        endedAt: "2026-08-30T00:00:01.000Z",
+        durationMs: 1_000,
+        attributes: { context: "evidence", output: "{}" },
+        error: null,
+      });
+    }
+
+    await service.audit("trace-budget");
+    await service.idle();
+
+    const perStep = auditorSpansOf(stores, "trace-budget").filter(
+      (span) => span.name === "audit.auditor.step",
+    );
+    expect(perStep).toHaveLength(1);
+    const notice = stores.auditStore
+      .listByTrace("trace-budget")
+      .find((finding) => finding.finding.includes("step budget"));
+    expect(notice?.finding).toContain("1 of 3");
+    expect(notice?.finding).toContain("2 went unexamined");
+
+    // And it says so again on a repeat: the run-level record is replaced each
+    // time, so a notice written once would quietly vanish on the second audit.
+    await service.audit("trace-budget");
+    await service.idle();
+    expect(
+      stores.auditStore
+        .listByTrace("trace-budget")
+        .some((finding) => finding.finding.includes("step budget")),
+    ).toBe(true);
   });
 
   it("returns null for a run that does not exist", async () => {
     const stores = await makeStores();
     const service = makeAudit(stores, { calls: [], respond: () => "{}" });
-    expect(await service.auditAuditor("nope")).toBeNull();
+    expect(await service.audit("nope")).toBeNull();
   });
 });
 
-// AUDIT_PLAN 1 asks the auditor to establish what a step did before judging it.
-// The summary is written to the chat's audit memory rather than kept in the
-// verdict, because the run-level analyses read the run back as a list of step
-// summaries and the archive download serves those files directly.
 describe("AuditService audit memory", () => {
   it("writes a markdown record and a meta entry for an audited step", async () => {
     const stores = await makeStores();
@@ -1280,7 +1612,7 @@ describe("AuditService audit memory", () => {
     const service = new AuditService({
       traceStore: stores.traceStore,
       auditStore: stores.auditStore,
-      client: fakeClient({ calls: [], respond: () => SAFE_VERDICT }),
+      runner: runnerFor(fakeClient({ calls: [], respond: () => SAFE_VERDICT })),
       securityModel: "sec-model",
       intentModel: "intent-model",
       networkWhitelist: null,
@@ -1393,9 +1725,9 @@ describe("AuditService forward trace", () => {
     );
     expect(forwardCall?.user).toContain("Posted the contents of .env");
     expect(
-      stores.auditStore
-        .listAuditorSpans("trace-forward-1")
-        .some((span) => span.name === "audit.forward-trace"),
+      auditorSpansOf(stores, "trace-forward-1").some(
+        (span) => span.name === "audit.forward-trace",
+      ),
     ).toBe(true);
   });
 
@@ -1463,7 +1795,7 @@ describe("AuditService forward trace ordering", () => {
     const seen: string[] = [];
     // Step audits resolve on a later tick than the run audit's own call, which
     // is what puts the run audit in front of the records it needs.
-    const slowClient: ArkClient = {
+    const slowClient: FakeClient = {
       complete: async ({ user }) => {
         seen.push(user);
         if (user.includes("## Directives found in untrusted content")) {
@@ -1510,7 +1842,7 @@ describe("AuditService forward trace ordering", () => {
       traceStore: stores.traceStore,
       auditStore: stores.auditStore,
       context: stores.contextStore,
-      client: slowClient,
+      runner: runnerFor(slowClient),
       securityModel: "sec-model",
       intentModel: "intent-model",
       networkWhitelist: null,

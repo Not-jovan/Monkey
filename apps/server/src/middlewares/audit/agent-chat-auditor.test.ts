@@ -11,8 +11,8 @@ function auditor(work: Partial<ChatAuditorWork> = {}) {
     runAll: async () => {
       calls.push("all");
     },
-    runMetaAudit: async () => {
-      calls.push("meta");
+    runRequestedAudit: async () => {
+      calls.push("requested");
     },
     ...work,
   });
@@ -72,39 +72,39 @@ describe("AgentChatAuditor", () => {
     expect(chat.reportCap()).toBe(false);
   });
 
-  // Auditing the auditor twice at once would judge a half-written record.
-  it("refuses a second meta-audit while the first is running", async () => {
+  // Auditing the same trace twice at once would judge a half-written record.
+  it("refuses a second requested audit while the first is running", async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => {
       release = resolve;
     });
     const calls: string[] = [];
     const { chat } = auditor({
-      runMetaAudit: async () => {
-        calls.push("meta");
+      runRequestedAudit: async () => {
+        calls.push("requested");
         await pending;
       },
     });
 
-    const first = chat.auditAuditor();
-    expect(await chat.auditAuditor()).toBe("in-flight");
+    const first = chat.auditOnRequest();
+    expect(await chat.auditOnRequest()).toBe("in-flight");
     // The refused trigger did no work; only the first one ran.
-    expect(calls).toEqual(["meta"]);
+    expect(calls).toEqual(["requested"]);
     release();
     expect(await first).toBe("done");
     // And the guard lifts once it is finished.
-    expect(await chat.auditAuditor()).toBe("done");
-    expect(calls).toEqual(["meta", "meta"]);
+    expect(await chat.auditOnRequest()).toBe("done");
+    expect(calls).toEqual(["requested", "requested"]);
   });
 
-  it("lifts the meta-audit guard when the work throws", async () => {
+  it("lifts the requested-audit guard when the work throws", async () => {
     const { chat } = auditor({
-      runMetaAudit: async () => {
+      runRequestedAudit: async () => {
         throw new Error("boom");
       },
     });
-    await expect(chat.auditAuditor()).rejects.toThrow("boom");
-    // Not wedged: a failed meta-audit must not block every later one.
-    await expect(chat.auditAuditor()).rejects.toThrow("boom");
+    await expect(chat.auditOnRequest()).rejects.toThrow("boom");
+    // Not wedged: a failed audit must not block every later one.
+    await expect(chat.auditOnRequest()).rejects.toThrow("boom");
   });
 });

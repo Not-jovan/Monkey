@@ -1067,4 +1067,136 @@ describe("TraceService", () => {
     });
     expect(store.get(RUN_ID)?.evidenceComplete).toBe(false);
   });
+
+  // An in-process run has no event stream, so the caller hands over the span it
+  // already made. This is how an auditor's work becomes a trace.
+  it("records an in-process model call under the run it belongs to", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+
+    const appended = service.recordModelCall(RUN_ID, {
+      id: "call-1",
+      traceId: "whatever",
+      parentId: null,
+      name: "audit.step.summary",
+      label: "Step audit",
+      kind: "model_call",
+      actor: "system",
+      status: "ok",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes: { laneId: "auditor", inputTokens: 30, outputTokens: 12 },
+      error: null,
+    });
+
+    const trace = store.get(RUN_ID)!;
+    expect(trace.auditOf).toBe("other-1");
+    expect(trace.auditDepth).toBe(1);
+    // Reparented onto this run, whatever the caller put there.
+    expect(appended?.traceId).toBe(RUN_ID);
+    const root = trace.spans.find((span) => span.kind === "run");
+    expect(appended?.parentId).toBe(root?.id);
+    // Tokens roll up, so an auditor's run accounts for its cost like any other.
+    expect(trace.usage.inputTokens).toBe(30);
+    expect(trace.usage.outputTokens).toBe(12);
+  });
+
+  it("carries no audit target for an ordinary agent run", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "count files" });
+    expect(store.get(RUN_ID)?.auditOf).toBeNull();
+    expect(store.get(RUN_ID)?.auditDepth).toBe(0);
+  });
+
+  // An auditor's run shares the Agent's id. If it also became "the Agent's
+  // active run", terminating an Agent mid-audit would file the intervention on
+  // the auditor's trace instead of on the run being stopped.
+  it("does not let an auditor's run stand in for the agent's", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "count files" });
+
+    const AUDIT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    service.onRunStart(
+      { ...agent, name: "Auditor" },
+      {
+        id: AUDIT_ID,
+        prompt: "Audit of trace " + RUN_ID,
+        auditOf: RUN_ID,
+        auditDepth: 1,
+      },
+    );
+
+    service.onUserIntervention(agent.id, "terminate");
+
+    const intervened = (traceId: string) =>
+      (store.get(traceId)?.spans ?? []).some(
+        (span) => span.name === "user.intervention",
+      );
+    expect(intervened(RUN_ID)).toBe(true);
+    expect(intervened(AUDIT_ID)).toBe(false);
+  });
+
+  // The fallback path, taken once the agent's run has ended: listByAgent is
+  // newest first, and an auditor's run is newer than the run it judged.
+  it("skips auditor runs when falling back to the agent's latest", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "count files" });
+    service.onRunEnd(RUN_ID, { status: "completed", output: "done" });
+
+    const AUDIT_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    service.onRunStart(
+      { ...agent, name: "Auditor" },
+      {
+        id: AUDIT_ID,
+        prompt: "Audit of trace " + RUN_ID,
+        auditOf: RUN_ID,
+        auditDepth: 1,
+      },
+    );
+
+    service.onUserIntervention(agent.id, "terminate");
+
+    expect(
+      (store.get(AUDIT_ID)?.spans ?? []).some(
+        (span) => span.name === "user.intervention",
+      ),
+    ).toBe(false);
+  });
+
+  // Nobody prompted the auditor: its prompt is a sentence the trace service
+  // wrote to open the run. Kept for the record, but not a step it took.
+  it("keeps the auditor's synthetic prompt out of the step list", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+
+    const prompt = store
+      .get(RUN_ID)!
+      .spans.find((span) => span.name === "user.prompt");
+    expect(prompt?.attributes.layoutOnly).toBe(true);
+    // The prompt itself is still on the record.
+    expect(prompt?.attributes.prompt).toBe("Audit of trace other-1");
+    // And the run is named for what it judged, not for the agent it borrows.
+    const root = store.get(RUN_ID)!.spans.find((span) => span.kind === "run");
+    expect(root?.label).toContain("Audit of run other-1");
+  });
+
+  it("still shows an agent run's own prompt as a step", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, { id: RUN_ID, prompt: "count files" });
+    const prompt = store
+      .get(RUN_ID)!
+      .spans.find((span) => span.name === "user.prompt");
+    expect(prompt?.attributes.layoutOnly).toBeUndefined();
+  });
 });

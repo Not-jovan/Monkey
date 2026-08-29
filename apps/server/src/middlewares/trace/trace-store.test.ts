@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -42,6 +42,8 @@ function trace(id: string): TraceRecord {
     recoveredErrorCount: 0,
     evidenceComplete: true,
     unrecognizedEvents: 0,
+    auditOf: null,
+    auditDepth: 0,
     spans: [],
   };
 }
@@ -118,5 +120,66 @@ describe("TraceStore", () => {
     expect(restored?.status).toBe("failed");
     expect(restored?.spans[0]?.status).toBe("error");
     expect(restored?.spans[0]?.error).toContain("restarted");
+  });
+
+  it("indexes an auditor trace against what it audited, across a restart", async () => {
+    const { store, directory } = await makeStore();
+    store.create(trace("agent-run"));
+    const audit = { ...trace("audit-run"), auditOf: "agent-run", auditDepth: 1 };
+    store.create(audit);
+
+    expect(store.auditorTraceFor("agent-run")).toBe("audit-run");
+    expect(store.auditorTraceFor("audit-run")).toBeNull();
+
+    await store.flush();
+    const reopened = new TraceStore(directory);
+    await reopened.initialize();
+    expect(reopened.auditorTraceFor("agent-run")).toBe("audit-run");
+  });
+
+  // The stack has no ceiling, so the walk back to the Agent run must not either.
+  it("walks the chain from any depth back to the agent run", async () => {
+    const { store } = await makeStore();
+    store.create(trace("level-0"));
+    store.create({ ...trace("level-1"), auditOf: "level-0", auditDepth: 1 });
+    store.create({ ...trace("level-2"), auditOf: "level-1", auditDepth: 2 });
+    store.create({ ...trace("level-3"), auditOf: "level-2", auditDepth: 3 });
+
+    expect(store.auditChain("level-3").map((entry) => entry.id)).toEqual([
+      "level-0",
+      "level-1",
+      "level-2",
+      "level-3",
+    ]);
+    expect(store.auditChain("level-0").map((entry) => entry.id)).toEqual([
+      "level-0",
+    ]);
+  });
+
+  // A corrupted file pointing a trace at itself would otherwise hang the
+  // request that read it.
+  it("does not loop on a chain that points at itself", async () => {
+    const { store } = await makeStore();
+    store.create({ ...trace("loop"), auditOf: "loop", auditDepth: 1 });
+    expect(store.auditChain("loop").map((entry) => entry.id)).toEqual(["loop"]);
+  });
+
+  // Written before auditors had traces of their own. It is an agent run, and
+  // must not read as an auditor's.
+  it("reads a trace written before the audit fields existed as depth zero", async () => {
+    const { store, directory } = await makeStore();
+    const legacy = trace("legacy") as Record<string, unknown>;
+    delete legacy.auditOf;
+    delete legacy.auditDepth;
+    await writeFile(
+      path.join(directory, "legacy.json"),
+      JSON.stringify(legacy) + "\n",
+      "utf8",
+    );
+
+    const reopened = new TraceStore(directory);
+    await reopened.initialize();
+    expect(reopened.get("legacy")?.auditOf).toBeNull();
+    expect(reopened.get("legacy")?.auditDepth).toBe(0);
   });
 });

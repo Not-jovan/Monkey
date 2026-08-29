@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ArkApiError, type ArkClient } from "../../ark-client.js";
+import { ArkApiError } from "../../ark-client.js";
+import type { AgentRunner } from "../../types.js";
 import { AuditorModel, describeError, summarizeError } from "./auditor-model.js";
 
 const verdict = z.object({ ok: z.boolean() });
@@ -15,17 +16,26 @@ const notActivated = (requestId: string) =>
     404,
   );
 
+// Where the auditor is running, which every call now carries. The in-process
+// runner ignores the workspace; it is here because AgentRunner asks for one.
+const RUN = { agentId: "agent-1", workspacePath: "/data/agent-runs/agent-1/chat-1" };
+
 // Counts the calls so a test can tell a request that was made from one the
 // remembered outage skipped.
-function fakeClient(): ArkClient & { models: string[] } {
+function fakeRunner(): AgentRunner & { models: string[] } {
   const models: string[] = [];
   return {
     models,
-    complete: async ({ model }) => {
-      models.push(model);
-      if (model !== "primary-model") return { content: ANSWER };
-      throw notActivated("request-id-" + models.length);
+    run: async ({ model }) => {
+      const named = model ?? "";
+      models.push(named);
+      if (named === "primary-model") {
+        throw notActivated("request-id-" + models.length);
+      }
+      return { output: ANSWER, threadId: null, usage: null, model: named };
     },
+    cancel: async () => false,
+    isAvailable: async () => true,
   };
 }
 
@@ -54,10 +64,10 @@ describe("summarizeError", () => {
 
 describe("AuditorModel.complete", () => {
   it("gives every check the same words for one outage", async () => {
-    const client = fakeClient();
-    const model = new AuditorModel(client);
+    const runner = fakeRunner();
+    const model = new AuditorModel(runner);
     const ask = () =>
-      model.complete("primary-model", "fallback-model", "s", "u", verdict);
+      model.complete(RUN, "primary-model", "fallback-model", "s", "u", verdict);
 
     // Concurrent, the way one step's checks actually run: all three reach the
     // provider before any of them learns the model is gone, so each is handed
@@ -74,18 +84,20 @@ describe("AuditorModel.complete", () => {
   });
 
   it("repeats the remembered reason rather than a bare not-available", async () => {
-    const client = fakeClient();
-    const model = new AuditorModel(client);
+    const runner = fakeRunner();
+    const model = new AuditorModel(runner);
     const first = await model.complete(
+      RUN,
       "primary-model",
       "fallback-model",
       "s",
       "u",
       verdict,
     );
-    const calls = client.models.length;
+    const calls = runner.models.length;
 
     const later = await model.complete(
+      RUN,
       "primary-model",
       "fallback-model",
       "s",
@@ -95,17 +107,18 @@ describe("AuditorModel.complete", () => {
 
     // The primary is not tried again, and what the check reports does not
     // change just because it skipped the call.
-    expect(client.models.slice(calls)).not.toContain("primary-model");
+    expect(runner.models.slice(calls)).not.toContain("primary-model");
     expect(later.failure).toBe(first.failure);
   });
 
   // The attempt is what the auditor's own span shows, and an operator taking a
   // failure to the provider needs the id the summary drops.
   it("keeps the request id on the attempt it summarised away", async () => {
-    const client = fakeClient();
-    const model = new AuditorModel(client);
+    const runner = fakeRunner();
+    const model = new AuditorModel(runner);
 
     const answer = await model.complete(
+      RUN,
       "primary-model",
       "fallback-model",
       "s",

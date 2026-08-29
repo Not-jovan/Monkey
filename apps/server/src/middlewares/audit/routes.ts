@@ -19,22 +19,25 @@ export function registerAuditRoutes(
     return payload;
   });
 
-  // PLAN_AUDITOR: audit the auditor, on demand only. There is deliberately no
-  // subscription that reaches this — the auditor's own steps would otherwise
-  // become input for another meta-audit, without limit.
-  app.post("/api/audits/:id/meta", async (request, reply) => {
+  // Audits any trace, whatever produced it: an Agent's run, or the run of the
+  // auditor that judged it, or the run of the auditor that judged *that*.
+  //
+  // On demand only, at every depth. Nothing subscribes to this — the automatic
+  // audit fires for depth 0 alone — so a stack of auditors goes exactly as deep
+  // as someone has asked for and no further.
+  app.post("/api/traces/:id/audit", async (request, reply) => {
     const { id } = traceParams.parse(request.params);
     if (!deps.auditService) {
       throw new HttpError(503, "Auditing is not enabled");
     }
-    const result = await deps.auditService.auditAuditor(id);
+    const result = await deps.auditService.audit(id);
     if (result === null) {
-      throw new HttpError(404, "Audit not found");
+      throw new HttpError(404, "Trace not found");
     }
     if (result === "in-flight") {
-      throw new HttpError(409, "A meta-audit is already running for this run");
+      throw new HttpError(409, "An audit is already running for this trace");
     }
-    return reply.send({ traceId: id, ...result });
+    return reply.send(result);
   });
 
   // The plan's /audit/{chatId} download: every artifact the auditor wrote for
@@ -62,15 +65,19 @@ export function registerAuditRoutes(
     }
     // The audit document itself is not in the memory folder, and it is the part
     // that carries the findings the UI shows.
+    const auditTraceId = deps.traceStore.auditorTraceFor(id);
     archive.append(
       JSON.stringify(
         {
           traceId: id,
           agentId: trace.agentId,
           findings: deps.auditStore.listByTrace(id),
-          auditorSpans: deps.auditStore.listAuditorSpans(id),
-          metaAudit: deps.auditStore.metaAudit(id),
+          auditTraceId,
+          auditorSpans: auditorSpans(id),
           health: deps.auditStore.health(id),
+          // Written by an earlier version, which kept an audit of the auditor
+          // on the audited trace's document instead of giving it one of its own.
+          legacyMetaAudit: deps.auditStore.metaAudit(id),
         },
         null,
         1,
@@ -81,19 +88,33 @@ export function registerAuditRoutes(
     return reply;
   });
 
+  // What the auditor did while judging this trace. Its own trace's spans, or —
+  // for a run audited before auditors had traces — the array those spans used
+  // to be stashed in on this document.
+  function auditorSpans(traceId: string) {
+    const auditTraceId = deps.traceStore.auditorTraceFor(traceId);
+    if (auditTraceId === null) return deps.auditStore.listAuditorSpans(traceId);
+    return deps.traceStore.get(auditTraceId)?.spans ?? [];
+  }
+
   function auditorTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
-    const meta = deps.auditStore.metaAudit(id);
+    const legacy = deps.auditStore.metaAudit(id);
     return {
       traceId: id,
       agentId: trace.agentId,
       health: deps.auditStore.health(id),
-      spans: deps.auditStore.listAuditorSpans(id),
-      // Findings from auditing the auditor. Empty until someone asks for it:
-      // this never runs on its own.
-      metaAudit: meta.findings,
-      metaAuditedAt: meta.auditedAt,
+      spans: auditorSpans(id),
+      // The auditor's own run. Present once this trace has been audited, and
+      // the thing "audit this auditor" navigates to — the next level up reads
+      // it exactly as this level reads the Agent's run.
+      auditTraceId: deps.traceStore.auditorTraceFor(id),
+      // An audit of the auditor recorded before that run had a trace of its
+      // own. Read-only: nothing writes here any more, but a finding already
+      // recorded should not vanish because the shape around it changed.
+      legacyMetaAudit: legacy.findings,
+      legacyMetaAuditedAt: legacy.auditedAt,
     };
   }
 }
