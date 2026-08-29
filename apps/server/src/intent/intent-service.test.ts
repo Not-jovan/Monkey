@@ -1,11 +1,11 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ArkClient } from "../audits/ark-client.js";
 import { classifyIntent } from "./intent-classifier.js";
 import { intentFileSchema } from "./intent-model.js";
-import { IntentService } from "./intent-service.js";
+import { IntentService, type ClassifyFailure } from "./intent-service.js";
 import { IntentStore } from "./intent-store.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -44,13 +44,15 @@ const OBJECTIVE = "Build a todo list web application";
 
 function makeService(store: IntentStore, replies: string[]) {
   const { client, calls } = fakeClient(replies);
+  const dropped: ClassifyFailure[] = [];
   const service = new IntentService({
     store,
     client,
     model: "intent-model",
     enabled: true,
+    onClassifyFailed: (failure) => dropped.push(failure),
   });
-  return { service, calls };
+  return { service, calls, dropped };
 }
 
 describe("classifyIntent", () => {
@@ -61,7 +63,7 @@ describe("classifyIntent", () => {
     const result = await classifyIntent(
       client,
       "m",
-      { objective: OBJECTIVE, extended: [] },
+      { instructions: "", objective: OBJECTIVE, extended: [] },
       "Build the todo list UI.",
     );
     expect(result.classification?.classification).toBe("NO_CHANGE");
@@ -77,7 +79,7 @@ describe("classifyIntent", () => {
     const result = await classifyIntent(
       client,
       "m",
-      { objective: OBJECTIVE, extended: [] },
+      { instructions: "", objective: OBJECTIVE, extended: [] },
       "Do not read from .env files.",
     );
     expect(result.attempts).toBe(2);
@@ -92,7 +94,7 @@ describe("classifyIntent", () => {
     const result = await classifyIntent(
       client,
       "m",
-      { objective: OBJECTIVE, extended: [] },
+      { instructions: "", objective: OBJECTIVE, extended: [] },
       "anything",
     );
     expect(result.classification).toBeNull();
@@ -106,7 +108,7 @@ describe("classifyIntent", () => {
     const result = await classifyIntent(
       client,
       "m",
-      { objective: OBJECTIVE, extended: [] },
+      { instructions: "", objective: OBJECTIVE, extended: [] },
       "anything",
     );
     expect(result.classification).toBeNull();
@@ -120,7 +122,7 @@ describe("classifyIntent", () => {
     await classifyIntent(
       client,
       "m",
-      { objective: OBJECTIVE, extended: ["Do not read .env files."] },
+      { instructions: "", objective: OBJECTIVE, extended: ["Do not read .env files."] },
       "Add tests for the todo API.",
     );
     expect(calls[0]?.user).toContain("Do not read .env files.");
@@ -133,13 +135,180 @@ describe("IntentService", () => {
     const { store } = await makeStore();
     const { service } = makeService(store, []);
     service.seed(AGENT, "  " + OBJECTIVE + "  ");
+    // Instructions are the source of truth, so seeding records them as both the
+    // base and the working objective. The two agreeing is what "in sync" means.
     expect(service.state(AGENT)).toEqual({
+      instructions: OBJECTIVE,
       objective: OBJECTIVE,
       extended: [],
     });
     const view = service.view(AGENT);
     expect(view.intentId).toBeTruthy();
     expect(view.versions.at(-1)?.update).toBeUndefined();
+    expect(view.diverged).toBe(false);
+  });
+
+  describe("instructions as the source of truth", () => {
+    const REVISED = "Build a todo list web application with a REST API";
+
+    it("moves the objective when the instructions are edited", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+
+      service.syncInstructions(AGENT, REVISED);
+
+      // The whole point: editing instructions used to leave the auditor judging
+      // against the spec the agent had already stopped following.
+      expect(service.state(AGENT)).toEqual({
+        instructions: REVISED,
+        objective: REVISED,
+        extended: [],
+      });
+      const latest = service.view(AGENT).versions.at(-1);
+      expect(latest?.update?.kind).toBe("instructions");
+      expect(latest?.update?.logs[0]).toContain(REVISED);
+    });
+
+    it("appends nothing when the instructions did not change", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+      const before = service.view(AGENT).versions.length;
+
+      // PATCH fires on any field, so renaming an agent reaches this path.
+      service.syncInstructions(AGENT, OBJECTIVE);
+      service.syncInstructions(AGENT, "  " + OBJECTIVE + "  ");
+
+      expect(service.view(AGENT).versions).toHaveLength(before);
+    });
+
+    it("keeps constraints gathered from the conversation across an edit", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, [
+        '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
+      ]);
+      service.seed(AGENT, OBJECTIVE);
+      service.observe(AGENT, OBJECTIVE, {
+        content: "Never read .env files.",
+        traceId: "trace-1",
+      });
+      await service.idle();
+
+      service.syncInstructions(AGENT, REVISED);
+
+      // The user stated this separately and never took it back; an unrelated
+      // instructions edit must not quietly drop it.
+      expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
+      expect(service.state(AGENT).objective).toBe(REVISED);
+    });
+
+    it("leaves a deliberate divergence alone when instructions are edited", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, [
+        '{"classification":"INTENT_UPDATE","reason":"pivot","extendedIntent":[],"objective":"Build a calendar app"}',
+      ]);
+      service.seed(AGENT, OBJECTIVE);
+      service.observe(AGENT, OBJECTIVE, {
+        content: "Forget the todo app, build a calendar instead.",
+        traceId: "trace-1",
+      });
+      await service.idle();
+      expect(service.view(AGENT).diverged).toBe(true);
+
+      service.syncInstructions(AGENT, REVISED);
+
+      // Overwriting here would silently discard a pivot the user made and has
+      // not yet adopted. The instructions move; the objective stays put.
+      expect(service.state(AGENT)).toEqual({
+        instructions: REVISED,
+        objective: "Build a calendar app",
+        extended: [],
+      });
+      expect(service.view(AGENT).diverged).toBe(true);
+    });
+
+    it("reports a conversational pivot as diverged without touching instructions", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, [
+        '{"classification":"INTENT_UPDATE","reason":"pivot","extendedIntent":[],"objective":"Build a calendar app"}',
+      ]);
+      service.seed(AGENT, OBJECTIVE);
+      service.observe(AGENT, OBJECTIVE, {
+        content: "Forget the todo app, build a calendar instead.",
+        traceId: "trace-1",
+      });
+      await service.idle();
+
+      // A classification never rewrites user-authored configuration; it records
+      // the gap and waits to be adopted.
+      expect(service.state(AGENT).instructions).toBe(OBJECTIVE);
+      expect(service.state(AGENT).objective).toBe("Build a calendar app");
+      expect(service.pendingAdoption(AGENT)).toBe("Build a calendar app");
+    });
+
+    it("has nothing to adopt while the objective tracks the instructions", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+      expect(service.pendingAdoption(AGENT)).toBeNull();
+    });
+
+    it("does not let a revert claim the agent was told something it was not", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+      const original = service.view(AGENT).intentId!;
+
+      // The operator edits the instructions in agent settings. AGENTS.md now
+      // says REVISED, and that is what the agent reads from here on.
+      service.syncInstructions(AGENT, REVISED);
+
+      service.revert(AGENT, original);
+
+      // A revert restores the goal, not the agent's configuration — this cannot
+      // rewrite AGENTS.md, so recording the old instructions would have the
+      // record assert something false about what the agent is following.
+      const state = service.state(AGENT);
+      expect(state.instructions).toBe(REVISED);
+      expect(state.objective).toBe(OBJECTIVE);
+      // And because the two now genuinely disagree, it is reported rather than
+      // hidden behind a stale mirror that made them look identical.
+      expect(service.view(AGENT).diverged).toBe(true);
+      expect(service.pendingAdoption(AGENT)).toBe(OBJECTIVE);
+    });
+
+    it("keeps the objective when the instructions are cleared", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      service.seed(AGENT, OBJECTIVE);
+
+      service.syncInstructions(AGENT, "");
+
+      // Clearing removes the base, not the goal. Letting the objective follow
+      // to empty left the auditor with no spec and a silent fallback to
+      // whatever that run's prompt happened to say.
+      expect(service.state(AGENT).objective).toBe(OBJECTIVE);
+      expect(service.state(AGENT).instructions).toBe("");
+      // Nothing to be out of step with, so this is not a divergence.
+      expect(service.view(AGENT).diverged).toBe(false);
+      expect(service.view(AGENT).versions.at(-1)?.update?.logs[0]).toContain(
+        "Instructions cleared",
+      );
+    });
+
+    it("reads a version written before instructions were tracked as in sync", async () => {
+      const { store } = await makeStore();
+      const { service } = makeService(store, []);
+      // What an intent file on disk looks like from before this field existed.
+      store.append(AGENT, {
+        instructions: "",
+        objective: OBJECTIVE,
+        extended: ["Do not read .env files."],
+      });
+      expect(service.view(AGENT).diverged).toBe(false);
+      expect(service.pendingAdoption(AGENT)).toBeNull();
+    });
   });
 
   it("uses the first message as the objective when there are no instructions", async () => {
@@ -147,7 +316,6 @@ describe("IntentService", () => {
     const { service, calls } = makeService(store, []);
     service.observe(AGENT, "", {
       content: "Build a todo list web application",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -158,6 +326,94 @@ describe("IntentService", () => {
     expect(service.view(AGENT).versions.at(-1)?.update).toBeUndefined();
   });
 
+  it("lifts a constraint the user takes back instead of contradicting it", async () => {
+    const { store } = await makeStore();
+    const { service } = makeService(store, [
+      '{"classification":"INTENT_UPDATE","reason":"prohibition","extendedIntent":["Do not read .env files."]}',
+      '{"classification":"INTENT_UPDATE","reason":"relaxation","extendedIntent":[],"removedIntent":["Do not read .env files."]}',
+    ]);
+    service.seed(AGENT, OBJECTIVE);
+    service.observe(AGENT, OBJECTIVE, {
+      content: "Do not read from .env files.",
+      traceId: "trace-1",
+    });
+    await service.idle();
+    expect(service.state(AGENT).extended).toEqual(["Do not read .env files."]);
+
+    service.observe(AGENT, OBJECTIVE, {
+      content: "Actually, you can read .env now.",
+      traceId: "trace-2",
+    });
+    await service.idle();
+
+    // The rule is gone, not sitting next to its own opposite. A spec holding
+    // both a prohibition and its permission cannot be enforced by anything.
+    expect(service.state(AGENT).extended).toEqual([]);
+    const latest = service.view(AGENT).versions.at(-1);
+    expect(latest?.update?.removedConstraints).toEqual([
+      "Do not read .env files.",
+    ]);
+    expect(latest?.update?.logs).toContain(
+      "Removed constraint: Do not read .env files.",
+    );
+  });
+
+  it("matches a lifted constraint through punctuation and case drift", async () => {
+    const { store } = await makeStore();
+    const { service } = makeService(store, [
+      '{"classification":"INTENT_UPDATE","reason":"relaxation","extendedIntent":[],"removedIntent":["do not read .env files"]}',
+    ]);
+    store.seed(AGENT, OBJECTIVE);
+    store.append(AGENT, {
+      instructions: "",
+      objective: OBJECTIVE,
+      extended: ["Do not read .env files."],
+    });
+    service.observe(AGENT, OBJECTIVE, {
+      content: "You can read .env now.",
+      traceId: "trace-1",
+    });
+    await service.idle();
+    // Round-tripping the text through a model must not let a capital letter or
+    // a missing full stop leave the rule standing.
+    expect(service.state(AGENT).extended).toEqual([]);
+  });
+
+  it("reports a message it could not classify instead of dropping it", async () => {
+    const { store } = await makeStore();
+    const { service, dropped } = makeService(store, ["bad", "worse", "worst"]);
+    service.seed(AGENT, OBJECTIVE);
+    service.observe(AGENT, OBJECTIVE, {
+      content: "From now on, never touch .env files.",
+      traceId: "trace-1",
+    });
+    await service.idle();
+
+    // The spec is genuinely unchanged — that is the failure, not the report.
+    expect(service.state(AGENT).extended).toEqual([]);
+    // But something has to say so, or the user believes a rule is in force
+    // that the auditor has never heard of.
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]?.agentId).toBe(AGENT);
+    expect(dropped[0]?.traceId).toBe("trace-1");
+    expect(dropped[0]?.attempts).toBe(3);
+    expect(dropped[0]?.failure).toBeTruthy();
+  });
+
+  it("stays quiet when the classifier succeeds", async () => {
+    const { store } = await makeStore();
+    const { service, dropped } = makeService(store, [
+      '{"classification":"NO_CHANGE","reason":"work","extendedIntent":[]}',
+    ]);
+    service.seed(AGENT, OBJECTIVE);
+    service.observe(AGENT, OBJECTIVE, {
+      content: "Build the todo list UI.",
+      traceId: "trace-1",
+    });
+    await service.idle();
+    expect(dropped).toEqual([]);
+  });
+
   it("leaves the specification alone on NO_CHANGE", async () => {
     const { store } = await makeStore();
     const { service } = makeService(store, [
@@ -166,7 +422,6 @@ describe("IntentService", () => {
     service.seed(AGENT, OBJECTIVE);
     service.observe(AGENT, OBJECTIVE, {
       content: "Build the todo list UI.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -182,7 +437,6 @@ describe("IntentService", () => {
     service.seed(AGENT, OBJECTIVE);
     service.observe(AGENT, OBJECTIVE, {
       content: "Do not read from .env files.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -216,13 +470,11 @@ describe("IntentService", () => {
     service.seed(AGENT, OBJECTIVE);
     service.observe(AGENT, OBJECTIVE, {
       content: "Do not read .env.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
     service.observe(AGENT, OBJECTIVE, {
       content: "Again: do not read .env.",
-      messageId: "msg-2",
       traceId: "trace-2",
     });
     await service.idle();
@@ -239,7 +491,6 @@ describe("IntentService", () => {
     const seedId = service.currentId(AGENT);
     service.observe(AGENT, OBJECTIVE, {
       content: "Forget the todo app. I want a calendar.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -261,7 +512,6 @@ describe("IntentService", () => {
     service.seed(AGENT, OBJECTIVE);
     service.observe(AGENT, OBJECTIVE, {
       content: "Do not read .env.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await expect(service.idle()).resolves.toBeUndefined();
@@ -277,7 +527,6 @@ describe("IntentService", () => {
     const seedId = service.currentId(AGENT);
     service.observe(AGENT, OBJECTIVE, {
       content: "All new code must be TypeScript.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -316,7 +565,6 @@ describe("IntentService", () => {
     const seedId = service.currentId(AGENT);
     service.observe(AGENT, OBJECTIVE, {
       content: "From now on, use HTML instead of Markdown.",
-      messageId: "msg-1",
       traceId: "trace-1",
     });
     await service.idle();
@@ -347,5 +595,33 @@ describe("IntentService", () => {
       expect(service.revert(AGENT, service.currentId(AGENT)).created).toBeNull();
       expect(service.revert(AGENT, "not-a-version").created).toBeNull();
     });
+  });
+});
+
+describe("IntentStore persistence", () => {
+  it("reports a write that did not land instead of swallowing it", async () => {
+    const failures: { message: string; error?: unknown }[] = [];
+    // A path whose parent is a file, not a directory: writeFile fails with
+    // ENOTDIR every time, standing in for a full disk or a permissions problem.
+    const directory = await mkdtemp(path.join(tmpdir(), "intent-badpath-"));
+    const blocker = path.join(directory, "blocker");
+    await writeFile(blocker, "not a directory", "utf8");
+    const store = new IntentStore(path.join(blocker, "intent"), (message, error) =>
+      failures.push({ message, error }),
+    );
+    cleanups.push(async () => {
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    });
+
+    store.seed(AGENT, OBJECTIVE, OBJECTIVE);
+    await store.flush();
+
+    // In memory the spec looks saved. Without this report, the divergence
+    // between memory and disk is only discovered after a restart, by which
+    // point the constraint is gone and nothing ever said so.
+    expect(store.latest(AGENT)?.version.objective).toBe(OBJECTIVE);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.message).toContain(AGENT);
+    expect(failures[0]?.error).toBeInstanceOf(Error);
   });
 });

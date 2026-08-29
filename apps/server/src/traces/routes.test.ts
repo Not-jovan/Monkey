@@ -232,12 +232,14 @@ describe("Glassbox routes", () => {
     });
     intentStore.seed(AGENT_ID, "Build a todo list web application");
     const intentId = intentStore.append(AGENT_ID, {
+      instructions: "",
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
       update: {
         kind: "classified",
         logs: ["Do not read .env files.", "prohibition"],
         addedConstraints: ["Do not read .env files."],
+        removedConstraints: [],
         previousObjective: null,
         traceId: null,
         revertedFrom: null,
@@ -281,6 +283,7 @@ describe("Glassbox routes", () => {
     intentStore.seed(AGENT_ID, "Build a todo list web application");
     const seedId = intentStore.latest(AGENT_ID)?.intentId ?? "";
     const updatedId = intentStore.append(AGENT_ID, {
+      instructions: "",
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
     });

@@ -319,6 +319,7 @@ export function TraceDetailPage() {
         <TraceIntent
           trace={trace}
           intentId={detailQuery.data?.intentId ?? null}
+          intentIds={detailQuery.data?.intentIds ?? []}
         />
       )}
 

@@ -19,11 +19,17 @@ export interface TraceDetail {
   auditComplete: boolean;
   auditHealth: AuditHealth;
   intentId: string | null;
+  // Every spec version this run's findings were judged against. Length > 1
+  // means the spec moved mid-run.
+  intentIds: string[];
   context: ContextView | null;
 }
 
 export interface IntentView {
   intent: IntentState;
+  // The objective has moved away from the agent's instructions and has not been
+  // adopted into them. Derived server-side from the two values.
+  diverged: boolean;
   versions: IntentVersionEntry[];
   intentId: string | null;
 }
@@ -149,6 +155,12 @@ export const api = {
     request<IntentView>("/api/agents/" + id + "/intent/revert", {
       method: "POST",
       body: JSON.stringify({ intentId }),
+    }),
+  // Writes the diverged objective into the agent's instructions, regenerating
+  // the AGENTS.md the agent reads so both sides describe the same spec again.
+  adoptIntent: (id: string) =>
+    request<{ intent: IntentView }>("/api/agents/" + id + "/intent/adopt", {
+      method: "POST",
     }),
   downloadTrace: (id: string) =>
     request<TraceDetail & { exportedAt: string }>(

@@ -6,6 +6,11 @@ export const intentClassification = z.object({
   classification: z.enum(["NO_CHANGE", "INTENT_UPDATE"]),
   reason: z.string().default(""),
   extendedIntent: z.array(z.string()).default([]),
+  // The prompt has always asked the model to treat "actually, you can read
+  // .env now" as an update, but there was no field in which to say what was
+  // relaxed. The only expressible answer was to append the permission next to
+  // the prohibition and hand the auditor a spec contradicting itself.
+  removedIntent: z.array(z.string()).default([]),
   // Not in PLAN_INTENT's output block. Without it a full pivot ("Forget the
   // todo app, I want a calendar") leaves the objective stale forever and every
   // later audit compares against a goal the user abandoned. Optional, so a
@@ -66,7 +71,14 @@ const SYSTEM_PROMPT = [
   "Return JSON only:",
   '{"classification":"NO_CHANGE"|"INTENT_UPDATE","reason":"short explanation",',
   '"extendedIntent":["only newly introduced constraints, requirements,',
-  ' preferences, or scope changes"],"objective":null}',
+  ' preferences, or scope changes"],',
+  '"removedIntent":["constraints listed under Current Extended Intent that this',
+  ' message lifts, copied verbatim"],"objective":null}',
+  "",
+  "When the message relaxes or cancels a rule already in force, copy that rule",
+  "into removedIntent exactly as it appears under Current Extended Intent.",
+  "Never express a relaxation by adding its opposite to extendedIntent: a spec",
+  "holding both a prohibition and its permission cannot be enforced.",
   "",
   "If classification is NO_CHANGE, extendedIntent must be an empty array.",
   "Set objective to the new goal only when the user replaces the objective",
@@ -137,7 +149,12 @@ export async function classifyIntent(
         // rather than trusting the model to remember.
         if (value.classification === "NO_CHANGE") {
           return {
-            classification: { ...value, extendedIntent: [], objective: null },
+            classification: {
+              ...value,
+              extendedIntent: [],
+              removedIntent: [],
+              objective: null,
+            },
             attempts: attempt,
             failure: null,
           };

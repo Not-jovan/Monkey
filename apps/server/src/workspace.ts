@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { Agent } from "./types.js";
 
@@ -35,7 +35,44 @@ export class WorkspaceManager {
     );
   }
 
+  // The exact bytes AGENTS.md should hold for this agent. Factored out so drift
+  // can be detected by comparing against the file, rather than by re-deriving
+  // the format somewhere else and slowly disagreeing with it.
+  instructionsDocument(agent: Agent): string {
+    return this.buildInstructions(agent);
+  }
+
+  // What the agent will actually read. Null when the file is missing, which is
+  // itself drift: something removed the spec the agent is supposed to follow.
+  async readInstructions(agent: Agent): Promise<string | null> {
+    try {
+      return await readFile(
+        path.join(agent.workspacePath, "AGENTS.md"),
+        "utf8",
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  // AGENTS.md lives inside the workspace and the default sandbox is
+  // workspace-write, so the agent can edit the instructions it is governed by.
+  // Nothing else writes this file between runs, so any difference means someone
+  // or something other than the platform changed it.
+  async instructionsDrifted(agent: Agent): Promise<boolean> {
+    const onDisk = await this.readInstructions(agent);
+    return onDisk !== this.buildInstructions(agent);
+  }
+
   async writeInstructions(agent: Agent): Promise<void> {
+    await writeFile(
+      path.join(agent.workspacePath, "AGENTS.md"),
+      this.buildInstructions(agent),
+      "utf8",
+    );
+  }
+
+  private buildInstructions(agent: Agent): string {
     const content = [
       "# Platform-managed Agent instructions",
       "",
@@ -59,7 +96,7 @@ export class WorkspaceManager {
     ]
       .filter((line, index, lines) => !(line === "" && lines[index - 1] === ""))
       .join("\n");
-    await writeFile(path.join(agent.workspacePath, "AGENTS.md"), content, "utf8");
+    return content;
   }
 
   async archive(agent: Agent): Promise<string> {

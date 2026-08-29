@@ -182,6 +182,10 @@ export function registerGlassboxRoutes(
       auditComplete: deps.auditStore.isRunComplete(id),
       auditHealth: deps.auditStore.health(id),
       intentId: deps.auditStore.intentId(id),
+      // Every version this run was judged against. More than one means the
+      // spec moved mid-run, so naming a single "spec in force" would be a
+      // half-truth.
+      intentIds: deps.auditStore.intentIds(id),
       // What the agent carried in, what it leaves behind, and where this run
       // sits on its Codex thread.
       context: deps.contextService?.view(id) ?? null,
@@ -206,6 +210,10 @@ export function registerGlassboxRoutes(
       auditComplete: deps.auditStore.isRunComplete(id),
       auditHealth: deps.auditStore.health(id),
       intentId: deps.auditStore.intentId(id),
+      // Every version this run was judged against. More than one means the
+      // spec moved mid-run, so naming a single "spec in force" would be a
+      // half-truth.
+      intentIds: deps.auditStore.intentIds(id),
       context: deps.contextService?.view(id) ?? null,
     };
   };

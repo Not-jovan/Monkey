@@ -2411,6 +2411,50 @@ textarea:focus {
   text-decoration: line-through;
 }
 
+/* A divergence is a claim that two things disagree, so it is styled as a
+   notice rather than an error: nothing is broken, but the agent and the
+   auditor are working from different specs until someone adopts or reverts. */
+.intent-diverged {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--purple);
+  border-radius: 6px;
+  background: var(--purple-soft);
+}
+
+.intent-diverged p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+.intent-adopt {
+  align-self: flex-start;
+  padding: 5px 10px;
+  border: 1px solid var(--purple);
+  border-radius: 6px;
+  background: var(--paper);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--purple-dark);
+  cursor: pointer;
+}
+
+.intent-adopt:hover:not(:disabled) {
+  background: var(--purple);
+  color: var(--paper);
+}
+
+.intent-adopt:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .intent-change-error {
   margin: 0;
   font-size: 12px;

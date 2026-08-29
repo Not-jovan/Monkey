@@ -1,4 +1,4 @@
-import type { IntentVersionEntry } from "../types";
+import type { IntentUpdateKind, IntentVersionEntry } from "../types";
 
 // Turns the append-only version list into what actually changed at each step.
 //
@@ -13,7 +13,7 @@ export interface IntentChange {
   // 1-based, and the number a reader sees. Position in the list is the version.
   version: number;
   createdAt: string | null;
-  kind: "seed" | "classified" | "revert";
+  kind: IntentUpdateKind;
   // The message that caused the change, when one did.
   trigger: string | null;
   reason: string | null;
@@ -21,6 +21,13 @@ export interface IntentChange {
   removedConstraints: string[];
   objectiveBefore: string | null;
   objectiveAfter: string;
+  // Set when this version changed the agent's own instructions, which is a
+  // different event from the conversation moving the objective.
+  instructionsBefore: string | null;
+  instructionsAfter: string;
+  // The objective has moved away from the instructions and has not been adopted
+  // back into them. Derived, so it cannot disagree with the two values above.
+  diverged: boolean;
   // Which run the triggering message belonged to.
   traceId: string | null;
   // The version this one restores, for a revert.
@@ -65,6 +72,14 @@ export function intentChanges(
           ? previous.objective
           : null,
       objectiveAfter: entry.objective,
+      instructionsBefore:
+        previous && previous.instructions !== entry.instructions
+          ? previous.instructions
+          : null,
+      instructionsAfter: entry.instructions,
+      diverged:
+        entry.instructions.length > 0 &&
+        entry.objective !== entry.instructions,
       traceId: update?.traceId ?? null,
       revertedFrom,
       revertedFromVersion: revertedFrom
@@ -80,7 +95,10 @@ export function hasVisibleChange(change: IntentChange): boolean {
   return (
     change.addedConstraints.length > 0 ||
     change.removedConstraints.length > 0 ||
-    change.objectiveBefore !== null
+    change.objectiveBefore !== null ||
+    // An instructions edit changes what the agent follows even when the
+    // objective moves with it, so it is always worth a row.
+    change.instructionsBefore !== null
   );
 }
 
@@ -97,6 +115,14 @@ export function describeChange(change: IntentChange): string {
     return change.revertedFromVersion !== null
       ? "Restored version " + change.revertedFromVersion
       : "Restored an earlier version";
+  }
+  if (change.kind === "adopted") {
+    return "Objective adopted into the agent's instructions";
+  }
+  if (change.kind === "instructions") {
+    return change.objectiveBefore !== null
+      ? "Agent instructions edited; objective followed"
+      : "Agent instructions edited";
   }
   if (change.version === 1) return "Spec set from the agent's instructions";
   const parts: string[] = [];

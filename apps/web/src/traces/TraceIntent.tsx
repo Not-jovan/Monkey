@@ -5,9 +5,13 @@ import type { AuditTraceStep, IntentState, TraceRecord } from "../types";
 export function TraceIntent({
   trace,
   intentId,
+  intentIds = [],
 }: {
   trace: TraceRecord;
   intentId: string | null;
+  // Every version this run's findings were judged against. More than one means
+  // the spec moved partway through, and no single version was "in force".
+  intentIds?: string[];
 }) {
   const intentQuery = useQuery({
     queryKey: ["intent", trace.agentId],
@@ -25,16 +29,24 @@ export function TraceIntent({
     return null;
   }
   const isStale = pinnedIndex >= 0 && pinnedIndex < versions.length - 1;
+  const spannedVersions = intentIds.length;
 
   return (
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
       <div className="trace-intent-head">
         <h2 className="eyebrow" id="trace-intent-heading">
-          Spec in force
+          {spannedVersions > 1 ? "Spec at the start of this run" : "Spec in force"}
         </h2>
         {pinnedIndex >= 0 && (
           <span className="intent-version">
             v{pinnedIndex + 1} of {versions.length}
+          </span>
+        )}
+        {/* The run outlived its own specification, so the findings below were
+            not all judged against the version shown here. */}
+        {spannedVersions > 1 && (
+          <span className="muted-cell">
+            The spec changed during this run ({spannedVersions} versions used)
           </span>
         )}
         {/* Classification runs after the message is sent, so a run can be

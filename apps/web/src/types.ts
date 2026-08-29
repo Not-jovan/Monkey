@@ -180,6 +180,9 @@ export interface AuditTraceStep {
   traceId: string;
   agentId: string;
   spanId: string | null;
+  // The spec version this finding was judged against. Empty for findings about
+  // the auditor itself, and for audits written before findings carried it.
+  intentId: string;
   type: "warning" | "error";
   // "audit-health" is the auditor reporting on itself, never a claim about the
   // agent. Kept out of warning counts for that reason.
@@ -188,16 +191,29 @@ export interface AuditTraceStep {
 }
 
 export interface IntentState {
+  // What the agent was told to do, mirrored from its settings. The agent reads
+  // this from its workspace, so it is the source of truth for the objective.
+  instructions: string;
   objective: string;
   extended: string[];
 }
 
+// The kinds of edit a version can record. "instructions" is an edit made in
+// agent settings; "adopted" is a diverged objective written back into them.
+export type IntentUpdateKind =
+  | "seed"
+  | "classified"
+  | "revert"
+  | "instructions"
+  | "adopted";
+
 export interface IntentUpdate {
   logs: string[];
-  kind: "seed" | "classified" | "revert";
+  kind: IntentUpdateKind;
   message?: string;
   reason?: string;
   addedConstraints: string[];
+  removedConstraints: string[];
   previousObjective: string | null;
   // The run whose message moved the spec, so the Playground can mark it.
   traceId: string | null;
@@ -205,6 +221,7 @@ export interface IntentUpdate {
 }
 
 export interface IntentVersion {
+  instructions: string;
   objective: string;
   extended: string[];
   createdAt?: string;
