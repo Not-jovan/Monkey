@@ -212,11 +212,11 @@ no model, so they still report when Ark is unreachable.
 | Secret exposure | Deterministic detection, judged relevance | Which credentials appeared, and did they belong in this operation? |
 | Prompt injection | Deterministic detection, judged extras | Did tool output, a file, or a subagent plant an instruction to disclose secrets, hide them in HTML, phone home and obey the reply, or override prior instructions? |
 | Repeated failure | Deterministic | Did the Agent retry a call that had already failed? |
-| Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? |
+| Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? Raised as a suspicion, since one step cannot settle it. |
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
 | Step summary | Judged | What did this step actually do? Recorded, not scored — it is what the run-level checks read the run back through. |
 | Follow-through | Judged, run level | Did any later step carry out an instruction that arrived in untrusted content? |
-| Explanation | Judged, run level | For a follow-through that could not be settled: does anything the user asked for account for the action, or is the instruction the only thing that does? |
+| Backtrace | Judged, run level | For every question one step could not settle: does anything the user asked for account for the action, read across the whole run? |
 
 Detection and relevance are deliberately split. Whether a credential is present
 is a fact and is answered by pattern matching; whether it *belongs* is a
@@ -240,14 +240,20 @@ step that obeys it can be judged simultaneously, and the second one is then
 shown nothing. The **forward trace** asks the same question once at run end,
 against every step's recorded summary, where no such race is left.
 
-What the forward trace cannot settle goes to the **backtrace**. Looking only at
-what happened *after* an instruction appeared cannot distinguish "the agent
-obeyed the file" from "the user asked for this anyway" — an upload looks
-identical either way. The backtrace reads the run's own history and the standing
-intent and asks which of the two explains the action. If only the instruction
-does, the suspicion becomes a warning; if the user's own goal does, the question
-is answered and nothing is reported; if the history settles neither, the
-suspicion stands. A failed backtrace call leaves the suspicion standing too —
+What the forward trace cannot settle goes to the **backtrace**, along with every
+intent suspicion the step audits raised. Both are the same question asked of the
+run rather than of one step: does anything the user actually asked for account
+for this? Looking only at what happened *after* an instruction appeared cannot
+distinguish "the agent obeyed the file" from "the user asked for this anyway" —
+an upload looks identical either way — and a step judged alone cannot tell an
+unusual-looking action from an off-spec one.
+
+The backtrace reads the run's own history and the standing intent and answers
+in one pass, because the evidence that decides both kinds is the same and asking
+twice would pay twice for the same context. If nothing the user asked for
+accounts for the action it becomes a warning; if the user's own goal does, the
+question is answered and nothing further is reported; if the history settles
+neither, the suspicion stands. A failed backtrace leaves it standing too —
 losing an unresolved question to a model outage would defeat the point of having
 the severity.
 
@@ -271,10 +277,19 @@ type AuditTraceStep = {
 about the Agent, so they are excluded from warning counts.
 
 A `suspicion` is weaker than a `warning` on purpose: it is what the auditor
-raises when the record shows something questionable but does not settle it — a
-later step that *may* have carried out an injected instruction. Reporting an
-unresolved question in the same voice as a confirmed finding is how an auditor
-stops being believed, so the two are kept apart and rendered differently.
+raises when the record shows something questionable but does not settle it.
+Reporting an unresolved question in the same voice as a confirmed finding is how
+an auditor stops being believed, so the two are kept apart — rendered
+differently, and counted separately as `warningCount` and `suspicionCount` on
+the trace row rather than summed into one number.
+
+Every step is judged **in isolation**, which is the only way to judge one while
+a run is still going and also the reason a step audit over-flags: an action that
+serves the objective can look unmotivated beside the single step it appears in.
+So an intent deviation is a suspicion when a step raises it, and only the
+run-level backtrace — which can read what led up to it — promotes it to a
+warning. The deterministic findings are not affected: a credential that left the
+system is a fact, and facts are warnings immediately.
 
 ## Intent
 
