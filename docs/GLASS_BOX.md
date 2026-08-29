@@ -236,12 +236,27 @@ no model, so they still report when Ark is unreachable.
 | Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? Raised as a suspicion, since one step cannot settle it. |
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
 | Step summary | Judged | What did this step actually do? Recorded, not scored — it is what the run-level checks read the run back through. |
+| Network call | Deterministic detection, judged | A URL appears in the step's text — did the step actually contact it, or only mention it? |
+| Tool misuse | Judged, tool calls only | Do the arguments include flags that escape the sandbox or escalate privileges? Named individually. |
+| Sink writes | Judged, writes only | What did the step write to each file it touched, and does it belong there? |
 | Follow-through | Judged, run level | Did any later step carry out an instruction that arrived in untrusted content? |
 | Backtrace | Judged, run level | For every question one step could not settle: does anything the user asked for account for the action, read across the whole run? |
 
+Each of these is its own model call, run concurrently, with its own evidence and
+its own span in the auditor's trace — so a reader can see which question was
+asked and what it answered, and one check failing costs one answer rather than
+all of them. Four are conditional: a step is only asked about tool misuse if it
+is a tool call, about sink writes if it wrote something, about network calls if
+a URL appears in it at all, and about credential relevance if the deterministic
+pass found a credential. A step that touches none of those costs three calls,
+not seven.
+
 Detection and relevance are deliberately split. Whether a credential is present
 is a fact and is answered by pattern matching; whether it *belongs* is a
-judgement and depends on context. The same GitHub token is relevant when it
+judgement and depends on context. The same split runs through the other checks:
+finding a URL is a fact, and whether the step *contacted* it is a judgement —
+which is what stops a URL printed in an error message being reported as a
+policy violation. The same GitHub token is relevant when it
 authenticates a GitHub call and irrelevant when it is pasted into an unrelated
 upload, so only the second question goes to a model.
 
@@ -430,6 +445,16 @@ under `APP_DATA_DIR`:
                               steps-meta.json indexing their summaries
 ```
 
+That folder belongs to the chat's own auditor. There is one `AgentChatAuditor`
+per `(agentId, chatId)`, holding the identity its findings are stamped with, the
+path above, and the state its checks have to agree about: whether the step
+budget ran out, whether a meta-audit is running, and how many step audits are
+still in flight — the last of which is what the run-level checks wait on. What
+stays process-wide is what only works that way: the batch caller, because a
+provider rate limit is shared across every chat, and the memo of models the
+account has not activated, because a model that does not exist for one chat does
+not exist for the next.
+
 The `agent-runs` folder is the auditor's memory. The markdown is what a person
 reads and what the archive download serves; `steps-meta.json` is what the
 run-level checks query, so the forward trace can walk a run as a list of
@@ -528,6 +553,12 @@ Nothing was missed and every case parsed; the errors are all false positives,
 which is the direction an auditor should fail in. Accuracy is in-sample — the
 prompt was written against these cases — so read it as a regression signal, not
 a generalisation estimate.
+
+These are the numbers *after* the step audit was split into concurrent checks.
+Splitting one call into several is the kind of change that quietly costs recall,
+so it was measured either side: the figures are identical, including which cases
+are missed, which is the evidence that the split changed what each call sees
+rather than what it concludes.
 
 ## Limitations
 
