@@ -175,6 +175,13 @@ export interface ContextView {
   nextTraceId: string | null;
 }
 
+export interface AuditorTrace {
+  traceId: string;
+  agentId: string;
+  health: AuditHealth;
+  spans: TraceSpan[];
+}
+
 export interface AuditTraceStep {
   id: string;
   traceId: string;

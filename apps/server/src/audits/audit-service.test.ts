@@ -169,6 +169,16 @@ describe("AuditService", () => {
     expect(findings[0]?.spanId).toBe("span-prompt-trace-1");
     expect(responder.calls[0]?.model).toBe("sec-model");
     expect(responder.calls[0]?.user).toContain("demo-canary.txt token");
+    const auditorSpans = stores.auditStore.listAuditorSpans("trace-1");
+    expect(auditorSpans).toHaveLength(1);
+    expect(auditorSpans[0]?.name).toBe("audit.step");
+    expect(auditorSpans[0]?.kind).toBe("model_call");
+    expect(String(auditorSpans[0]?.attributes.context)).toContain(
+      "demo-canary.txt token",
+    );
+    expect(String(auditorSpans[0]?.attributes.output)).toContain(
+      "promptInjection",
+    );
   });
 
   it("audits tool calls only once they carry a result", async () => {
@@ -214,6 +224,15 @@ describe("AuditService", () => {
     expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
       true,
     );
+    const auditorSpans = stores.auditStore.listAuditorSpans("trace-3");
+    expect(auditorSpans.length).toBeGreaterThanOrEqual(2);
+    expect(auditorSpans.some((span) => span.status === "error")).toBe(true);
+    expect(
+      auditorSpans.some(
+        (span) =>
+          span.status === "ok" && span.label.includes("fallback"),
+      ),
+    ).toBe(true);
   });
 
   it("records a failed audit without blocking anything when every model fails", async () => {
@@ -233,6 +252,12 @@ describe("AuditService", () => {
     const findings = stores.auditStore.listByTrace("trace-4");
     expect(findings.some((step) => step.type === "error")).toBe(true);
     expect(findings.some((step) => step.finding.includes("InternalError"))).toBe(
+      true,
+    );
+    const auditorSpans = stores.auditStore.listAuditorSpans("trace-4");
+    expect(auditorSpans.length).toBeGreaterThan(0);
+    expect(auditorSpans.some((span) => span.status === "error")).toBe(true);
+    expect(auditorSpans.some((span) => span.error?.includes("InternalError"))).toBe(
       true,
     );
   });
@@ -261,6 +286,15 @@ describe("AuditService", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.category).toBe("intent-check");
     expect(findings[0]?.finding).toContain("read credentials");
+    const auditorSpans = stores.auditStore.listAuditorSpans("trace-5");
+    expect(auditorSpans.some((span) => span.name === "audit.run")).toBe(true);
+    expect(
+      auditorSpans.some(
+        (span) =>
+          span.name === "audit.run" &&
+          String(span.attributes.output).includes("count files"),
+      ),
+    ).toBe(true);
     // The model's compression replaces the derived digest, and survives a
     // restart because it is persisted by the context store rather than being
     // recomputed from an audit that may never run again.

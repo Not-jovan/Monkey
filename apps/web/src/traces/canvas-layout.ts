@@ -141,6 +141,7 @@ export function orderedLaneIds(
 
   push("user", "user");
   push("root", "agent");
+  push("auditor", "auditor");
 
   const spawns = steps
     .filter((span) => isSubagentTask(span))

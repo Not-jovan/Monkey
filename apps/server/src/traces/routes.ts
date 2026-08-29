@@ -196,6 +196,15 @@ export function registerGlassboxRoutes(
 
   app.get("/api/traces/:id/download", downloadTrace);
 
+  app.get("/api/audits/:id", async (request) => {
+    const { id } = traceParams.parse(request.params);
+    const payload = auditorTrace(id);
+    if (!payload) {
+      throw new HttpError(404, "Audit not found");
+    }
+    return payload;
+  });
+
   function glassboxTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
@@ -208,6 +217,17 @@ export function registerGlassboxRoutes(
       intentId,
       intent: deps.intentService?.forTrace(trace.agentId, intentId) ?? null,
       context: deps.contextService?.view(id) ?? null,
+    };
+  }
+
+  function auditorTrace(id: string) {
+    const trace = deps.traceStore.get(id);
+    if (!trace) return null;
+    return {
+      traceId: id,
+      agentId: trace.agentId,
+      health: deps.auditStore.health(id),
+      spans: deps.auditStore.listAuditorSpans(id),
     };
   }
 }

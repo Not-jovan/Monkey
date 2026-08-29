@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { traceSpanSchema } from "../traces/trace-model.js";
 
 export interface SecretExposureFinding {
   location: "request" | "response";
@@ -100,6 +101,9 @@ export const chatAuditSchema = z.object({
   }),
   spanAudit: z.record(z.string(), z.array(auditTraceStepSchema)),
   runAudit: z.array(auditTraceStepSchema),
+  // The auditor's own steps. Kept off the agent TraceRecord so /api/traces/:id
+  // never mixes the two, and defaulted so older audit files still parse.
+  auditorSpans: z.array(traceSpanSchema).default([]),
 });
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;

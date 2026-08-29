@@ -191,6 +191,17 @@ export function TraceDetailPage() {
       query.state.data?.trace.status === "running" ? 1_200 : 4_000,
   });
 
+  const auditorQuery = useQuery({
+    queryKey: ["audit", traceId],
+    queryFn: () => api.auditor(traceId),
+    enabled: !locked && traceId.length > 0,
+    refetchInterval: () =>
+      detailQuery.data?.trace.status === "running" ||
+      detailQuery.data?.auditComplete === false
+        ? 1_200
+        : 4_000,
+  });
+
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
 
@@ -285,6 +296,16 @@ export function TraceDetailPage() {
             className="button button-ghost"
             disabled={!trace}
             onClick={async () => {
+              const payload = await api.auditor(traceId);
+              openJson("audit-" + traceId + "-api.json", payload);
+            }}
+          >
+            Auditor API
+          </button>
+          <button
+            className="button button-ghost"
+            disabled={!trace}
+            onClick={async () => {
               const payload = await api.downloadTrace(traceId);
               download("trace-" + traceId + ".json", payload);
             }}
@@ -367,6 +388,7 @@ export function TraceDetailPage() {
           auditHealth={auditHealth}
           intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
+          auditorSpans={auditorQuery.data?.spans ?? []}
           onShowStep={showStep}
         />
       )}

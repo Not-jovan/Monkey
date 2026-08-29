@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { IntentState } from "../intent/intent-model.js";
 import type { IntentService } from "../intent/intent-service.js";
-import type { TraceSpan } from "../traces/trace-model.js";
+import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import type { TraceStore } from "../traces/trace-store.js";
 import type { ContextStore } from "../context/context-store.js";
 import { isPermanentProviderError } from "../failures.js";
@@ -157,6 +157,49 @@ function judgedInjectionQuotes(
   return value.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
 }
 
+interface AuditorCallAttempt {
+  model: string;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  content: string;
+  error: string | null;
+}
+
+function auditorCallSpan(input: {
+  traceId: string;
+  name: string;
+  label: string;
+  targetSpanId: string | null;
+  prompt: string;
+  attempt: AuditorCallAttempt;
+  fallback: boolean;
+}): TraceSpan {
+  return {
+    id: randomUUID(),
+    traceId: input.traceId,
+    parentId: null,
+    name: input.name,
+    label: input.label,
+    kind: "model_call",
+    actor: "system",
+    status: input.attempt.error ? "error" : "ok",
+    startedAt: input.attempt.startedAt,
+    endedAt: input.attempt.endedAt,
+    durationMs: input.attempt.durationMs,
+    attributes: {
+      model: input.attempt.model,
+      context: input.prompt,
+      output: input.attempt.content,
+      phase: input.name === "audit.run" ? "run" : "step",
+      laneId: "auditor",
+      ...(input.fallback ? { fallback: true } : {}),
+      ...(input.targetSpanId ? { targetSpanId: input.targetSpanId } : {}),
+    },
+    error: input.attempt.error,
+  };
+}
+
 function mergePromptInjections(
   judged: boolean | string[] | undefined,
   reason: string,
@@ -282,21 +325,30 @@ export class AuditService {
     // tracking existed, so a step is never judged against an empty spec.
     if (intent.objective.length === 0) intent.objective = trace.prompt;
 
-    const { verdict, status, failure } = await this.completeWithFallback(
+    const stepPrompt = buildStepContext({
+      trace,
+      span,
+      intent,
+      activity,
+      deterministic,
+      priorPromptInjections,
+      priorContext: this.deps.context?.priorFor(traceId)?.summary ?? "",
+    });
+    const { verdict, status, failure, attempts } = await this.completeWithFallback(
       this.deps.securityModel,
       this.deps.intentModel,
       STEP_SYSTEM_PROMPT,
-      buildStepContext({
-        trace,
-        span,
-        intent,
-        activity,
-        deterministic,
-        priorPromptInjections,
-        priorContext: this.deps.context?.priorFor(traceId)?.summary ?? "",
-      }),
+      stepPrompt,
       stepVerdict,
     );
+    this.recordAuditorAttempts(trace, {
+      name: "audit.step",
+      label: "Step audit · " + span.label,
+      targetSpanId: spanId,
+      prompt: stepPrompt,
+      attempts,
+      usedFallback: status === "degraded",
+    });
 
     const relevanceByType = new Map(
       (verdict?.secretRelevance ?? []).map((entry) => [entry.secretType, entry]),
@@ -453,13 +505,21 @@ export class AuditService {
       .filter((line) => line.length > 0)
       .join("\n");
 
-    const { verdict, status, failure } = await this.completeWithFallback(
+    const { verdict, status, failure, attempts } = await this.completeWithFallback(
       this.deps.intentModel,
       null,
       INTENT_SYSTEM_PROMPT,
       user,
       intentVerdict,
     );
+    this.recordAuditorAttempts(trace, {
+      name: "audit.run",
+      label: "Run audit",
+      targetSpanId: null,
+      prompt: user,
+      attempts,
+      usedFallback: status === "degraded",
+    });
 
     // Upgrades the deterministic digest to the model's compression. A blank or
     // failed verdict leaves the digest in place rather than erasing it.
@@ -500,6 +560,36 @@ export class AuditService {
     );
   }
 
+  private recordAuditorAttempts(
+    trace: TraceRecord,
+    input: {
+      name: string;
+      label: string;
+      targetSpanId: string | null;
+      prompt: string;
+      attempts: AuditorCallAttempt[];
+      usedFallback: boolean;
+    },
+  ) {
+    const spans = input.attempts.map((attempt, index) => {
+      const fallback = input.usedFallback && index === input.attempts.length - 1;
+      return auditorCallSpan({
+        traceId: trace.id,
+        name: input.name,
+        label: fallback ? input.label + " (fallback)" : input.label,
+        targetSpanId: input.targetSpanId,
+        prompt: input.prompt,
+        attempt,
+        fallback,
+      });
+    });
+    this.deps.auditStore.appendAuditorSpans(
+      trace,
+      spans,
+      this.deps.intent?.currentId(trace.agentId) ?? "",
+    );
+  }
+
   // Distinguishes "this model does not exist for us" from a transient failure:
   // only the former is worth remembering, because rate limits and outages do
   // recover.
@@ -517,13 +607,53 @@ export class AuditService {
     user: string,
     schema: Schema,
   ) {
-    const attempt = async (model: string) => {
-      const { content } = await this.deps.client.complete({ model, system, user });
-      const parsed = schema.safeParse(extractJson(content));
-      if (!parsed.success) {
-        throw new Error("Audit model returned an unparseable verdict");
+    const attempts: AuditorCallAttempt[] = [];
+    const runAttempt = async (model: string) => {
+      const startedAt = new Date().toISOString();
+      const startedMs = Date.now();
+      try {
+        const { content } = await this.deps.client.complete({
+          model,
+          system,
+          user,
+        });
+        const parsed = schema.safeParse(extractJson(content));
+        const endedAt = new Date().toISOString();
+        const durationMs = Date.now() - startedMs;
+        if (!parsed.success) {
+          const error = "Audit model returned an unparseable verdict";
+          attempts.push({
+            model,
+            startedAt,
+            endedAt,
+            durationMs,
+            content,
+            error,
+          });
+          throw new Error(error);
+        }
+        attempts.push({
+          model,
+          startedAt,
+          endedAt,
+          durationMs,
+          content,
+          error: null,
+        });
+        return parsed.data as z.infer<Schema>;
+      } catch (error) {
+        if (attempts.length === 0 || attempts[attempts.length - 1]?.model !== model) {
+          attempts.push({
+            model,
+            startedAt,
+            endedAt: new Date().toISOString(),
+            durationMs: Date.now() - startedMs,
+            content: "",
+            error: describeError(error),
+          });
+        }
+        throw error;
       }
-      return parsed.data as z.infer<Schema>;
     };
 
     if (
@@ -533,10 +663,11 @@ export class AuditService {
     ) {
       try {
         return {
-          verdict: await attempt(fallbackModel),
+          verdict: await runAttempt(fallbackModel),
           model: fallbackModel,
           status: "degraded" as const,
           failure: "Primary audit model " + primaryModel + " is not available",
+          attempts,
         };
       } catch (fallbackError) {
         return {
@@ -544,16 +675,18 @@ export class AuditService {
           model: fallbackModel,
           status: "failed" as const,
           failure: describeError(fallbackError),
+          attempts,
         };
       }
     }
 
     try {
       return {
-        verdict: await attempt(primaryModel),
+        verdict: await runAttempt(primaryModel),
         model: primaryModel,
         status: "completed" as const,
         failure: null,
+        attempts,
       };
     } catch (primaryError) {
       const primaryFailure = describeError(primaryError);
@@ -569,10 +702,11 @@ export class AuditService {
       if (fallbackModel && fallbackModel !== primaryModel) {
         try {
           return {
-            verdict: await attempt(fallbackModel),
+            verdict: await runAttempt(fallbackModel),
             model: fallbackModel,
             status: "degraded" as const,
             failure: "Primary audit model unavailable: " + primaryFailure,
+            attempts,
           };
         } catch (fallbackError) {
           return {
@@ -584,6 +718,7 @@ export class AuditService {
               primaryFailure +
               " · Fallback: " +
               describeError(fallbackError),
+            attempts,
           };
         }
       }
@@ -592,6 +727,7 @@ export class AuditService {
         model: primaryModel,
         status: "failed" as const,
         failure: primaryFailure,
+        attempts,
       };
     }
   }

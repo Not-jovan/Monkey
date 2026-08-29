@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TraceRecord } from "../traces/trace-model.js";
+import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import {
   chatAuditSchema,
   worstHealth,
@@ -103,6 +103,23 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
+  appendAuditorSpans(
+    trace: TraceRecord,
+    spans: TraceSpan[],
+    intentId: string,
+  ) {
+    if (spans.length === 0) return;
+    const doc = this.ensure(trace, intentId);
+    doc.auditorSpans = doc.auditorSpans.concat(spans);
+    this.persist(trace.id);
+  }
+
+  listAuditorSpans(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return [];
+    return [...doc.auditorSpans];
+  }
+
   listByTrace(traceId: string) {
     const doc = this.docs.get(traceId);
     if (!doc) return [];
@@ -160,6 +177,7 @@ export class AuditStore {
         },
         spanAudit: {},
         runAudit: [],
+        auditorSpans: [],
       };
       this.docs.set(trace.id, doc);
       return doc;

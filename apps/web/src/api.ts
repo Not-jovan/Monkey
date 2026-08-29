@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentRun,
   AuditHealth,
+  AuditorTrace,
   AuditTraceStep,
   ContextView,
   IntentState,
@@ -156,6 +157,7 @@ export const api = {
     request<TraceDetail & { exportedAt: string }>(
       "/api/traces/" + id + "/download",
     ),
+  auditor: (id: string) => request<AuditorTrace>("/api/audits/" + id),
 };
 
 export type { RunFailure };

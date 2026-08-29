@@ -217,7 +217,115 @@ describe("Glassbox routes", () => {
     expect(String(model?.attributes.context)).toContain("count files");
     expect(String(model?.attributes.output)).toContain("exec_command");
     expect(downloadedBody).toHaveProperty("intent");
+    expect(downloadedBody).not.toHaveProperty("spans");
+    expect(body).not.toHaveProperty("spans");
+
+    const audit = await app.inject({
+      method: "GET",
+      url: "/api/audits/" + RUN_ID,
+    });
+    expect(audit.statusCode).toBe(200);
+    const auditBody = audit.json<{
+      traceId: string;
+      spans: unknown[];
+    }>();
+    expect(auditBody.traceId).toBe(RUN_ID);
+    expect(auditBody.spans).toEqual([]);
+    expect(detail.json()).not.toHaveProperty("auditorSpans");
     await app.close();
+  });
+
+  it("serves the auditor trace separately from the agent trace", async () => {
+    const { app, auditStore, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    traceStore.create({
+      version: 1,
+      id: RUN_ID,
+      agentId: AGENT_ID,
+      conversationId: null,
+      status: "completed",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      endedAt: "2026-08-28T00:00:01.000Z",
+      prompt: "count files",
+      model: null,
+      usage: {
+        inputTokens: 0,
+        cachedTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        toolTokens: 0,
+      },
+      failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      spans: [],
+    });
+    const trace = traceStore.get(RUN_ID);
+    expect(trace).toBeTruthy();
+    if (!trace) return;
+    auditStore.appendAuditorSpans(
+      trace,
+      [
+        {
+          id: "auditor-span-1",
+          traceId: RUN_ID,
+          parentId: null,
+          name: "audit.step",
+          label: "Step audit · Prompt",
+          kind: "model_call",
+          actor: "system",
+          status: "ok",
+          startedAt: "2026-08-28T00:00:00.100Z",
+          endedAt: "2026-08-28T00:00:00.400Z",
+          durationMs: 300,
+          attributes: {
+            model: "sec-model",
+            context: "## Step under audit\ncat .env",
+            output: '{"dangerous":false}',
+            phase: "step",
+            targetSpanId: "span-1",
+          },
+          error: null,
+        },
+      ],
+      "",
+    );
+
+    const agentTrace = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID,
+    });
+    expect(agentTrace.statusCode).toBe(200);
+    const agentBody = agentTrace.json<Record<string, unknown>>();
+    expect(agentBody).not.toHaveProperty("auditorSpans");
+    expect(agentBody).not.toHaveProperty("spans");
+    expect(JSON.stringify(agentBody)).not.toContain("Step audit · Prompt");
+
+    const auditor = await app.inject({
+      method: "GET",
+      url: "/api/audits/" + RUN_ID,
+    });
+    expect(auditor.statusCode).toBe(200);
+    const auditorBody = auditor.json<{
+      traceId: string;
+      agentId: string;
+      spans: { label: string; attributes: { context?: string } }[];
+    }>();
+    expect(auditorBody.traceId).toBe(RUN_ID);
+    expect(auditorBody.agentId).toBe(AGENT_ID);
+    expect(auditorBody.spans).toHaveLength(1);
+    expect(auditorBody.spans[0]?.label).toBe("Step audit · Prompt");
+    expect(auditorBody.spans[0]?.attributes.context).toContain("cat .env");
+
+    const missing = await app.inject({
+      method: "GET",
+      url: "/api/audits/cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    expect(missing.statusCode).toBe(404);
   });
   it("serves the current intent versions map", async () => {
     const { app, intentStore } = await makeApp();

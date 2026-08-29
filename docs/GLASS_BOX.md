@@ -315,6 +315,7 @@ the continuation of earlier work is not flagged as unmotivated.
 | `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. |
 | `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, the pinned intent, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
+| `GET /api/audits/:id` | The auditor's own trace for that run: model calls, prompts, verdicts, and timing. Not included in the agent trace API. |
 
 Intent versions are served as an **ordered list**, not a map: version order is
 insertion order and the ids are random UUIDs, so the order has to be carried
