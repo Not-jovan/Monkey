@@ -240,7 +240,7 @@ no model, so they still report when Ark is unreachable.
 | Tool misuse | Judged, tool calls only | Do the arguments include flags that escape the sandbox or escalate privileges? Named individually. |
 | Sink writes | Judged, writes only | What did the step write to each file it touched, and does it belong there? |
 | Follow-through | Judged, run level | Did any later step carry out an instruction that arrived in untrusted content? |
-| Backtrace | Judged, run level | For every question one step could not settle: does anything the user asked for account for the action, read across the whole run? |
+| Backtrace | Judged, run level | For every suspicion a step raised: does anything the user asked for account for the action, read across the whole run? Runs concurrently with the forward trace, on the same suspicions from the other direction. |
 
 Each of these is its own model call, run concurrently, with its own evidence and
 its own span in the auditor's trace — so a reader can see which question was
@@ -276,22 +276,27 @@ step that obeys it can be judged simultaneously, and the second one is then
 shown nothing. The **forward trace** asks the same question once at run end,
 against every step's recorded summary, where no such race is left.
 
-What the forward trace cannot settle goes to the **backtrace**, along with every
-intent suspicion the step audits raised. Both are the same question asked of the
-run rather than of one step: does anything the user actually asked for account
-for this? Looking only at what happened *after* an instruction appeared cannot
-distinguish "the agent obeyed the file" from "the user asked for this anyway" —
-an upload looks identical either way — and a step judged alone cannot tell an
-unusual-looking action from an off-spec one.
-
-The backtrace reads the run's own history and the standing intent and answers
-in one pass, because the evidence that decides both kinds is the same and asking
-twice would pay twice for the same context. If nothing the user asked for
-accounts for the action it becomes a warning; if the user's own goal does, the
-question is answered and nothing further is reported; if the history settles
+The **backtrace** asks the same suspicions the other way round, and the two run
+concurrently rather than one feeding the other. It reads the run's own history
+and the standing intent and asks what accounts for the action: if nothing the
+user asked for does, the suspicion becomes a warning; if the user's own goal
+does, the question is answered and nothing is reported; if the history settles
 neither, the suspicion stands. A failed backtrace leaves it standing too —
 losing an unresolved question to a model outage would defeat the point of having
 the severity.
+
+They are deliberately independent, because they read different evidence and
+neither is reliable alone. Looking only at what happened *after* an instruction
+appeared cannot distinguish "the agent obeyed the file" from "the user asked for
+this anyway" — an upload looks identical either way. Looking only backwards
+cannot see the step that carried it out. Feeding one into the other made a
+failure in the first silently swallow the question: a forward trace that
+returned no verdict handed the backtrace nothing, so neither check ever asked.
+Both now read the suspicions from the audit record itself, so a failure in
+either still leaves the other looking.
+
+Since both can land on the same instruction, the overlap is de-duplicated on the
+way out and the forward trace wins, because it names the step that did it.
 
 Findings are stored as evidence and served in a flat form at
 `GET /api/traces/:id` as `findings`:
