@@ -1,35 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
-import type {
-  AuditTraceStep,
-  IntentState,
-  IntentVersionEntry,
-  TraceRecord,
-} from "../types";
+import type { AuditTraceStep, TraceIntentView } from "../types";
 
-export function TraceIntent({
-  trace,
-  intentId,
-}: {
-  trace: TraceRecord;
-  intentId: string | null;
-}) {
-  const intentQuery = useQuery({
-    queryKey: ["intent", trace.agentId],
-    queryFn: () => api.intent(trace.agentId),
-    staleTime: 30_000,
-  });
-
-  const versions: IntentVersionEntry[] = intentQuery.data?.versions ?? [];
-  const pinnedIndex = intentId
-    ? versions.findIndex((entry) => entry.id === intentId)
-    : -1;
-  const pinned = pinnedIndex >= 0 ? versions[pinnedIndex] : undefined;
-  const intent: IntentState | undefined = pinned ?? intentQuery.data?.intent;
+export function TraceIntent({ intent }: { intent: TraceIntentView | null }) {
   if (!intent || (intent.objective.length === 0 && intent.extended.length === 0)) {
     return null;
   }
-  const isStale = pinnedIndex >= 0 && pinnedIndex < versions.length - 1;
 
   return (
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
@@ -39,13 +13,15 @@ export function TraceIntent({
         </h2>
         {/* Classification runs after the message is sent, so a run can be
             judged against the version that preceded its own correction. */}
-        {isStale && (
+        {intent.stale && (
           <span className="muted-cell">
             This run used an earlier intent; it has changed since
           </span>
         )}
       </div>
-      <p className="trace-intent-objective">{intent.objective || "(no objective stated)"}</p>
+      <p className="trace-intent-objective">
+        {intent.objective || "(no objective stated)"}
+      </p>
       {intent.extended.length > 0 && (
         <>
           <h3 className="eyebrow">Constraints</h3>

@@ -357,10 +357,7 @@ export function TraceDetailPage() {
       )}
 
       {pane === "run" && trace && (
-        <TraceIntent
-          trace={trace}
-          intentId={detailQuery.data?.intentId ?? null}
-        />
+          <TraceIntent intent={detailQuery.data?.intent ?? null} />
       )}
 
       {pane === "auditor" && trace && (
@@ -368,7 +365,7 @@ export function TraceDetailPage() {
           trace={trace}
           findings={findings}
           auditHealth={auditHealth}
-          intentId={detailQuery.data?.intentId ?? null}
+          intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
           onShowStep={showStep}
         />

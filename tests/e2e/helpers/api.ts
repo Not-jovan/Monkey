@@ -90,6 +90,12 @@ export interface TraceDetail {
   auditComplete: boolean;
   auditHealth: "ok" | "degraded" | "failed";
   intentId: string | null;
+  intent: {
+    id: string;
+    objective: string;
+    extended: string[];
+    stale: boolean;
+  } | null;
   context: ContextView | null;
 }
 

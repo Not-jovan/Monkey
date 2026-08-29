@@ -216,6 +216,7 @@ describe("Glassbox routes", () => {
     );
     expect(String(model?.attributes.context)).toContain("count files");
     expect(String(model?.attributes.output)).toContain("exec_command");
+    expect(downloadedBody).toHaveProperty("intent");
     await app.close();
   });
   it("serves the current intent versions map", async () => {
@@ -262,6 +263,68 @@ describe("Glassbox routes", () => {
       payload: { decision: "confirm" },
     });
     expect(gone.statusCode).toBe(404);
+  });
+
+  it("includes the pinned intent on a trace", async () => {
+    const { app, auditStore, intentStore, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    intentStore.seed(AGENT_ID, "Build a todo list web application");
+    const firstId = intentStore.latest(AGENT_ID)?.intentId ?? "";
+    intentStore.append(AGENT_ID, {
+      objective: "Build a todo list web application",
+      extended: ["Do not read .env files."],
+    });
+
+    traceStore.create({
+      version: 1,
+      id: RUN_ID,
+      agentId: AGENT_ID,
+      conversationId: null,
+      status: "completed",
+      startedAt: "2026-08-28T00:00:00.000Z",
+      endedAt: "2026-08-28T00:00:01.000Z",
+      prompt: "count files",
+      model: null,
+      usage: {
+        inputTokens: 0,
+        cachedTokens: 0,
+        outputTokens: 0,
+        reasoningTokens: 0,
+        toolTokens: 0,
+      },
+      failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      spans: [],
+    });
+    const trace = traceStore.get(RUN_ID);
+    expect(trace).toBeTruthy();
+    if (!trace) return;
+    auditStore.recordRun(trace, [], "", firstId, "ok");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID,
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{
+      intentId: string | null;
+      intent: {
+        id: string;
+        objective: string;
+        extended: string[];
+        stale: boolean;
+      } | null;
+    }>();
+    expect(body.intentId).toBe(firstId);
+    expect(body.intent?.id).toBe(firstId);
+    expect(body.intent?.objective).toBe("Build a todo list web application");
+    expect(body.intent?.extended).toEqual([]);
+    expect(body.intent?.stale).toBe(true);
   });
 
   // Reverting appends; it must never rewind, or an audit that pinned the

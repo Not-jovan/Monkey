@@ -192,6 +192,13 @@ export interface IntentState {
   extended: string[];
 }
 
+// The spec a trace was judged against, resolved onto the response so a
+// download does not have to go looking it up by id.
+export interface TraceIntentView extends IntentState {
+  id: string;
+  stale: boolean;
+}
+
 export interface IntentUpdate {
   logs: string[];
   kind: "seed" | "classified" | "revert";

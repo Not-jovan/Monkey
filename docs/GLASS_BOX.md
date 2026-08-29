@@ -203,13 +203,14 @@ everything" are different intentions:
 
 ## What gets audited
 
-Four policies run per step. Two are deterministic and need no model, so they
-still report when Ark is unreachable.
+Policies run per step. Network, secret, and prompt-injection detection need
+no model, so they still report when Ark is unreachable.
 
 | Policy | Kind | Question |
 | --- | --- | --- |
 | Network whitelist | Deterministic | Did the step contact a destination that is not allowed? |
 | Secret exposure | Deterministic detection, judged relevance | Which credentials appeared, and did they belong in this operation? |
+| Prompt injection | Deterministic detection, judged extras | Did tool output, a file, or a subagent plant an instruction to disclose secrets, hide them in HTML, phone home and obey the reply, or override prior instructions? |
 | Repeated failure | Deterministic | Did the Agent retry a call that had already failed? |
 | Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? |
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
@@ -221,8 +222,12 @@ authenticates a GitHub call and irrelevant when it is pasted into an unrelated
 upload, so only the second question goes to a model.
 
 A new objective that the Agent merely *reported* is recorded but does not warn.
-Acting on it is what earns the warning — an injected instruction the Agent
-ignored is evidence the defence held, not a failure.
+Acting on it is what earns the intent-check warning. Prompt-injection
+*instructions* are the other way around: they warn as soon as they appear in
+tool output, a file, or a subagent reply — even if the Agent ignored them, and
+even if they are framed as debugging or mixed into an otherwise ordinary rules
+file. Linking a document is not the same as requesting every instruction
+inside it.
 
 Findings are stored as evidence and served in a flat form at
 `GET /api/traces/:id` as `findings`:
@@ -308,7 +313,7 @@ the continuation of earlier work is not flagged as unmotivated.
 | `GET /api/agents/:id/failures` | The Agent's failures grouped by kind, newest first. |
 | `GET /api/agents/:id/intent` | Current objective, standing constraints, the ordered version list, and current intentId. |
 | `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. |
-| `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, and carried-in/out context. |
+| `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, the pinned intent, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
 
 Intent versions are served as an **ordered list**, not a map: version order is
@@ -423,11 +428,12 @@ ordinary case and is labelled as a likelihood rather than a certainty.
 **Repeat detection compares normalised arguments.** The same command reformatted
 is recognised; the same intent expressed as a different command is not.
 
-**Judged findings are model output.** Alignment, new objectives, and secret
-relevance come from a model and can be wrong in both directions. The
-deterministic checks are the reliable half; the judged half is advisory. When
-the model is unreachable an audit is recorded as `failed` with the deterministic
-findings intact and relevance left explicitly unknown rather than assumed safe.
+**Judged findings are model output.** Alignment, new objectives, extra
+injection quotes the regex missed, and secret relevance come from a model and
+can be wrong in both directions. The deterministic checks are the reliable half;
+the judged half is advisory. When the model is unreachable an audit is recorded
+as `failed` with the deterministic findings intact and relevance left explicitly
+unknown rather than assumed safe.
 
 Driving the real auditor over 14 dataset cases against a live model, the schema
 accepted every verdict and 46 of 51 expectations matched. All five misses were

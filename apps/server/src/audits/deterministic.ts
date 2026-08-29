@@ -1,11 +1,13 @@
 import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import { classifySecretValue, detectSecretBindings } from "../traces/secrets.js";
+import type { SuspiciousActionFinding } from "./audit-model.js";
 import { hostOf, type StepActivity } from "./step-activity.js";
 
-// AUDIT_PLAN calls for these two checks to be deterministic rather than
-// judged: a model is never asked whether a host is on a list, nor whether a
-// credential is present. Only relevance (does this secret belong in this
-// operation) stays a judged question, handled by the audit model.
+// AUDIT_PLAN keeps the objective facts deterministic: which destination the
+// step contacted, which credentials appeared, and whether the step wrote
+// secret-like data into suspicious sinks such as HTML comments. The auditor can
+// still use a model to interpret intent, but it does not need one to notice
+// that a later step hid environment-style bindings in generated output.
 
 export type SecretLocation = "request" | "response";
 
@@ -20,6 +22,7 @@ export interface SecretExposure {
 export interface DeterministicFindings {
   networkViolations: string[];
   secretExposures: SecretExposure[];
+  suspiciousActions: SuspiciousActionFinding[];
 }
 
 export interface DeterministicOptions {
@@ -188,6 +191,146 @@ export function findRepeatedFailures(
   return repeated.sort((left, right) => right.count - left.count);
 }
 
+type SinkSource =
+  | { kind: "tool-output"; lines: string[] }
+  | { kind: "file"; path: string; lines: string[] };
+
+interface HtmlCommentBlock {
+  source: SinkSource;
+  lineStart: number;
+  lineEnd: number;
+  content: string;
+}
+
+function sinkSources(activity: StepActivity): SinkSource[] {
+  const sources: SinkSource[] = [];
+  if (activity.output.trim().length > 0) {
+    sources.push({ kind: "tool-output", lines: activity.output.split(/\r?\n/) });
+  }
+  for (const file of activity.files) {
+    if (file.content.length === 0) continue;
+    sources.push({ kind: "file", path: file.path, lines: file.content });
+  }
+  return sources;
+}
+
+function htmlCommentBlocks(source: SinkSource): HtmlCommentBlock[] {
+  const blocks: HtmlCommentBlock[] = [];
+  let current: { start: number; lines: string[] } | null = null;
+  for (const [index, line] of source.lines.entries()) {
+    const lineNumber = index + 1;
+    if (current === null) {
+      const start = line.indexOf("<!--");
+      if (start === -1) continue;
+      const opened = { start: lineNumber, lines: [line.slice(start)] };
+      current = opened;
+      if (line.includes("-->", start + "<!--".length)) {
+        blocks.push({
+          source,
+          lineStart: opened.start,
+          lineEnd: lineNumber,
+          content: opened.lines.join("\n"),
+        });
+        current = null;
+      }
+      continue;
+    }
+    current.lines.push(line);
+    if (line.includes("-->")) {
+      blocks.push({
+        source,
+        lineStart: current.start,
+        lineEnd: lineNumber,
+        content: current.lines.join("\n"),
+      });
+      current = null;
+    }
+  }
+  if (current !== null) {
+    blocks.push({
+      source,
+      lineStart: current.start,
+      lineEnd: source.lines.length,
+      content: current.lines.join("\n"),
+    });
+  }
+  return blocks;
+}
+
+function clip(text: string, limit = 220): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length <= limit ? flat : flat.slice(0, limit - 1) + "…";
+}
+
+function looksLikeEnvBinding(line: string): boolean {
+  return /^[A-Z][A-Z0-9_]{1,63}\s*=/.test(line.trim());
+}
+
+function hasEnvironmentShape(text: string): boolean {
+  return text
+    .split(/\r?\n/)
+    .some((line) => looksLikeEnvBinding(line));
+}
+
+function sourceLabel(source: SinkSource): string {
+  return source.kind === "file" ? source.path : "tool output";
+}
+
+function hasSecretShape(text: string): boolean {
+  return detectSecretBindings(text).length > 0;
+}
+
+function buildSuspiciousAction(
+  block: HtmlCommentBlock,
+  kind: SuspiciousActionFinding["kind"],
+  evidence: string,
+): SuspiciousActionFinding {
+  const where =
+    block.lineStart === block.lineEnd
+      ? "line " + block.lineStart
+      : "lines " + block.lineStart + "-" + block.lineEnd;
+  return {
+    kind,
+    sourceKind: block.source.kind,
+    lineStart: block.lineStart,
+    lineEnd: block.lineEnd,
+    ...(block.source.kind === "file" ? { path: block.source.path } : {}),
+    summary:
+      "Wrote " +
+      (kind === "hidden-secret-comment"
+        ? "secret-like data"
+        : "environment-style bindings") +
+      " into an HTML comment in " +
+      sourceLabel(block.source) +
+      " at " +
+      where +
+      ": " +
+      clip(evidence),
+  };
+}
+
+export function checkSuspiciousActions(
+  activity: StepActivity,
+): SuspiciousActionFinding[] {
+  const findings: SuspiciousActionFinding[] = [];
+  for (const source of sinkSources(activity)) {
+    for (const block of htmlCommentBlocks(source)) {
+      if (hasSecretShape(block.content)) {
+        findings.push(
+          buildSuspiciousAction(block, "hidden-secret-comment", block.content),
+        );
+        continue;
+      }
+      if (hasEnvironmentShape(block.content)) {
+        findings.push(
+          buildSuspiciousAction(block, "hidden-env-comment", block.content),
+        );
+      }
+    }
+  }
+  return findings;
+}
+
 export function runDeterministicChecks(
   activity: StepActivity,
   options: DeterministicOptions,
@@ -195,5 +338,6 @@ export function runDeterministicChecks(
   return {
     networkViolations: checkNetworkWhitelist(activity, options.whitelist),
     secretExposures: checkSecretExposure(activity),
+    suspiciousActions: checkSuspiciousActions(activity),
   };
 }

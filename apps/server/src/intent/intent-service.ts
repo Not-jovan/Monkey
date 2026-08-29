@@ -38,6 +38,25 @@ export class IntentService {
     return this.deps.store.latest(agentId)?.intentId ?? "";
   }
 
+  // The spec this run was judged against, not whatever the agent has now.
+  forTrace(agentId: string, intentId: string | null) {
+    const pinnedId = intentId && intentId.length > 0 ? intentId : null;
+    const latest = this.deps.store.latest(agentId);
+    const pinned = pinnedId ? this.deps.store.get(agentId, pinnedId) : null;
+    const entry = pinned
+      ? pinned
+      : latest
+        ? { id: latest.intentId, ...latest.version }
+        : null;
+    if (!entry) return null;
+    return {
+      id: entry.id,
+      objective: entry.objective,
+      extended: [...entry.extended],
+      stale: latest !== null && entry.id !== latest.intentId,
+    };
+  }
+
   view(agentId: string) {
     const latest = this.deps.store.latest(agentId);
     return {

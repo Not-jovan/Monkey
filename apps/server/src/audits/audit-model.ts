@@ -13,6 +13,36 @@ export interface NewObjectiveFinding {
   actedUpon: boolean;
 }
 
+export type PromptInjectionKind =
+  | "secret-disclosure"
+  | "external-control"
+  | "instruction-override"
+  | "model";
+
+export type PromptInjectionSourceKind =
+  | "tool-output"
+  | "network-response"
+  | "file"
+  | "model";
+
+export interface SuspiciousActionFinding {
+  kind: "hidden-env-comment" | "hidden-secret-comment";
+  summary: string;
+  path?: string;
+  sourceKind: "tool-output" | "file";
+  lineStart?: number | null;
+  lineEnd?: number | null;
+}
+
+export interface PromptInjectionFinding {
+  quote: string;
+  kind: PromptInjectionKind;
+  sourceKind: PromptInjectionSourceKind;
+  path?: string;
+  url?: string;
+  line?: number | null;
+}
+
 export const auditTraceStepSchema = z.object({
   id: z.string(),
   traceId: z.string(),
@@ -143,6 +173,9 @@ export function emitPolicyFindings(
     newObjectives: NewObjectiveFinding[];
     networkViolations: string[];
     secretExposures: SecretExposureFinding[];
+    promptInjections?: PromptInjectionFinding[];
+    suspiciousActions?: SuspiciousActionFinding[];
+    actedOnExternalInstructions?: string[];
   },
 ) {
   for (const entry of policies.notInAlignment) {
@@ -155,6 +188,20 @@ export function emitPolicyFindings(
       "intent-check",
       "The agent acted on an objective the user never asked for: " +
         objective.objective,
+    );
+  }
+  for (const injection of policies.promptInjections ?? []) {
+    push("warning", "security", "prompt-injection: " + injection.quote);
+  }
+  for (const action of policies.suspiciousActions ?? []) {
+    push("warning", "security", action.summary);
+  }
+  for (const finding of policies.actedOnExternalInstructions ?? []) {
+    push(
+      "warning",
+      "security",
+      "The agent appears to have carried out a previously injected instruction: " +
+        finding,
     );
   }
   for (const url of policies.networkViolations) {

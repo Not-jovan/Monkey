@@ -1,4 +1,10 @@
-import type { AuditHealth, AuditTraceStep, ContextView, TraceRecord } from "../types";
+import type {
+  AuditHealth,
+  AuditTraceStep,
+  ContextView,
+  TraceIntentView,
+  TraceRecord,
+} from "../types";
 import { findingTypeLabel, TraceIntent } from "./TraceIntent";
 import { TraceContext } from "./TraceContext";
 import { stepHeadline } from "./steps";
@@ -37,14 +43,14 @@ export function TraceAuditor({
   trace,
   findings,
   auditHealth,
-  intentId,
+  intent,
   context,
   onShowStep,
 }: {
   trace: TraceRecord;
   findings: AuditTraceStep[];
   auditHealth: AuditHealth;
-  intentId: string | null;
+  intent: TraceIntentView | null;
   context: ContextView | null;
   onShowStep: (spanId: string) => void;
 }) {
@@ -69,7 +75,7 @@ export function TraceAuditor({
         <p className="auditor-health-body">{copy.body}</p>
       </section>
 
-      <TraceIntent trace={trace} intentId={intentId} />
+      <TraceIntent intent={intent} />
       <TraceContext context={context} />
 
       {agentFindings.length === 0 ? (

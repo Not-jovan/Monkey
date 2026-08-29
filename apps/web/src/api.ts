@@ -9,6 +9,7 @@ import type {
   Message,
   RunFailure,
   SystemInfo,
+  TraceIntentView,
   TraceRecord,
   TraceSummary,
 } from "./types";
@@ -19,6 +20,7 @@ export interface TraceDetail {
   auditComplete: boolean;
   auditHealth: AuditHealth;
   intentId: string | null;
+  intent: TraceIntentView | null;
   context: ContextView | null;
 }
 
