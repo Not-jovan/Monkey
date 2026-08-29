@@ -88,13 +88,26 @@ const columns = [
     header: "Warnings",
     cell: ({ row }) => {
       const count = row.original.warningCount;
+      const suspicions = row.original.suspicionCount;
       const health = row.original.auditHealth;
       return (
         <>
           {count > 0 ? (
             <span className="warning-badge">⚠ {count}</span>
-          ) : (
+          ) : suspicions === 0 ? (
             <span className="muted-cell">—</span>
+          ) : null}
+          {/* Muted, and never folded into the count beside it: a suspicion is
+              a question the auditor could not settle, not a finding against
+              the agent. Shown all the same, because an auditor that hides what
+              it could not resolve is worse than one that over-reports. */}
+          {suspicions > 0 && (
+            <span
+              className="suspicion-badge"
+              title="Unresolved questions — open the trace to read them"
+            >
+              ? {suspicions}
+            </span>
           )}
           {/* Kept visibly apart from the count: the auditor failing is a
               limitation of the middleware, never a claim about the agent. */}

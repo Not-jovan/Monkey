@@ -19,7 +19,14 @@ export class ContextStore {
   private readonly records = new Map<string, RunContext>();
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly directory: string) {}
+  constructor(
+    private readonly directory: string,
+    // Reports a write that did not land. Persistence is deliberately
+    // fire-and-forget so a slow disk cannot stall a run, but swallowing the
+    // error let the in-memory state and the file diverge in silence: after a
+    // restart the data is simply gone, with nothing anywhere having said so.
+    private readonly log?: (message: string, error?: unknown) => void,
+  ) {}
 
   async initialize() {
     await mkdir(this.directory, { recursive: true });
@@ -148,6 +155,8 @@ export class ContextStore {
         });
         await rename(filePath + ".tmp", filePath);
       })
-      .catch(() => undefined);
+      .catch((error) =>
+        this.log?.("failed to persist context for trace " + traceId, error),
+      );
   }
 }

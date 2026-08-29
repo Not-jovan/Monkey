@@ -6,11 +6,18 @@ import { blamesAgent } from "../failures.js";
 import type { ContextService } from "../context/context-service.js";
 import type { IntentService } from "../intent/intent-service.js";
 import { HttpError } from "../errors.js";
+import { ZipArchive } from "archiver";
+import type { AuditService } from "../audits/audit-service.js";
+import type { AuditMemory } from "../audits/audit-memory.js";
 import type { TraceStore } from "./trace-store.js";
 import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const revertBody = z.object({ intentId: z.string().min(1) });
+const correctionBody = z.object({
+  findingId: z.string().min(1).max(200),
+  correction: z.string().trim().min(1).max(1_000),
+});
 const traceParams = z.object({ id: z.string().min(8).max(64) });
 
 export interface GlassboxDeps {
@@ -19,12 +26,17 @@ export interface GlassboxDeps {
   traceService: TraceService;
   intentService?: IntentService;
   contextService?: ContextService;
+  // Needed for the manual meta-audit and the artifact archive. Optional so a
+  // deployment without auditing still serves traces.
+  auditService?: AuditService;
+  auditMemory?: AuditMemory;
   collectorToken: string;
 }
 
 export function registerGlassboxRoutes(
   app: FastifyInstance,
   deps: GlassboxDeps,
+  agentExists: (agentId: string) => boolean,
 ) {
   const tokenMatches = (candidate: string) => {
     const expected = Buffer.from(deps.collectorToken);
@@ -55,7 +67,7 @@ export function registerGlassboxRoutes(
 
   app.get("/api/agents/:id/traces", async (request) => {
     const { id } = idParams.parse(request.params);
-    const warningCounts = deps.auditStore.warningCountByTrace();
+    const auditCounts = deps.auditStore.countsByTrace();
     const health = deps.auditStore.healthByTrace();
     const traces = deps.traceStore.listByAgent(id).map((trace) => {
       let errorCount = 0;
@@ -79,7 +91,11 @@ export function registerGlassboxRoutes(
         // A run that succeeded on the fifth attempt is not a clean run.
         recoveredErrorCount: trace.recoveredErrorCount,
         evidenceComplete: trace.evidenceComplete,
-        warningCount: warningCounts.get(trace.id) ?? 0,
+        warningCount: auditCounts.get(trace.id)?.warnings ?? 0,
+        // Apart from warningCount for the same reason auditHealth is: the
+        // auditor saying "I could not settle this" is not the auditor saying
+        // the agent did something wrong.
+        suspicionCount: auditCounts.get(trace.id)?.suspicions ?? 0,
         // Reported apart from warningCount: an auditor outage is not an agent
         // defect, and counting the two together made every outage look like one.
         auditHealth: health.get(trace.id) ?? "ok",
@@ -169,6 +185,78 @@ export function registerGlassboxRoutes(
     return reply.code(201).send(result.view);
   });
 
+  // A finding is evidence, not authority to rewrite the Agent. Only this
+  // explicit operator action appends the correction to the active intent.
+  app.post("/api/traces/:id/intent/correct", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    const body = correctionBody.parse(request.body);
+    if (!deps.intentService) {
+      throw new HttpError(503, "Intent tracking is not enabled");
+    }
+    const trace = deps.traceStore.get(id);
+    if (!trace) throw new HttpError(404, "Trace not found");
+    if (!agentExists(trace.agentId)) throw new HttpError(404, "Agent not found");
+    if (trace.status === "running") {
+      throw new HttpError(409, "Wait for the run to finish before correcting it");
+    }
+    if (!deps.auditStore.isRunComplete(id)) {
+      throw new HttpError(
+        409,
+        "Wait for the audit to finish before correcting this run",
+      );
+    }
+    const activeTrace = deps.traceStore
+      .listByAgent(trace.agentId)
+      .find((entry) => entry.status === "running");
+    if (activeTrace) {
+      throw new HttpError(
+        409,
+        "Wait for the Agent's active run to finish before changing its intent",
+      );
+    }
+    const finding = deps.auditStore
+      .listByTrace(id)
+      .find((entry) => entry.id === body.findingId);
+    if (
+      !finding ||
+      finding.traceId !== trace.id ||
+      finding.agentId !== trace.agentId ||
+      (finding.spanId !== null &&
+        !trace.spans.some((span) => span.id === finding.spanId))
+    ) {
+      throw new HttpError(404, "Audit finding not found on this trace");
+    }
+    if (finding.category === "audit-health") {
+      throw new HttpError(400, "Auditor health cannot change the Agent's intent");
+    }
+    const correction = deps.traceService.redactText(body.correction);
+    if (
+      !deps.intentService.canApplyHumanCorrection(
+        trace.agentId,
+        finding.id,
+        correction,
+      )
+    ) {
+      throw new HttpError(
+        409,
+        "This finding was already corrected or the constraint is already active",
+      );
+    }
+    const result = deps.intentService.applyHumanCorrection(trace.agentId, {
+      correction,
+      traceId: trace.id,
+      findingId: finding.id,
+      spanId: finding.spanId,
+    });
+    if (!result.created) {
+      throw new HttpError(
+        409,
+        "This finding was already corrected or the constraint is already active",
+      );
+    }
+    return reply.code(201).send(result.view);
+  });
+
   app.get("/api/traces/:id", async (request) => {
     const { id } = traceParams.parse(request.params);
     const payload = glassboxTrace(id);
@@ -205,6 +293,68 @@ export function registerGlassboxRoutes(
     return payload;
   });
 
+  // PLAN_AUDITOR: audit the auditor, on demand only. There is deliberately no
+  // subscription that reaches this — the auditor's own steps would otherwise
+  // become input for another meta-audit, without limit.
+  app.post("/api/audits/:id/meta", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    if (!deps.auditService) {
+      throw new HttpError(503, "Auditing is not enabled");
+    }
+    const result = await deps.auditService.auditAuditor(id);
+    if (result === null) {
+      throw new HttpError(404, "Audit not found");
+    }
+    if (result === "in-flight") {
+      throw new HttpError(409, "A meta-audit is already running for this run");
+    }
+    return reply.send({ traceId: id, ...result });
+  });
+
+  // The plan's /audit/{chatId} download: every artifact the auditor wrote for
+  // this chat, plus the audit document, as one zip.
+  app.get("/api/audits/:id/archive", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    const trace = deps.traceStore.get(id);
+    if (!trace) {
+      throw new HttpError(404, "Audit not found");
+    }
+    const artifacts =
+      (await deps.auditMemory?.listArtifacts(trace.agentId, id)) ?? [];
+
+    reply.header("content-type", "application/zip");
+    reply.header(
+      "content-disposition",
+      'attachment; filename="audit-' + id + '.zip"',
+    );
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+    // Streamed rather than buffered: a long run's memory folder is many files,
+    // and the reply should start before the last one is read.
+    reply.send(archive);
+    for (const artifact of artifacts) {
+      archive.file(artifact.filePath, { name: "memory/" + artifact.name });
+    }
+    // The audit document itself is not in the memory folder, and it is the part
+    // that carries the findings the UI shows.
+    archive.append(
+      JSON.stringify(
+        {
+          traceId: id,
+          agentId: trace.agentId,
+          findings: deps.auditStore.listByTrace(id),
+          auditorSpans: deps.auditStore.listAuditorSpans(id),
+          metaAudit: deps.auditStore.metaAudit(id),
+          health: deps.auditStore.health(id),
+        },
+        null,
+        1,
+      ) + "\n",
+      { name: "audit.json" },
+    );
+    await archive.finalize();
+    return reply;
+  });
+
   function glassboxTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
@@ -223,11 +373,16 @@ export function registerGlassboxRoutes(
   function auditorTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
+    const meta = deps.auditStore.metaAudit(id);
     return {
       traceId: id,
       agentId: trace.agentId,
       health: deps.auditStore.health(id),
       spans: deps.auditStore.listAuditorSpans(id),
+      // Findings from auditing the auditor. Empty until someone asks for it:
+      // this never runs on its own.
+      metaAudit: meta.findings,
+      metaAuditedAt: meta.auditedAt,
     };
   }
 }

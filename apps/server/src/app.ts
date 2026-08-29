@@ -1,7 +1,7 @@
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import type { AppConfig } from "./config.js";
@@ -79,6 +79,9 @@ export async function createApp(
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
     const agent = await service.createAgent(body);
+    // The record starts life agreeing with the instructions the agent was
+    // created with, so an agent is never auditable against an empty spec.
+    glassbox?.intentService?.syncInstructions(agent.id, agent.instructions);
     return reply.code(201).send({ agent });
   });
 
@@ -90,7 +93,38 @@ export async function createApp(
   app.patch("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     const body = updateAgentBody.parse(request.body);
-    return { agent: await service.updateAgent(id, body) };
+    const agent = await service.updateAgent(id, body);
+    // Instructions are written to the workspace's AGENTS.md and are what the
+    // agent then follows. Mirroring them here is what stops the auditor
+    // enforcing the spec the agent was given before this edit. A no-op when
+    // they did not change, so renaming an agent does not touch the timeline.
+    glassbox?.intentService?.syncInstructions(id, agent.instructions);
+    return { agent };
+  });
+
+  // Collapses a divergence back to one source of truth. The objective the
+  // conversation arrived at is written into the agent's instructions, which
+  // regenerates AGENTS.md, and the record then agrees with what the agent
+  // reads. Deliberately explicit: a classification must never rewrite
+  // user-authored configuration on its own.
+  app.post("/api/agents/:id/intent/adopt", async (request, reply) => {
+    const { id } = agentIdParams.parse(request.params);
+    if (!glassbox?.intentService) {
+      throw new HttpError(503, "Intent tracking is not enabled");
+    }
+    service.getAgent(id);
+    const objective = glassbox.intentService.pendingAdoption(id);
+    if (objective === null) {
+      throw new HttpError(
+        409,
+        "This agent's objective already matches its instructions",
+      );
+    }
+    // Goes through updateAgent so AGENTS.md is rewritten and the busy-agent
+    // guard applies — adopting mid-run would change the spec underneath it.
+    const agent = await service.updateAgent(id, { instructions: objective });
+    glassbox.intentService.syncInstructions(id, agent.instructions, "adopted");
+    return reply.send({ agent, intent: glassbox.intentService.view(id) });
   });
 
   app.delete("/api/agents/:id", async (request) => {
@@ -124,14 +158,18 @@ export async function createApp(
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
-    const result = await service.sendMessage(id, body.content);
     const agent = service.getAgent(id);
-    // Queued inside observe, not awaited: classification must not delay 202.
+    // The run id is minted here, before the run exists, so the classification
+    // of this message is queued ahead of the run that has to obey it. Observing
+    // afterwards left the first steps of a run being judged against the very
+    // spec the message had just replaced. Still not awaited: the queue ordering
+    // is what matters, and classification must not delay the 202.
+    const runId = randomUUID();
     glassbox?.intentService?.observe(id, agent.instructions, {
-      content: result.message.content,
-      messageId: result.message.id,
-      traceId: result.run.id,
+      content: glassbox.traceService.redactText(body.content),
+      traceId: runId,
     });
+    const result = await service.sendMessage(id, body.content, runId);
     return reply.code(202).send(result);
   });
 
@@ -141,7 +179,15 @@ export async function createApp(
   });
 
   if (glassbox) {
-    registerGlassboxRoutes(app, glassbox);
+    registerGlassboxRoutes(app, glassbox, (agentId) => {
+      try {
+        service.getAgent(agentId);
+        return true;
+      } catch (error) {
+        if (error instanceof HttpError && error.statusCode === 404) return false;
+        throw error;
+      }
+    });
   }
 
   if (config.nodeEnv === "production") {

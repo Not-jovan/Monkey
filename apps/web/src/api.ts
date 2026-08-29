@@ -27,6 +27,9 @@ export interface TraceDetail {
 
 export interface IntentView {
   intent: IntentState;
+  // The objective has moved away from the agent's instructions and has not been
+  // adopted into them. Derived server-side from the two values.
+  diverged: boolean;
   versions: IntentVersionEntry[];
   intentId: string | null;
 }
@@ -153,11 +156,30 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ intentId }),
     }),
+  // Writes the diverged objective into the agent's instructions, regenerating
+  // the AGENTS.md the agent reads so both sides describe the same spec again.
+  adoptIntent: (id: string) =>
+    request<{ intent: IntentView }>("/api/agents/" + id + "/intent/adopt", {
+      method: "POST",
+    }),
+  correctIntent: (traceId: string, findingId: string, correction: string) =>
+    request<IntentView>("/api/traces/" + traceId + "/intent/correct", {
+      method: "POST",
+      body: JSON.stringify({ findingId, correction }),
+    }),
   downloadTrace: (id: string) =>
     request<TraceDetail & { exportedAt: string }>(
       "/api/traces/" + id + "/download",
     ),
   auditor: (id: string) => request<AuditorTrace>("/api/audits/" + id),
+  // Audits the auditor's own run. Manual by design; the server has no path
+  // that reaches this on its own.
+  auditAuditor: (id: string) =>
+    request<{ traceId: string; findings: AuditTraceStep[]; auditedAt: string | null }>(
+      "/api/audits/" + id + "/meta",
+      { method: "POST" },
+    ),
+  auditArchiveUrl: (id: string) => "/api/audits/" + id + "/archive",
 };
 
 export type { RunFailure };

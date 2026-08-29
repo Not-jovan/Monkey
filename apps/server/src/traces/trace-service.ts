@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { readStreamError } from "../codex-runner.js";
-import { parseCodexEvent } from "./codex-events.js";
+// Codex-specific, and deliberately so: its only consumer is onRunnerEvent,
+// which reads Codex's own stdout stream. Runtime-agnostic span building goes
+// through the injected trace adapter instead.
+import { readStreamError } from "../runtimes/codex.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
+import type { PartialUsage, RuntimeTraceAdapter } from "./runtime-events.js";
 import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
 import type {
@@ -11,7 +14,7 @@ import type {
   SpanStatus,
   TraceSpan,
 } from "./trace-model.js";
-import { emptyUsage } from "./trace-model.js";
+import { emptyUsage, hasJudgeableEvidence } from "./trace-model.js";
 import { classifyRunFailure, type RunFailure } from "../failures.js";
 import type { TraceStore } from "./trace-store.js";
 
@@ -31,6 +34,10 @@ interface RunEndInput {
   status: "completed" | "failed" | "cancelled";
   error?: string | null;
   output?: string | null;
+  // Reported by runtimes that resolve their model at run time (Claude Code).
+  // Applied only when the trace has no model yet, so Codex's authoritative
+  // conversation_starts value is never overwritten.
+  model?: string | null;
   // Which layer is at fault and what to do about it. Recorded on the trace so
   // the run list can say why a run failed, not merely that it did.
   failure?: RunFailure | null;
@@ -223,6 +230,7 @@ export class TraceService {
   constructor(
     private readonly store: TraceStore,
     private readonly redactor: Redactor,
+    private readonly traceAdapter: RuntimeTraceAdapter,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -247,6 +255,11 @@ export class TraceService {
     if (!spanId || text.length === 0) return;
     const redacted = this.redactor.redactText(text);
     if (redacted.length === 0) return;
+    // Only the transition from "no output" to "some output" is announced. The
+    // span is appended before the model has said anything, so that first write
+    // is the moment it becomes judgeable; later appends would re-announce the
+    // same step and have it audited again.
+    let spoke = false;
     this.store.updateSpan(runId, spanId, (span) => {
       if (span.kind !== "model_call") return;
       if (span.status === "error") return;
@@ -257,7 +270,9 @@ export class TraceService {
         return;
       }
       span.attributes.output = redacted;
+      spoke = true;
     });
+    if (spoke) this.store.emitSpan(runId, spanId);
   }
 
   onRunStart(agent: RunStartAgent, run: RunStartInput) {
@@ -314,7 +329,7 @@ export class TraceService {
       startedAt,
       endedAt: startedAt,
       durationMs: 0,
-      attributes: { prompt },
+      attributes: { prompt, promptLength: prompt.length },
       error: null,
     });
     this.runs.set(run.id, {
@@ -335,21 +350,26 @@ export class TraceService {
     }
   }
 
-  onRunnerEvent(runId: string, event: Record<string, unknown>) {
-    if (
-      event.type === "thread.started" &&
-      typeof event.thread_id === "string"
-    ) {
-      const threadId = event.thread_id;
-      const state = this.runs.get(runId);
-      if (state) state.rootConversationId = threadId;
-      this.store.updateTrace(runId, (trace) => {
-        trace.conversationId = threadId;
-      });
-      this.bindConversation(threadId, runId);
-      return;
-    }
+  // The runtime has named the conversation this run belongs to. Until this
+  // lands, every OTLP record the runtime exports correlates to an id nothing
+  // is listening for and is parked in `pending` — so a run whose conversation
+  // is never announced ends with a prompt span and nothing else.
+  //
+  // Announced by the runner through RunnerRequest.onThread rather than
+  // sniffed off the event stream here: Codex says it with a `thread.started`
+  // event and Claude Code with `system`/`init` carrying `session_id`, and
+  // each runtime's own parser is the only thing that should have to know that.
+  onConversation(runId: string, conversationId: string) {
+    if (conversationId.length === 0) return;
+    const state = this.runs.get(runId);
+    if (state) state.rootConversationId = conversationId;
+    this.store.updateTrace(runId, (trace) => {
+      trace.conversationId = conversationId;
+    });
+    this.bindConversation(conversationId, runId);
+  }
 
+  onRunnerEvent(runId: string, event: Record<string, unknown>) {
     const state = this.runs.get(runId);
     if (!state) return;
 
@@ -483,6 +503,12 @@ export class TraceService {
       ? this.redactor.redactText(outcome.error)
       : null;
 
+    if (outcome.model) {
+      this.store.updateTrace(runId, (trace) => {
+        trace.model = trace.model ?? outcome.model ?? null;
+      });
+    }
+
     for (const spanId of state.toolSpans.values()) {
       this.store.updateSpan(runId, spanId, (span) => {
         if (span.status !== "running") return;
@@ -587,6 +613,20 @@ export class TraceService {
             })
           : null);
     });
+
+    // Last look for the steps that never got a real one. A tool interrupted
+    // before its result, and one denied at its decision, are both final without
+    // ever having carried a payload — closing them above is silent, so without
+    // this the agent's most interesting steps are the ones nothing ever judged.
+    // Deliberately after updateTrace: the auditor only accepts an evidence-less
+    // span once the run has a final status, so emitting earlier would be
+    // ignored.
+    for (const span of this.store.get(runId)?.spans ?? []) {
+      if (span.kind !== "tool_call") continue;
+      if (hasJudgeableEvidence(span)) continue;
+      this.store.emitSpan(runId, span.id);
+    }
+
     if (this.activeRunByAgent.get(state.agentId) === runId) {
       this.activeRunByAgent.delete(state.agentId);
     }
@@ -628,7 +668,7 @@ export class TraceService {
     let buffered = 0;
     let skipped = 0;
     for (const record of records) {
-      const conversationId = record.attributes["conversation.id"];
+      const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
       if (typeof conversationId !== "string" || conversationId.length === 0) {
         skipped += 1;
         continue;
@@ -681,15 +721,14 @@ export class TraceService {
       typeof record.timestamp === "string"
         ? record.timestamp
         : this.now().toISOString();
-    const parsed = parseCodexEvent(record.attributes);
-    if (!parsed) {
+    const normalized = this.traceAdapter.normalize(record.attributes);
+    if (!normalized) {
       this.store.updateTrace(runId, (trace) => {
         trace.unrecognizedEvents += 1;
       });
       return;
     }
-    const { event, common } = parsed;
-    const conversationId = common["conversation.id"];
+    const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
     if (typeof conversationId !== "string" || conversationId.length === 0) {
       return;
     }
@@ -697,39 +736,58 @@ export class TraceService {
     const isRootScope = scope.spawnSpanId === null;
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
 
-    switch (event["event.name"]) {
-      case "codex.conversation_starts": {
+    switch (normalized.kind) {
+      case "ignored": {
+        return;
+      }
+      case "generic_error": {
+        this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+          name: normalized.eventName,
+          label: normalized.eventName,
+          kind: "system",
+          actor: "system",
+          status: "error",
+          startedAt: timestamp,
+          endedAt: timestamp,
+          durationMs: 0,
+          attributes: { laneId: this.laneIdFor(scope, false) },
+          error: this.redactor.redactText(normalized.errorMessage),
+        });
+        return;
+      }
+      case "conversation_started": {
         if (!isRootScope) return;
         this.store.updateTrace(runId, (trace) => {
-          trace.model = common.model ?? trace.model;
+          trace.model = normalized.model ?? trace.model;
         });
         this.store.updateSpan(runId, turnSpanId, (span) => {
-          span.attributes.provider = event.provider_name;
-          if (event.approval_policy)
-            span.attributes.approvalPolicy = event.approval_policy;
-          if (event.sandbox_policy)
-            span.attributes.sandboxPolicy = event.sandbox_policy;
-          if (event.mcp_servers.length > 0) {
-            span.attributes.mcpServers = event.mcp_servers.join(",");
+          if (normalized.provider) span.attributes.provider = normalized.provider;
+          if (normalized.approvalPolicy)
+            span.attributes.approvalPolicy = normalized.approvalPolicy;
+          if (normalized.sandboxPolicy)
+            span.attributes.sandboxPolicy = normalized.sandboxPolicy;
+          if (normalized.mcpServers && normalized.mcpServers.length > 0) {
+            span.attributes.mcpServers = normalized.mcpServers.join(",");
           }
         });
         return;
       }
-      case "codex.user_prompt": {
+      case "user_prompt": {
         if (!isRootScope) return;
         this.store.updateSpan(runId, state.promptSpanId, (span) => {
-          span.attributes.promptLength = event.prompt_length;
-          if (event.prompt) {
-            span.attributes.prompt = this.redactor.redactText(event.prompt);
+          // Runtime telemetry sees the middleware envelope. Preserve the
+          // original human prompt on this user-action span and record only
+          // whether the runtime prompt was wrapped and how long it was.
+          span.attributes.runtimePromptLength = normalized.promptLength;
+          if (normalized.prompt) {
+            span.attributes.runtimePromptWrapped =
+              this.redactor.redactText(normalized.prompt) !== state.prompt;
           }
         });
         return;
       }
-      case "codex.api_request": {
-        const duration = event.duration_ms ?? 0;
-        const failedRequest =
-          event["error.message"] !== undefined ||
-          (event["http.response.status_code"] ?? 200) >= 400;
+      case "model_call": {
+        const duration = normalized.durationMs;
         const spanId = randomUUID();
         scope.lastModelCallSpanId = spanId;
         const firstInScope =
@@ -739,11 +797,11 @@ export class TraceService {
           id: spanId,
           traceId: runId,
           parentId: this.activeParent(scope, turnSpanId),
-          name: "codex.api_request",
-          label: modelCallLabel(scope, event.attempt),
+          name: normalized.spanName,
+          label: modelCallLabel(scope, normalized.attempt),
           kind: "model_call",
           actor: "agent",
-          status: failedRequest ? "error" : "ok",
+          status: normalized.failed ? "error" : "ok",
           startedAt: new Date(
             new Date(timestamp).getTime() - duration,
           ).toISOString(),
@@ -765,91 +823,66 @@ export class TraceService {
               : scope.toolsSinceLastModelCall.length > 0 && scope.lastToolOutput
                 ? { context: scope.lastToolOutput }
                 : {}),
-            ...(event["http.response.status_code"] !== undefined
-              ? { statusCode: event["http.response.status_code"] }
+            ...(normalized.statusCode !== undefined
+              ? { statusCode: normalized.statusCode }
               : {}),
-            ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
+            ...(normalized.attempt !== undefined ? { attempt: normalized.attempt } : {}),
           },
-          error: event["error.message"]
-            ? this.redactor.redactText(event["error.message"])
+          error: normalized.errorMessage
+            ? this.redactor.redactText(normalized.errorMessage)
             : null,
         });
         scope.modelCallsInTurn += 1;
         scope.toolsSinceLastModelCall = [];
-        return;
-      }
-      case "codex.sse_event": {
-        if (event["event.kind"] === "response.completed") {
-          this.store.updateTrace(runId, (trace) => {
-            trace.usage.inputTokens += event.input_token_count ?? 0;
-            trace.usage.cachedTokens += event.cached_token_count ?? 0;
-            trace.usage.outputTokens += event.output_token_count ?? 0;
-            trace.usage.reasoningTokens += event.reasoning_token_count ?? 0;
-            trace.usage.toolTokens += event.tool_token_count ?? 0;
-          });
-          if (scope.lastModelCallSpanId) {
-            this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
-              if (event.input_token_count !== undefined) {
-                span.attributes.inputTokens = event.input_token_count;
-              }
-              if (event.output_token_count !== undefined) {
-                span.attributes.outputTokens = event.output_token_count;
-              }
-              if (event.reasoning_token_count !== undefined) {
-                span.attributes.reasoningTokens = event.reasoning_token_count;
-              }
-              if (event.cached_token_count !== undefined) {
-                span.attributes.cachedTokens = event.cached_token_count;
-              }
-              if (event.ttft_ms !== undefined) {
-                span.attributes.ttftMs = event.ttft_ms;
-              }
-            });
-          }
-        } else if (event["error.message"]) {
-          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
-            name: "codex.sse_event",
-            label: "Stream error (" + event["event.kind"] + ")",
-            kind: "system",
-            actor: "system",
-            status: "error",
-            startedAt: timestamp,
-            endedAt: timestamp,
-            durationMs: event.duration_ms ?? 0,
-            attributes: {
-              kind: event["event.kind"],
-              laneId: this.laneIdFor(scope, false),
-            },
-            error: this.redactor.redactText(event["error.message"]),
-          });
+        if (normalized.usage) {
+          this.applyUsage(runId, scope, normalized.usage);
         }
         return;
       }
-      case "codex.tool_decision": {
+      case "model_call_usage": {
+        this.applyUsage(runId, scope, normalized.usage);
+        return;
+      }
+      case "stream_error": {
+        this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+          name: normalized.spanName,
+          label: normalized.label ?? "Stream error",
+          kind: "system",
+          actor: "system",
+          status: "error",
+          startedAt: timestamp,
+          endedAt: timestamp,
+          durationMs: normalized.durationMs ?? 0,
+          attributes: {
+            ...(normalized.attributeKind ? { kind: normalized.attributeKind } : {}),
+            laneId: this.laneIdFor(scope, false),
+          },
+          error: this.redactor.redactText(normalized.errorMessage),
+        });
+        return;
+      }
+      case "tool_decision": {
         const spanId = randomUUID();
-        state.toolSpans.set(event.call_id, spanId);
-        const subagent = isSubagentTool(event.tool_name);
+        state.toolSpans.set(normalized.callId, spanId);
+        const subagent = isSubagentTool(normalized.toolName);
         const parentId = this.activeParent(scope, turnSpanId);
         this.store.appendSpan(runId, {
           id: spanId,
           traceId: runId,
           parentId,
-          name: "tool." + event.tool_name,
-          label: subagent ? "Subagent · task" : "Tool · " + event.tool_name,
+          name: "tool." + normalized.toolName,
+          label: subagent ? "Subagent · task" : "Tool · " + normalized.toolName,
           kind: "tool_call",
           actor: "agent",
-          status:
-            event.decision === "denied" || event.decision === "abort"
-              ? "error"
-              : "running",
+          status: normalized.decision === "denied" ? "error" : "running",
           startedAt: timestamp,
           endedAt: null,
           durationMs: null,
           attributes: {
-            toolName: event.tool_name,
-            callId: event.call_id,
-            decision: event.decision,
-            decisionSource: event.source,
+            toolName: normalized.toolName,
+            callId: normalized.callId,
+            decision: normalized.rawDecision,
+            decisionSource: normalized.source,
             laneId: this.laneIdFor(scope, subagent),
             // The model call in flight when this tool call was decided. When
             // the step fails, this is what separates a bad plan from a bad
@@ -862,55 +895,60 @@ export class TraceService {
             ...(subagent ? { subagent: true } : {}),
           },
           error:
-            event.decision === "denied" || event.decision === "abort"
-              ? "Tool call " + event.decision
+            normalized.decision === "denied"
+              ? "Tool call " + normalized.rawDecision
               : null,
         });
         if (
-          isSameThreadSubagentTool(event.tool_name) &&
-          event.decision !== "denied" &&
-          event.decision !== "abort"
+          isSameThreadSubagentTool(normalized.toolName) &&
+          normalized.decision !== "denied"
         ) {
           scope.subagentStack.push(spanId);
         }
         return;
       }
-      case "codex.tool_result": {
-        const callId = event.call_id ?? "";
+      case "tool_result": {
+        const callId = normalized.callId ?? "";
         const existing = state.toolSpans.get(callId);
-        const reportedSuccess = event.success === "true";
-        const output = event.output
-          ? this.redactor.redactText(clip(event.output, OUTPUT_CLIP))
+        const reportedSuccess = normalized.success;
+        const output = normalized.output
+          ? this.redactor.redactText(clip(normalized.output, OUTPUT_CLIP))
           : "";
         // Codex calls the tool call successful whenever the tool itself ran —
         // a command that exits 127 with "command not found" is reported as a
         // success. That made the agent's own failures invisible: they were the
         // one thing the failure taxonomy exists to identify, and they never
         // produced a failing step.
+        //
+        // These three all read the tool's output, which Claude Code's OTLP
+        // never carries (only input and byte sizes), so for that runtime they
+        // resolve to null/false. That is the correct answer for it, not a gap:
+        // there is no output to find a command failure in.
         const commandFailure = reportedSuccess
-          ? readCommandFailure(event.output ?? "")
+          ? readCommandFailure(normalized.output ?? "")
           : null;
         const succeeded = reportedSuccess && commandFailure === null;
-        const exitCode = readExitCode(event.output ?? "");
+        const exitCode = readExitCode(normalized.output ?? "");
         // Marked rather than merely inlined into the text, so a reader can tell
         // at a glance whether they are looking at the whole picture.
-        const outputTruncated = (event.output?.length ?? 0) > OUTPUT_CLIP;
-        const toolArgumentsRaw = event.arguments
-          ? this.redactor.redactText(event.arguments)
+        const outputTruncated = (normalized.output?.length ?? 0) > OUTPUT_CLIP;
+        const toolArgumentsRaw = normalized.arguments
+          ? this.redactor.redactText(normalized.arguments)
           : "";
         // Arguments are what the agent sent outward; output is what came back.
-        const requestSecrets = this.secretNames(event.arguments);
-        const responseSecrets = this.secretNames(event.output).filter(
+        const requestSecrets = this.secretNames(normalized.arguments);
+        const responseSecrets = this.secretNames(normalized.output).filter(
           (name) => !requestSecrets.includes(name),
         );
         const toolArguments = toolArgumentsRaw
           ? clip(toolArgumentsRaw, ARGUMENT_CLIP)
           : "";
         if (toolArgumentsRaw && scope.lastModelCallSpanId) {
-          // Codex hands arguments over as a JSON string. Embedding it as-is
-          // produced a document whose "arguments" was itself escaped JSON
-          // ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer can
-          // make readable. Parse first so the panel shows one clean object.
+          // Runtimes hand arguments over as a JSON string. Embedding it
+          // as-is produced a document whose "arguments" was itself escaped
+          // JSON ({"arguments":"{\"cmd\": ...}"}), which no pretty-printer
+          // can make readable. Parse first so the panel shows one clean
+          // object.
           let parsedArguments: unknown = toolArgumentsRaw;
           try {
             parsedArguments = JSON.parse(toolArgumentsRaw);
@@ -921,12 +959,12 @@ export class TraceService {
             runId,
             scope.lastModelCallSpanId,
             JSON.stringify({
-              name: event.tool_name,
+              name: normalized.toolName,
               arguments: parsedArguments,
             }),
           );
         }
-        const childThreadIds = readChildThreadIds(event.arguments);
+        const childThreadIds = readChildThreadIds(normalized.arguments);
         if (existing) {
           this.store.updateSpan(
             runId,
@@ -934,12 +972,12 @@ export class TraceService {
             (span) => {
               span.status = succeeded ? "ok" : "error";
               span.endedAt = timestamp;
-              span.durationMs = event.duration_ms;
+              span.durationMs = normalized.durationMs;
               if (toolArguments) span.attributes.arguments = toolArguments;
               if (output) span.attributes.output = output;
               if (outputTruncated) {
                 span.attributes.outputTruncated = true;
-                span.attributes.outputLength = event.output?.length ?? 0;
+                span.attributes.outputLength = normalized.output?.length ?? 0;
               }
               if (requestSecrets.length > 0) {
                 span.attributes.secretsInRequest = requestSecrets.join(",");
@@ -947,11 +985,11 @@ export class TraceService {
               if (responseSecrets.length > 0) {
                 span.attributes.secretsInResponse = responseSecrets.join(",");
               }
-              if (event.mcp_server)
-                span.attributes.mcpServer = event.mcp_server;
+              if (normalized.mcpServer)
+                span.attributes.mcpServer = normalized.mcpServer;
               if (exitCode !== null) span.attributes.exitCode = exitCode;
               span.error = succeeded ? null : clip(output, 400) || "Tool failed";
-              if (isSubagentTool(event.tool_name)) {
+              if (isSubagentTool(normalized.toolName)) {
                 const subagentLabel = readSubagentLabel(toolArguments);
                 if (subagentLabel) {
                   span.attributes.subagentType = subagentLabel;
@@ -964,7 +1002,7 @@ export class TraceService {
             },
             { emit: true },
           );
-          if (isSubagentTool(event.tool_name)) {
+          if (isSubagentTool(normalized.toolName)) {
             this.attachChildConversations(
               runId,
               state,
@@ -975,7 +1013,7 @@ export class TraceService {
             this.popSubagentScope(scope, existing);
           }
           if (succeeded) {
-            scope.toolsSinceLastModelCall.push(event.tool_name);
+            scope.toolsSinceLastModelCall.push(normalized.toolName);
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         } else {
@@ -983,32 +1021,32 @@ export class TraceService {
             runId,
             this.activeParent(scope, turnSpanId),
             {
-              name: "tool." + event.tool_name,
-              label: isSubagentTool(event.tool_name)
+              name: "tool." + normalized.toolName,
+              label: isSubagentTool(normalized.toolName)
                 ? "Subagent task"
-                : "Called " + event.tool_name,
+                : "Called " + normalized.toolName,
               kind: "tool_call",
               actor: "agent",
               status: succeeded ? "ok" : "error",
               startedAt: new Date(
-                new Date(timestamp).getTime() - event.duration_ms,
+                new Date(timestamp).getTime() - normalized.durationMs,
               ).toISOString(),
               endedAt: timestamp,
-              durationMs: event.duration_ms,
+              durationMs: normalized.durationMs,
               attributes: {
-                toolName: event.tool_name,
+                toolName: normalized.toolName,
                 callId,
-                laneId: this.laneIdFor(scope, isSubagentTool(event.tool_name)),
+                laneId: this.laneIdFor(scope, isSubagentTool(normalized.toolName)),
                 ...(scope.lastModelCallSpanId
                   ? { causedBySpanId: scope.lastModelCallSpanId }
                   : {}),
-                ...(isSubagentTool(event.tool_name) ? { subagent: true } : {}),
+                ...(isSubagentTool(normalized.toolName) ? { subagent: true } : {}),
                 ...(toolArguments ? { arguments: toolArguments } : {}),
                 ...(output ? { output } : {}),
                 ...(outputTruncated
                   ? {
                       outputTruncated: true,
-                      outputLength: event.output?.length ?? 0,
+                      outputLength: normalized.output?.length ?? 0,
                     }
                   : {}),
                 ...(requestSecrets.length > 0
@@ -1023,35 +1061,48 @@ export class TraceService {
             },
           );
           if (succeeded) {
-            scope.toolsSinceLastModelCall.push(event.tool_name);
+            scope.toolsSinceLastModelCall.push(normalized.toolName);
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         }
         return;
       }
-      case "codex.turn_ttft": {
+      case "turn_ttft": {
         if (!isRootScope) return;
         this.store.updateSpan(runId, turnSpanId, (span) => {
-          span.attributes.ttftMs = event.duration_ms;
+          span.attributes.ttftMs = normalized.durationMs;
         });
         return;
       }
-      default: {
-        if ("error.message" in event && event["error.message"]) {
-          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
-            name: event["event.name"],
-            label: event["event.name"],
-            kind: "system",
-            actor: "system",
-            status: "error",
-            startedAt: timestamp,
-            endedAt: timestamp,
-            durationMs: 0,
-            attributes: { laneId: this.laneIdFor(scope, false) },
-            error: this.redactor.redactText(event["error.message"]),
-          });
+    }
+  }
+
+  private applyUsage(runId: string, scope: ConversationScope, usage: PartialUsage) {
+    this.store.updateTrace(runId, (trace) => {
+      trace.usage.inputTokens += usage.inputTokens ?? 0;
+      trace.usage.cachedTokens += usage.cachedTokens ?? 0;
+      trace.usage.outputTokens += usage.outputTokens ?? 0;
+      trace.usage.reasoningTokens += usage.reasoningTokens ?? 0;
+      trace.usage.toolTokens += usage.toolTokens ?? 0;
+    });
+    if (scope.lastModelCallSpanId) {
+      this.store.updateSpan(runId, scope.lastModelCallSpanId, (span) => {
+        if (usage.inputTokens !== undefined) {
+          span.attributes.inputTokens = usage.inputTokens;
         }
-      }
+        if (usage.outputTokens !== undefined) {
+          span.attributes.outputTokens = usage.outputTokens;
+        }
+        if (usage.reasoningTokens !== undefined) {
+          span.attributes.reasoningTokens = usage.reasoningTokens;
+        }
+        if (usage.cachedTokens !== undefined) {
+          span.attributes.cachedTokens = usage.cachedTokens;
+        }
+        if (usage.ttftMs !== undefined) {
+          span.attributes.ttftMs = usage.ttftMs;
+        }
+      });
     }
   }
 
@@ -1063,8 +1114,8 @@ export class TraceService {
       id: spanId,
       traceId: runId,
       parentId: state.rootSpanId,
-      name: "codex.turn",
-      label: "Codex turn",
+      name: this.traceAdapter.runtimeId + ".turn",
+      label: this.traceAdapter.displayName + " turn",
       kind: "turn",
       actor: "agent",
       status: "running",

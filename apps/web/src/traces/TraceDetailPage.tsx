@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useParams } from "react-router";
+import { Link, useParams, useSearchParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus, type TraceDetail } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { formatDuration, spanDuration } from "./format";
@@ -176,9 +176,13 @@ function SpanDetails({
 
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
+  const [searchParams] = useSearchParams();
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [view, setView] = useState<StepView>(readStoredView);
-  const [pane, setPane] = useState<TracePane>(readStoredPane);
+  const [pane, setPane] = useState<TracePane>(() =>
+    searchParams.get("pane") === "auditor" ? "auditor" : readStoredPane(),
+  );
+  const focusedFindingId = searchParams.get("finding");
 
   const authQuery = useQuery({ queryKey: ["auth"], queryFn: api.auth });
   const locked = authQuery.data?.required === true && !hasAuthToken();
@@ -216,7 +220,13 @@ export function TraceDetailPage() {
       (warningsBySpan.get(finding.spanId) ?? 0) + 1,
     );
   }
-  const warningCount = agentFindings.length;
+  // Split for the same reason the list rows are: a suspicion is a question the
+  // auditor could not settle, and counting it as a warning states the very
+  // thing the severity exists to avoid stating.
+  const suspicionCount = agentFindings.filter(
+    (finding) => finding.type === "suspicion",
+  ).length;
+  const warningCount = agentFindings.length - suspicionCount;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
   const diagnosis = trace ? buildDiagnosis(trace) : null;
   const recovered = trace ? recoveryNote(trace) : null;
@@ -354,6 +364,11 @@ export function TraceDetailPage() {
                     {warningCount} Warning{warningCount === 1 ? "" : "s"}
                   </span>
                 )}
+                {suspicionCount > 0 && (
+                  <span className="suspicion-badge">
+                    {suspicionCount} Unresolved
+                  </span>
+                )}
                 {recovered && (
                   <span className="recovered-badge">↺ {recovered}</span>
                 )}
@@ -389,7 +404,10 @@ export function TraceDetailPage() {
           intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
           auditorSpans={auditorQuery.data?.spans ?? []}
+          metaAudit={auditorQuery.data?.metaAudit ?? []}
+          metaAuditedAt={auditorQuery.data?.metaAuditedAt ?? null}
           onShowStep={showStep}
+          focusedFindingId={focusedFindingId}
         />
       )}
 

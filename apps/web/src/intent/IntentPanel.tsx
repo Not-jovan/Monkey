@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { api } from "../api";
 import type { IntentState } from "../types";
 import { describeChange, intentChanges, isMeaningful } from "./intent-diff";
@@ -41,7 +42,18 @@ export function IntentPanel({ agentId }: { agentId: string }) {
     },
   });
 
+  const adopt = useMutation({
+    mutationFn: () => api.adoptIntent(agentId),
+    onSuccess: (result) => {
+      queryClient.setQueryData(["intent", agentId], result.intent);
+      // The agent's own record changed too — its instructions are what this
+      // just rewrote — so anything showing them has to re-read.
+      void queryClient.invalidateQueries({ queryKey: ["agents"] });
+    },
+  });
+
   const intent: IntentState | undefined = intentQuery.data?.intent;
+  const diverged = intentQuery.data?.diverged ?? false;
   const allChanges = useMemo(
     () => intentChanges(intentQuery.data?.versions ?? []),
     [intentQuery.data?.versions],
@@ -83,9 +95,40 @@ export function IntentPanel({ agentId }: { agentId: string }) {
         </button>
         {expanded && (
           <div className="intent-detail">
+            {intent.instructions.length > 0 && (
+              <p>
+                <strong>Agent instructions:</strong> {intent.instructions}
+              </p>
+            )}
             <p>
               <strong>Objective:</strong> {intent.objective || "(none stated)"}
             </p>
+            {diverged && (
+              <div className="intent-diverged" role="status">
+                <p>
+                  This objective came from the conversation and is not what the
+                  agent's instructions say. The auditor judges against the
+                  objective; the agent still reads its instructions.
+                </p>
+                <button
+                  type="button"
+                  className="intent-adopt"
+                  disabled={adopt.isPending}
+                  onClick={() => adopt.mutate()}
+                >
+                  {adopt.isPending
+                    ? "Adopting…"
+                    : "Adopt into the agent's instructions"}
+                </button>
+                {adopt.isError && (
+                  <p className="intent-change-error" role="alert">
+                    {adopt.error instanceof Error
+                      ? adopt.error.message
+                      : "Could not adopt the objective."}
+                  </p>
+                )}
+              </div>
+            )}
             {intent.extended.length > 0 && (
               <ul>
                 {intent.extended.map((entry) => (
@@ -139,13 +182,39 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                 )}
               </div>
 
-              {change.trigger && (
+              {change.trigger && change.kind !== "human-correction" && (
                 <p className="intent-change-trigger">
                   From your message: &ldquo;{change.trigger}&rdquo;
                 </p>
               )}
+              {change.kind === "human-correction" && change.trigger && (
+                <p className="intent-change-trigger">
+                  Human correction: &ldquo;{change.trigger}&rdquo;
+                  {change.traceId && (
+                    <>
+                      {" "}
+                      <Link
+                        to={
+                          "/traces/" +
+                          change.traceId +
+                          "?pane=auditor" +
+                          (change.sourceFindingId
+                            ? "&finding=" +
+                              encodeURIComponent(change.sourceFindingId)
+                            : "")
+                        }
+                      >
+                        View source finding
+                      </Link>
+                    </>
+                  )}
+                </p>
+              )}
               {change.reason && (
-                <p className="muted-cell">Classifier: {change.reason}</p>
+                <p className="muted-cell">
+                  {change.kind === "human-correction" ? "Decision: " : "Classifier: "}
+                  {change.reason}
+                </p>
               )}
               {change.objectiveBefore !== null && (
                 <p className="intent-change-objective">

@@ -1,4 +1,7 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router";
+import { api } from "../api";
 import type {
   AuditHealth,
   AuditTraceStep,
@@ -9,7 +12,7 @@ import type {
 } from "../types";
 import { formatDuration, spanDuration } from "./format";
 import { stepContext, stepReturn } from "./span-context";
-import { findingTypeLabel, TraceIntent } from "./TraceIntent";
+import { findingTypeLabel, SpanFindings, TraceIntent } from "./TraceIntent";
 import { TraceContext } from "./TraceContext";
 import { TraceStepList } from "./TraceStepList";
 import { TraceTimeline } from "./TraceTimeline";
@@ -17,6 +20,118 @@ import { TextBlock } from "./TextBlock";
 import { stepHeadline } from "./steps";
 
 type AuditorView = "list" | "timeline";
+
+function HumanCorrection({
+  trace,
+  finding,
+}: {
+  trace: TraceRecord;
+  finding: AuditTraceStep;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [correction, setCorrection] = useState("");
+  const queryClient = useQueryClient();
+  const intentQuery = useQuery({
+    queryKey: ["intent", trace.agentId],
+    queryFn: () => api.intent(trace.agentId),
+  });
+  const appliedIndex =
+    intentQuery.data?.versions.findIndex(
+      (entry) => entry.update?.sourceFindingId === finding.id,
+    ) ?? -1;
+  const appliedVersion =
+    appliedIndex >= 0 ? intentQuery.data?.versions[appliedIndex] : undefined;
+  const appliedConstraints = appliedVersion?.update?.addedConstraints ?? [];
+  const isActive =
+    appliedConstraints.length > 0 &&
+    appliedConstraints.every((entry) =>
+      intentQuery.data?.intent.extended.includes(entry),
+    );
+  const apply = useMutation({
+    mutationFn: () => api.correctIntent(trace.id, finding.id, correction),
+    onSuccess: (view) => {
+      queryClient.setQueryData(["intent", trace.agentId], view);
+      setEditing(false);
+    },
+  });
+
+  if (appliedIndex >= 0) {
+    return (
+      <div className="finding-correction finding-correction-applied">
+        <span
+          className={
+            "intent-status intent-status-" +
+            (isActive ? "applied" : "rejected")
+          }
+        >
+          {isActive
+            ? "Applied as intent v" + (appliedIndex + 1)
+            : "Reverted (intent v" + (appliedIndex + 1) + ")"}
+        </span>
+        <Link to={"/?agent=" + encodeURIComponent(trace.agentId)}>
+          Open Playground
+        </Link>
+      </div>
+    );
+  }
+
+  if (!editing) {
+    return (
+      <button
+        type="button"
+        className="button button-ghost"
+        onClick={() => setEditing(true)}
+      >
+        Correct this
+      </button>
+    );
+  }
+
+  return (
+    <div className="finding-correction">
+      <label htmlFor={"correction-" + finding.id}>Correction for future runs</label>
+      <textarea
+        id={"correction-" + finding.id}
+        value={correction}
+        maxLength={1_000}
+        placeholder="Example: Do not contact hosts outside the configured network whitelist."
+        onChange={(event) => setCorrection(event.target.value)}
+      />
+      <p className="muted-cell">
+        Applying this adds a reversible constraint to the Agent's intent.
+      </p>
+      <div className="finding-correction-actions">
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={apply.isPending || correction.trim().length === 0}
+          onClick={() => apply.mutate()}
+        >
+          Apply correction
+        </button>
+        <button
+          type="button"
+          className="button button-ghost"
+          disabled={apply.isPending}
+          onClick={() => {
+            setEditing(false);
+            setCorrection("");
+            apply.reset();
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+      {apply.isError && (
+        <p className="intent-change-error" role="alert">
+          {apply.error instanceof Error
+            ? apply.error.message
+            : "The correction could not be applied."}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function healthCopy(
   health: AuditHealth,
@@ -162,7 +277,10 @@ export function TraceAuditor({
   intent,
   context,
   auditorSpans,
+  metaAudit,
+  metaAuditedAt,
   onShowStep,
+  focusedFindingId,
 }: {
   trace: TraceRecord;
   findings: AuditTraceStep[];
@@ -170,10 +288,25 @@ export function TraceAuditor({
   intent: TraceIntentView | null;
   context: ContextView | null;
   auditorSpans: TraceSpan[];
+  metaAudit: AuditTraceStep[];
+  metaAuditedAt: string | null;
   onShowStep: (spanId: string) => void;
+  focusedFindingId?: string | null;
 }) {
   const [view, setView] = useState<AuditorView>("list");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const runMetaAudit = useMutation({
+    mutationFn: () => api.auditAuditor(trace.id),
+    onSuccess: () => {
+      // The findings live on the auditor payload, so re-read it rather than
+      // keeping a second copy here that can disagree with the server. The key
+      // has to be the one TraceDetailPage reads under, or the meta-audit lands
+      // on the server and the panel stays empty until a manual reload.
+      void queryClient.invalidateQueries({ queryKey: ["audit", trace.id] });
+    },
+  });
+  const metaAudit_pending = runMetaAudit.isPending;
   const healthNotes = findings.filter(
     (finding) => finding.category === "audit-health",
   );
@@ -210,6 +343,30 @@ export function TraceAuditor({
         <p className="auditor-health-body">{copy.body}</p>
       </section>
 
+      {(metaAudit.length > 0 || runMetaAudit.isError) && (
+        <section className="meta-audit" aria-labelledby="meta-audit-heading">
+          <div className="trace-steps-head">
+            <h2 className="eyebrow" id="meta-audit-heading">
+              Audit of the auditor
+            </h2>
+            {metaAuditedAt && (
+              <span className="muted-cell">
+                {new Date(metaAuditedAt).toLocaleString()}
+              </span>
+            )}
+          </div>
+          {runMetaAudit.isError ? (
+            <p className="intent-change-error" role="alert">
+              {runMetaAudit.error instanceof Error
+                ? runMetaAudit.error.message
+                : "The meta-audit could not be run."}
+            </p>
+          ) : (
+            <SpanFindings findings={metaAudit} includeAuditHealth />
+          )}
+        </section>
+      )}
+
       <TraceIntent intent={intent} />
       <TraceContext context={context} />
 
@@ -218,6 +375,26 @@ export function TraceAuditor({
           <h2 className="eyebrow" id="auditor-steps-heading">
             Auditor steps
           </h2>
+          <div className="auditor-actions">
+            {/* Deliberately a button and not something that happens on its own:
+                auditing the auditor produces auditor steps, so doing it
+                automatically would keep feeding itself. */}
+            <button
+              type="button"
+              className="button button-ghost"
+              disabled={metaAudit_pending || auditorSpans.length === 0}
+              onClick={() => runMetaAudit.mutate()}
+            >
+              {metaAudit_pending ? "Auditing…" : "Audit this auditor"}
+            </button>
+            <a
+              className="button button-ghost"
+              href={api.auditArchiveUrl(trace.id)}
+              download
+            >
+              Download artifacts
+            </a>
+          </div>
           <div className="view-toggle" role="group" aria-label="Auditor step view">
             <button
               type="button"
@@ -289,14 +466,27 @@ export function TraceAuditor({
                   ? trace.spans.find((entry) => entry.id === finding.spanId)
                   : undefined;
                 return (
-                  <tr key={finding.id}>
+                  <tr
+                    key={finding.id}
+                    data-finding-id={finding.id}
+                    className={
+                      finding.id === focusedFindingId
+                        ? "finding-row-focused"
+                        : undefined
+                    }
+                  >
                     <td>
                       <span className={"finding-type finding-type-" + finding.type}>
                         {finding.type}
                       </span>
                     </td>
                     <td>{findingTypeLabel(finding.category)}</td>
-                    <td>{finding.finding}</td>
+                    <td>
+                      <div className="finding-copy">{finding.finding}</div>
+                      {finding.category !== "audit-health" && (
+                        <HumanCorrection trace={trace} finding={finding} />
+                      )}
+                    </td>
                     <td>
                       {span ? (
                         <button

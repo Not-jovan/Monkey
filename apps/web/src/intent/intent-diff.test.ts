@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   describeChange,
+  hasVisibleChange,
   intentChanges,
   isMeaningful,
   versionByTrace,
@@ -15,6 +16,9 @@ function version(
 ): IntentVersionEntry {
   return {
     id,
+    // In sync by default: the objective tracks the agent's instructions unless
+    // a test deliberately moves one of them.
+    instructions: OBJECTIVE,
     objective: OBJECTIVE,
     extended: [],
     createdAt: "2026-08-28T00:00:00.000Z",
@@ -29,6 +33,7 @@ function update(
     logs: [],
     kind: "classified" as const,
     addedConstraints: [],
+    removedConstraints: [],
     previousObjective: null,
     traceId: null,
     revertedFrom: null,
@@ -124,6 +129,31 @@ describe("intentChanges", () => {
     expect(describeChange(changes[0]!)).toContain("Spec set");
   });
 
+  it("labels a human correction and keeps its evidence link", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", {
+        extended: ["Do not contact hosts outside the whitelist."],
+        update: update({
+          kind: "human-correction",
+          message: "Do not contact hosts outside the whitelist.",
+          traceId: "trace-2",
+          sourceFindingId: "finding-2",
+          sourceSpanId: "span-7",
+        }),
+      }),
+    ]);
+
+    expect(changes[1]).toMatchObject({
+      kind: "human-correction",
+      sourceFindingId: "finding-2",
+      sourceSpanId: "span-7",
+      traceId: "trace-2",
+    });
+    expect(describeChange(changes[1]!)).toBe("Human correction applied");
+    expect(versionByTrace(changes).has("trace-2")).toBe(false);
+  });
+
   it("survives an empty history", () => {
     expect(intentChanges([])).toEqual([]);
   });
@@ -150,5 +180,65 @@ describe("versionByTrace", () => {
     expect(byTrace.get("run-2")?.version).toBe(2);
     expect(byTrace.has("run-3")).toBe(false);
     expect(byTrace.has("run-1")).toBe(false);
+  });
+});
+
+describe("instructions as the source of truth", () => {
+  const REVISED = "Write and store documentation, in HTML.";
+
+  it("shows an instructions edit as its own change", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", {
+        instructions: REVISED,
+        objective: REVISED,
+        update: update({ kind: "instructions", logs: ["Instructions changed"] }),
+      }),
+    ]);
+
+    const edit = changes[1]!;
+    expect(edit.instructionsBefore).toBe(OBJECTIVE);
+    expect(edit.instructionsAfter).toBe(REVISED);
+    // The objective moved with the instructions, so nothing has diverged.
+    expect(edit.diverged).toBe(false);
+    expect(hasVisibleChange(edit)).toBe(true);
+    expect(describeChange(edit)).toBe(
+      "Agent instructions edited; objective followed",
+    );
+  });
+
+  it("marks an objective the conversation moved away from the instructions", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", {
+        objective: "Build a calendar app",
+        update: update({ message: "Build a calendar instead." }),
+      }),
+    ]);
+
+    const pivot = changes[1]!;
+    // Instructions untouched: a classification never rewrites configuration.
+    expect(pivot.instructionsAfter).toBe(OBJECTIVE);
+    expect(pivot.diverged).toBe(true);
+    expect(pivot.objectiveBefore).toBe(OBJECTIVE);
+  });
+
+  it("describes an adoption as collapsing the two back together", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", { objective: "Build a calendar app" }),
+      version("v3", {
+        instructions: "Build a calendar app",
+        objective: "Build a calendar app",
+        update: update({ kind: "adopted", logs: ["Adopted"] }),
+      }),
+    ]);
+
+    const adopted = changes[2]!;
+    expect(adopted.diverged).toBe(false);
+    expect(adopted.instructionsBefore).toBe(OBJECTIVE);
+    expect(describeChange(adopted)).toBe(
+      "Objective adopted into the agent's instructions",
+    );
   });
 });

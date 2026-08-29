@@ -1,141 +1,23 @@
-import { execFile } from "node:child_process";
 import { spawn, type ChildProcess } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import { RunCancelledError } from "./errors.js";
+import { RunCancelledError, runFailureDetail } from "./errors.js";
 import {
   classifyRunFailure,
   noAgentMessageFailure,
   RunFailureError,
 } from "./failures.js";
-import type {
-  AgentRunner,
-  RunUsage,
-  RunnerRequest,
-  RunnerResult,
-} from "./types.js";
+import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
+import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
+import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
-export interface ParsedEvents {
-  messages: string[];
-  threadId: string | null;
-  usage: RunUsage | null;
-  errors: string[];
-}
-
-export function buildCodexArgs(
-  request: RunnerRequest,
-  sandboxMode: AppConfig["codexSandboxMode"],
-  workspacePath = request.workspacePath,
-): string[] {
-  const args = [
-    "exec",
-    "--json",
-    "--sandbox",
-    sandboxMode,
-    "--skip-git-repo-check",
-    "-C",
-    workspacePath,
-  ];
-  if (request.threadId) {
-    args.push("resume", request.threadId, request.prompt);
-  } else {
-    args.push(request.prompt);
-  }
-  return args;
-}
-
-// Codex reports its own failures on the event stream, and those are far more
-// specific than stderr. Falls through to stderr, then to an explicit placeholder
-// — the previous `errors.at(-1) ?? stderr.trim() ?? "No error detail"` could
-// never reach its last arm, because .trim() returns "" rather than nullish, so
-// an empty stderr produced a message that trailed off after the colon.
-export function errorEvidence(errors: string[], stderr: string): string {
-  const reported = errors.at(-1)?.trim();
-  if (reported) return reported;
-  const tail = stderr.trim();
-  if (tail) return tail;
-  return "The Runtime exited without reporting a reason.";
-}
-
-// What counts as Codex reporting a failure on its own event stream.
-//
-// Defined once and shared with the trace service. They previously disagreed —
-// this side collected only `error`, the trace side also counted `turn.failed` —
-// so the same run could report two different error counts, and the failure
-// classifier could miss the one event that said what actually went wrong.
-export function readStreamError(
-  event: Record<string, unknown>,
-): string | null {
-  if (event.type === "error") {
-    if (typeof event.message === "string" && event.message.length > 0) {
-      return event.message;
-    }
-    if (typeof event.error === "string" && event.error.length > 0) {
-      return event.error;
-    }
-    return "Codex reported an unknown error";
-  }
-  if (event.type === "turn.failed") {
-    const detail = event.error;
-    if (typeof detail === "string" && detail.length > 0) return detail;
-    if (detail !== null && typeof detail === "object" && "message" in detail) {
-      const message = (detail as { message?: unknown }).message;
-      if (typeof message === "string" && message.length > 0) return message;
-    }
-    return "The Codex turn failed";
-  }
-  return null;
-}
-
-export function parseCodexEventLine(
-  line: string,
-  parsed: ParsedEvents,
-  onEvent?: (event: Record<string, unknown>) => void,
-): void {
-  let event: Record<string, unknown>;
-  try {
-    event = JSON.parse(line) as Record<string, unknown>;
-  } catch {
-    return;
-  }
-
-  onEvent?.(event);
-
-  if (event.type === "thread.started" && typeof event.thread_id === "string") {
-    parsed.threadId = event.thread_id;
-  }
-
-  if (event.type === "item.completed" && event.item && typeof event.item === "object") {
-    const item = event.item as Record<string, unknown>;
-    if (item.type === "agent_message" && typeof item.text === "string") {
-      parsed.messages.push(item.text);
-    }
-  }
-
-  if (event.type === "turn.completed" && event.usage && typeof event.usage === "object") {
-    const usage = event.usage as Record<string, unknown>;
-    parsed.usage = {
-      ...(typeof usage.input_tokens === "number"
-        ? { inputTokens: usage.input_tokens }
-        : {}),
-      ...(typeof usage.cached_input_tokens === "number"
-        ? { cachedInputTokens: usage.cached_input_tokens }
-        : {}),
-      ...(typeof usage.output_tokens === "number"
-        ? { outputTokens: usage.output_tokens }
-        : {}),
-    };
-  }
-
-  const streamError = readStreamError(event);
-  if (streamError !== null) {
-    parsed.errors.push(streamError);
-  }
-}
-
-export class CodexRunner implements AgentRunner {
+// Generic across every Agent runtime (Codex, Claude Code, ...): all of the
+// spawn/timeout/cancel control flow lives here exactly once, driven by a
+// RuntimeDefinition for what differs (binary, argv, env, stdout parsing).
+export class ProcessRuntimeRunner implements AgentRunner {
   private readonly active = new Map<
     string,
     {
@@ -148,11 +30,15 @@ export class CodexRunner implements AgentRunner {
     }
   >();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly runtime: RuntimeDefinition,
+    private readonly collectorToken: string,
+  ) {}
 
   async isAvailable(): Promise<boolean> {
     try {
-      await execFileAsync(this.config.codexBin, ["--version"], {
+      await execFileAsync(this.runtime.bin(this.config), ["--version"], {
         timeout: 5_000,
         env: this.childEnvironment(),
       });
@@ -175,11 +61,12 @@ export class CodexRunner implements AgentRunner {
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
-      throw new Error("Agent already has an active Codex process");
+      throw new Error("Agent already has an active " + this.runtime.id + " process");
     }
 
-    const args = buildCodexArgs(request, this.config.codexSandboxMode);
-    const child = spawn(this.config.codexBin, args, {
+    const args = this.runtime.buildArgs(request, request.workspacePath, this.config);
+    const transcript = new RunTranscript();
+    const child = spawn(this.runtime.bin(this.config), args, {
       cwd: request.workspacePath,
       env: this.childEnvironment(),
       stdio: ["ignore", "pipe", "pipe"],
@@ -203,10 +90,32 @@ export class CodexRunner implements AgentRunner {
       threadId: request.threadId,
       usage: null,
       errors: [],
+      model: null,
     };
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    let modelReported = false;
+    // Seeded from the resumed id: onRunStart already bound that one, so
+    // re-announcing it would be noise. A runtime that mints a fresh id on
+    // resume still gets announced, because the value differs.
+    let reportedThreadId = request.threadId;
+
+    // Both ids are resolved by the runtime mid-run rather than known up
+    // front, and both have a caller waiting on them — the sidebar for the
+    // model, the trace pipeline for the conversation. Announced from one
+    // place so neither can be missed on a stream that ends without a
+    // trailing newline.
+    const reportRuntimeIds = () => {
+      if (parsed.model && !modelReported) {
+        modelReported = true;
+        request.onModel?.(parsed.model);
+      }
+      if (parsed.threadId && parsed.threadId !== reportedThreadId) {
+        reportedThreadId = parsed.threadId;
+        request.onThread?.(parsed.threadId);
+      }
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -216,13 +125,16 @@ export class CodexRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
+        transcript.recordStdout(chunk.toString("utf8"));
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          parseCodexEventLine(line, parsed, request.onEvent);
+          this.runtime.parseEventLine(line, parsed, request.onEvent);
+          reportRuntimeIds();
         }
       } else {
+        transcript.recordStderr(chunk.toString("utf8"));
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) {
           stderr = stderr.slice(-16_384);
@@ -251,7 +163,8 @@ export class CodexRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
+        this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
+        reportRuntimeIds();
       }
       if (active.cancelled) {
         throw new RunCancelledError();
@@ -276,7 +189,7 @@ export class CodexRunner implements AgentRunner {
       }
       if (exitCode !== 0) {
         throw new RunFailureError(
-          classifyRunFailure(errorEvidence(parsed.errors, stderr), {
+          classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
             exitCode,
             source: "process-exit",
           }),
@@ -284,13 +197,37 @@ export class CodexRunner implements AgentRunner {
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
+        // A runtime can report a failure and still exit 0 (Claude Code sets
+        // is_error on the result event). Attribute it from what it reported
+        // rather than falling through to the generic "no message" verdict,
+        // which would blame the agent for a provider or policy failure.
+        if (parsed.errors.length > 0) {
+          throw new RunFailureError(
+            classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
+              exitCode,
+            }),
+          );
+        }
         throw new RunFailureError(noAgentMessageFailure());
       }
       return {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
+        model: parsed.model,
       };
+    } catch (error) {
+      // A cancellation is a user action, not a fault worth a transcript.
+      if (!(error instanceof RunCancelledError)) {
+        await attachFailureTranscript(transcript, error, {
+          dataDirectory: this.config.dataDirectory,
+          runtimeId: this.runtime.id,
+          argv: [this.runtime.bin(this.config), ...args],
+          runId: request.runId,
+          redact: request.redact,
+        });
+      }
+      throw error;
     } finally {
       clearTimeout(timeout);
       if (active.forceKillTimer) clearTimeout(active.forceKillTimer);
@@ -326,9 +263,8 @@ export class CodexRunner implements AgentRunner {
       "TERM",
     ] as const;
     const environment: NodeJS.ProcessEnv = {
-      CODEX_HOME: this.config.codexHome,
-      ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...this.runtime.processEnv(this.config, this.collectorToken),
     };
     for (const name of inheritedNames) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];

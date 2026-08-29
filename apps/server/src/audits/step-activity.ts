@@ -190,8 +190,15 @@ export function activityFromSpan(
   const searchable = [rawArguments, activity.commands.join("\n")]
     .filter((part) => part.length > 0)
     .join("\n");
+  // PLAN_AUDITOR check 2 says to look for a URI *in the trace*, which includes
+  // what the step read back. Output is searched for URLs but deliberately kept
+  // out of `request` below: a credential appearing in output was received, and
+  // folding it into the request text would report it as having been sent.
+  const searchableWithOutput = [searchable, activity.output]
+    .filter((part) => part.length > 0)
+    .join("\n");
   const seen = new Set(activity.networkCalls.map((call) => call.url));
-  for (const match of searchable.matchAll(urlPattern)) {
+  for (const match of searchableWithOutput.matchAll(urlPattern)) {
     const url = match[0];
     if (seen.has(url)) continue;
     seen.add(url);

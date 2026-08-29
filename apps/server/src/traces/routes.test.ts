@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentService } from "../agent-service.js";
+import { AuditMemory } from "../audits/audit-memory.js";
 import { AuditStore } from "../audits/audit-store.js";
 import { createApp } from "../app.js";
 import { loadConfig } from "../config.js";
@@ -10,14 +11,11 @@ import { ContextService } from "../context/context-service.js";
 import { ContextStore } from "../context/context-store.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
+import { HttpError } from "../errors.js";
 import { createRedactor } from "./redaction.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
-
-const service = {
-  listAgents: () => [],
-  systemInfo: async () => ({}),
-} as unknown as AgentService;
 
 const fixture = JSON.parse(
   await readFile(new URL("./__fixtures__/otlp-logs.json", import.meta.url), "utf8"),
@@ -32,14 +30,25 @@ afterEach(async () => {
 });
 
 async function makeApp(environment: Record<string, string> = {}) {
+  const agents = new Set([AGENT_ID]);
+  const service = {
+    listAgents: () => [],
+    getAgent: (id: string) => {
+      if (!agents.has(id)) throw new HttpError(404, "Agent not found");
+      return { id };
+    },
+    systemInfo: async () => ({}),
+  } as unknown as AgentService;
   const directory = await mkdtemp(path.join(tmpdir(), "glassbox-routes-"));
   const traceStore = new TraceStore(path.join(directory, "traces"));
   await traceStore.initialize();
   const auditStore = new AuditStore(path.join(directory, "audits"));
   await auditStore.initialize();
+  const auditMemory = new AuditMemory(path.join(directory, "agent-runs"));
   cleanups.push(async () => {
     await traceStore.flush();
     await auditStore.flush();
+    await auditMemory.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
   const intentStore = new IntentStore(path.join(directory, "intent"));
@@ -58,7 +67,11 @@ async function makeApp(environment: Record<string, string> = {}) {
   cleanups.push(async () => {
     await contextStore.flush();
   });
-  const traceService = new TraceService(traceStore, createRedactor([]));
+  const traceService = new TraceService(
+    traceStore,
+    createRedactor([]),
+    codexRuntime.trace,
+  );
   const contextService = new ContextService({
     traceStore,
     store: contextStore,
@@ -70,6 +83,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     {
       traceStore,
       auditStore,
+      auditMemory,
       traceService,
       intentService,
       contextService,
@@ -80,10 +94,12 @@ async function makeApp(environment: Record<string, string> = {}) {
     app,
     traceStore,
     auditStore,
+    auditMemory,
     traceService,
     intentStore,
     intentService,
     contextStore,
+    agents,
   };
 }
 
@@ -334,12 +350,14 @@ describe("Glassbox routes", () => {
     });
     intentStore.seed(AGENT_ID, "Build a todo list web application");
     const intentId = intentStore.append(AGENT_ID, {
+      instructions: "",
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
       update: {
         kind: "classified",
         logs: ["Do not read .env files.", "prohibition"],
         addedConstraints: ["Do not read .env files."],
+        removedConstraints: [],
         previousObjective: null,
         traceId: null,
         revertedFrom: null,
@@ -381,6 +399,7 @@ describe("Glassbox routes", () => {
     intentStore.seed(AGENT_ID, "Build a todo list web application");
     const firstId = intentStore.latest(AGENT_ID)?.intentId ?? "";
     intentStore.append(AGENT_ID, {
+      instructions: "",
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
     });
@@ -445,6 +464,7 @@ describe("Glassbox routes", () => {
     intentStore.seed(AGENT_ID, "Build a todo list web application");
     const seedId = intentStore.latest(AGENT_ID)?.intentId ?? "";
     const updatedId = intentStore.append(AGENT_ID, {
+      instructions: "",
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
     });
@@ -471,6 +491,228 @@ describe("Glassbox routes", () => {
       payload: { intentId: "not-a-version" },
     });
     expect(conflict.statusCode).toBe(409);
+  });
+
+  it("turns an audited finding into a human-authored intent constraint", async () => {
+    const { app, traceService, traceStore, auditStore, intentStore, agents } =
+      await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    intentStore.seed(AGENT_ID, "Write installation documentation");
+    startRun(traceService);
+    traceService.onRunEnd(RUN_ID, { status: "completed" });
+    const trace = traceStore.get(RUN_ID)!;
+
+    const beforeAudit = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(beforeAudit.statusCode).toBe(409);
+    expect(beforeAudit.json<{ error: string }>().error).toContain(
+      "audit to finish",
+    );
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-network-1",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+      intentId: "",
+          type: "warning",
+          category: "security",
+          finding:
+            "Contacted github.com, which is outside the configured whitelist.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+
+    const activeRunId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    traceService.onRunStart(
+      {
+        id: AGENT_ID,
+        name: "Builder",
+        instructions: "",
+        codexThreadId: null,
+      },
+      { id: activeRunId, prompt: "A newer task" },
+    );
+    const duringActiveRun = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(duringActiveRun.statusCode).toBe(409);
+    expect(duringActiveRun.json<{ error: string }>().error).toContain(
+      "active run",
+    );
+    traceService.onRunEnd(activeRunId, { status: "completed" });
+
+    const applied = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Do not contact hosts outside the configured whitelist.",
+      },
+    });
+    expect(applied.statusCode).toBe(201);
+    const body = applied.json<{
+      intent: { extended: string[] };
+      versions: {
+        update?: {
+          kind: string;
+          sourceFindingId?: string | null;
+          traceId: string | null;
+        };
+      }[];
+    }>();
+    expect(body.intent.extended).toContain(
+      "Do not contact hosts outside the configured whitelist.",
+    );
+    expect(body.versions.at(-1)?.update).toMatchObject({
+      kind: "human-correction",
+      sourceFindingId: "finding-network-1",
+      traceId: RUN_ID,
+    });
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-network-1",
+        correction: "Try to apply it twice.",
+      },
+    });
+    expect(duplicate.statusCode).toBe(409);
+
+    const invented = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "not-real",
+        correction: "Do not accept findings invented by the browser.",
+      },
+    });
+    expect(invented.statusCode).toBe(404);
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-secret-2",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+      intentId: "",
+          type: "warning",
+          category: "security",
+          finding: "A credential was sent to an unrelated service.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    const secret = "ghp_example_secret";
+    const masked = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-secret-2",
+        correction: "Never send " + secret + " to unrelated services.",
+      },
+    });
+    expect(masked.statusCode).toBe(201);
+    expect(masked.body).not.toContain(secret);
+    expect(masked.body).toContain("ghp");
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-auditor-health",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+      intentId: "",
+          type: "error",
+          category: "audit-health",
+          finding: "The auditor could not complete.",
+        },
+        {
+          id: "finding-missing-span",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: "span-that-does-not-exist",
+          intentId: "",
+          type: "warning",
+          category: "reliability",
+          finding: "The agent repeated a failed command.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    const auditorHealth = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-auditor-health",
+        correction: "Change the Agent because its auditor was unavailable.",
+      },
+    });
+    expect(auditorHealth.statusCode).toBe(400);
+
+    const missingSpan = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-missing-span",
+        correction: "Change approach before retrying a failed command.",
+      },
+    });
+    expect(missingSpan.statusCode).toBe(404);
+
+    auditStore.recordRun(
+      trace,
+      [
+        {
+          id: "finding-after-delete",
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+      intentId: "",
+          type: "warning",
+          category: "reliability",
+          finding: "The agent repeated a failed command.",
+        },
+      ],
+      "",
+      intentStore.latest(AGENT_ID)?.intentId ?? "",
+    );
+    agents.delete(AGENT_ID);
+    const deletedAgent = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload: {
+        findingId: "finding-after-delete",
+        correction: "Change approach before retrying a failed command.",
+      },
+    });
+    expect(deletedAgent.statusCode).toBe(404);
+    expect(deletedAgent.json<{ error: string }>().error).toBe("Agent not found");
   });
 
   it("serves prior context and the thread position with a trace", async () => {
@@ -595,5 +837,92 @@ describe("Glassbox routes", () => {
     expect(body.failures[0]?.kind).toBe("sandbox-denied");
     expect(body.failures[0]?.layer).toBe("policy");
     expect(body.failures[0]?.count).toBe(2);
+  });
+
+  // The archive is the only way the audit memory leaves the server, so the
+  // route has to carry the files the step audits wrote and not just the audit
+  // document. It shipped serving an always-empty memory/ folder because
+  // nothing wrote to the memory at all.
+  it("streams the audit memory alongside the audit document", async () => {
+    const { app, traceService, auditMemory } = await makeApp();
+    startRun(traceService);
+    await auditMemory.writeStep(
+      AGENT_ID,
+      RUN_ID,
+      "span-1",
+      ["# Step span-1", "", "Ran ls and listed the workspace.", ""].join("\n"),
+    );
+    await auditMemory.updateMeta(AGENT_ID, RUN_ID, "span-1", {
+      summary: "Ran ls and listed the workspace.",
+      findings: [],
+      error: "",
+    });
+    await auditMemory.flush();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/audits/" + RUN_ID + "/archive",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/zip");
+    const zip = response.rawPayload;
+    // Local file headers name every entry, which is enough to assert what the
+    // archive carries without unzipping it.
+    const names: string[] = [];
+    const localFileHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+    for (
+      let at = zip.indexOf(localFileHeader);
+      at !== -1;
+      at = zip.indexOf(localFileHeader, at + 4)
+    ) {
+      const length = zip.readUInt16LE(at + 26);
+      names.push(zip.subarray(at + 30, at + 30 + length).toString());
+    }
+    expect(names).toContain("memory/span-1.md");
+    expect(names).toContain("memory/steps-meta.json");
+    expect(names).toContain("audit.json");
+  });
+
+  // A suspicion is a question the auditor could not settle, not a claim that
+  // the agent did something wrong. Folding it into the warning count made the
+  // row state exactly what the severity exists to avoid stating.
+  it("counts suspicions apart from warnings on a trace row", async () => {
+    const { app, traceStore, traceService, auditStore } = await makeApp();
+    startRun(traceService);
+    const trace = traceStore.get(RUN_ID);
+    expect(trace).toBeTruthy();
+    if (!trace) return;
+    const finding = (type: "warning" | "suspicion", id: string) => ({
+      id,
+      traceId: RUN_ID,
+      agentId: AGENT_ID,
+      spanId: null,
+      intentId: "",
+      type,
+      category: "intent-check" as const,
+      finding: id,
+    });
+    auditStore.recordRun(
+      trace,
+      [
+        finding("warning", "confirmed"),
+        finding("suspicion", "unsettled-one"),
+        finding("suspicion", "unsettled-two"),
+      ],
+      "",
+      "",
+      "ok",
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces",
+    });
+    const body = response.json<{
+      traces: { warningCount: number; suspicionCount: number }[];
+    }>();
+    expect(body.traces[0]?.warningCount).toBe(1);
+    expect(body.traces[0]?.suspicionCount).toBe(2);
   });
 });

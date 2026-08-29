@@ -46,11 +46,31 @@ function agentFindingsOf(doc: ChatAudit) {
   );
 }
 
+// A suspicion is a question the auditor could not settle, not a claim that the
+// agent did something wrong. Counting it as a warning would make the summary
+// row state exactly what the severity exists to avoid stating.
+function countsOf(doc: ChatAudit) {
+  let warnings = 0;
+  let suspicions = 0;
+  for (const finding of agentFindingsOf(doc)) {
+    if (finding.type === "suspicion") suspicions += 1;
+    else warnings += 1;
+  }
+  return { warnings, suspicions };
+}
+
 export class AuditStore {
   private readonly docs = new Map<string, ChatAudit>();
   private queue: Promise<void> = Promise.resolve();
 
-  constructor(private readonly directory: string) {}
+  constructor(
+    private readonly directory: string,
+    // Reports a write that did not land. Persistence is deliberately
+    // fire-and-forget so a slow disk cannot stall a run, but swallowing the
+    // error let the in-memory state and the file diverge in silence: after a
+    // restart the data is simply gone, with nothing anywhere having said so.
+    private readonly log?: (message: string, error?: unknown) => void,
+  ) {}
 
   async initialize() {
     await mkdir(this.directory, { recursive: true });
@@ -103,6 +123,22 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
+  // A run-level finding that must not close the run audit out. Intent
+  // classification fails while the run is still in flight, and borrowing
+  // recordRun here would stamp an endTime and make the trace look audited
+  // before the real run-level audit has happened.
+  recordRunFinding(
+    trace: TraceRecord,
+    steps: AuditTraceStep[],
+    intentId: string,
+    health: AuditHealth = "ok",
+  ) {
+    const doc = this.ensure(trace, intentId);
+    doc.runAudit = doc.runAudit.concat(steps);
+    doc.health = worstHealth(doc.health, health);
+    this.persist(trace.id);
+  }
+
   appendAuditorSpans(
     trace: TraceRecord,
     spans: TraceSpan[],
@@ -112,6 +148,30 @@ export class AuditStore {
     const doc = this.ensure(trace, intentId);
     doc.auditorSpans = doc.auditorSpans.concat(spans);
     this.persist(trace.id);
+  }
+
+  // Replaces the previous meta-audit rather than appending: re-auditing the
+  // auditor answers the same question again, it does not accumulate history.
+  //
+  // Writes only to metaAudit. It must never touch auditorSpans, because those
+  // are this method's own input — appending there would make each meta-audit
+  // produce material for the next one, without limit.
+  recordMetaAudit(
+    trace: TraceRecord,
+    steps: AuditTraceStep[],
+    intentId: string,
+    at: string,
+  ) {
+    const doc = this.ensure(trace, intentId);
+    doc.metaAudit = [...steps];
+    doc.metaAuditedAt = at;
+    this.persist(trace.id);
+  }
+
+  metaAudit(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return { findings: [], auditedAt: null };
+    return { findings: [...doc.metaAudit], auditedAt: doc.metaAuditedAt };
   }
 
   listAuditorSpans(traceId: string) {
@@ -130,19 +190,40 @@ export class AuditStore {
     return (this.docs.get(traceId)?.summary.endTime ?? 0) > 0;
   }
 
+  // Every spec version this trace's findings were judged against, in the order
+  // they were first used. Derived from the findings rather than read off the
+  // document, whose own field is last-writer-wins and so reports the version
+  // that happened to be current when the final finding landed — wrong for
+  // exactly the runs that matter, the ones that span a spec change.
+  intentIds(traceId: string): string[] {
+    const doc = this.docs.get(traceId);
+    if (!doc) return [];
+    const seen = findingsOf(doc)
+      .map((finding) => finding.intentId)
+      .filter((id) => id.length > 0);
+    const ordered = [...new Set(seen)];
+    // Audits written before findings carried a version still have the document
+    // field, and it is the only answer available for them.
+    if (ordered.length === 0 && doc.intentId.length > 0) return [doc.intentId];
+    return ordered;
+  }
+
+  // The version the run began under: the one a reader means by "the spec this
+  // trace was judged against" when there is only room to name one.
   intentId(traceId: string) {
-    return this.docs.get(traceId)?.intentId ?? null;
+    return this.intentIds(traceId)[0] ?? null;
   }
 
   countStepsForTrace(traceId: string) {
     return Object.keys(this.docs.get(traceId)?.spanAudit ?? {}).length;
   }
 
-  // Findings about the agent only. An auditor outage no longer inflates this.
-  warningCountByTrace() {
-    const counts = new Map<string, number>();
+  // Findings about the agent only, split by whether the auditor actually
+  // concluded something. An auditor outage inflates neither.
+  countsByTrace() {
+    const counts = new Map<string, { warnings: number; suspicions: number }>();
     for (const [chatId, doc] of this.docs) {
-      counts.set(chatId, agentFindingsOf(doc).length);
+      counts.set(chatId, countsOf(doc));
     }
     return counts;
   }
@@ -178,11 +259,16 @@ export class AuditStore {
         spanAudit: {},
         runAudit: [],
         auditorSpans: [],
+        metaAudit: [],
+        metaAuditedAt: null,
       };
       this.docs.set(trace.id, doc);
       return doc;
     }
-    if (intentId.length > 0) doc.intentId = intentId;
+    // The first audit pins the specification for this trace. Later step
+    // records may finish after the Agent's active intent changes, but they
+    // must not relabel historical evidence with that newer version (including
+    // replacing an intentionally empty id for a trace with no standing spec).
     this.syncFromTrace(doc, trace);
     return doc;
   }
@@ -206,6 +292,8 @@ export class AuditStore {
         });
         await rename(filePath + ".tmp", filePath);
       })
-      .catch(() => undefined);
+      .catch((error) =>
+        this.log?.("failed to persist audit for trace " + chatId, error),
+      );
   }
 }
