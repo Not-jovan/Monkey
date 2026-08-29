@@ -171,53 +171,63 @@ export function registerGlassboxRoutes(
 
   app.get("/api/traces/:id", async (request) => {
     const { id } = traceParams.parse(request.params);
-    const trace = deps.traceStore.get(id);
-    if (!trace) {
+    const payload = glassboxTrace(id);
+    if (!payload) {
       throw new HttpError(404, "Trace not found");
     }
-    const findings = deps.auditStore.listByTrace(id);
-    return {
-      trace,
-      findings,
-      auditComplete: deps.auditStore.isRunComplete(id),
-      auditHealth: deps.auditStore.health(id),
-      intentId: deps.auditStore.intentId(id),
-      // Every version this run was judged against. More than one means the
-      // spec moved mid-run, so naming a single "spec in force" would be a
-      // half-truth.
-      intentIds: deps.auditStore.intentIds(id),
-      // What the agent carried in, what it leaves behind, and where this run
-      // sits on its Codex thread.
-      context: deps.contextService?.view(id) ?? null,
-    };
+    return payload;
   });
 
   const downloadTrace = async (request: FastifyRequest, reply: FastifyReply) => {
     const { id } = traceParams.parse(request.params);
-    const trace = deps.traceStore.get(id);
-    if (!trace) {
+    const payload = glassboxTrace(id);
+    if (!payload) {
       throw new HttpError(404, "Trace not found");
     }
     reply.header(
       "content-disposition",
       'attachment; filename="trace-' + id + '.json"',
     );
-    const findings = deps.auditStore.listByTrace(id);
     return {
       exportedAt: new Date().toISOString(),
-      trace,
-      findings,
-      auditComplete: deps.auditStore.isRunComplete(id),
-      auditHealth: deps.auditStore.health(id),
-      intentId: deps.auditStore.intentId(id),
-      // Every version this run was judged against. More than one means the
-      // spec moved mid-run, so naming a single "spec in force" would be a
-      // half-truth.
-      intentIds: deps.auditStore.intentIds(id),
-      context: deps.contextService?.view(id) ?? null,
+      ...payload,
     };
   };
 
   app.get("/api/traces/:id/download", downloadTrace);
-  app.get("/api/traces/:id/export", downloadTrace);
+
+  app.get("/api/audits/:id", async (request) => {
+    const { id } = traceParams.parse(request.params);
+    const payload = auditorTrace(id);
+    if (!payload) {
+      throw new HttpError(404, "Audit not found");
+    }
+    return payload;
+  });
+
+  function glassboxTrace(id: string) {
+    const trace = deps.traceStore.get(id);
+    if (!trace) return null;
+    const intentId = deps.auditStore.intentId(id);
+    return {
+      trace,
+      findings: deps.auditStore.listByTrace(id),
+      auditComplete: deps.auditStore.isRunComplete(id),
+      auditHealth: deps.auditStore.health(id),
+      intentId,
+      intent: deps.intentService?.forTrace(trace.agentId, intentId) ?? null,
+      context: deps.contextService?.view(id) ?? null,
+    };
+  }
+
+  function auditorTrace(id: string) {
+    const trace = deps.traceStore.get(id);
+    if (!trace) return null;
+    return {
+      traceId: id,
+      agentId: trace.agentId,
+      health: deps.auditStore.health(id),
+      spans: deps.auditStore.listAuditorSpans(id),
+    };
+  }
 }

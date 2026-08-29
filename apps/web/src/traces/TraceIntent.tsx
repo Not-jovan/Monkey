@@ -1,66 +1,30 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api";
-import type { AuditTraceStep, IntentState, TraceRecord } from "../types";
+import type { AuditTraceStep, TraceIntentView } from "../types";
 
-export function TraceIntent({
-  trace,
-  intentId,
-  intentIds = [],
-}: {
-  trace: TraceRecord;
-  intentId: string | null;
-  // Every version this run's findings were judged against. More than one means
-  // the spec moved partway through, and no single version was "in force".
-  intentIds?: string[];
-}) {
-  const intentQuery = useQuery({
-    queryKey: ["intent", trace.agentId],
-    queryFn: () => api.intent(trace.agentId),
-    staleTime: 30_000,
-  });
-
-  const versions = intentQuery.data?.versions ?? [];
-  const pinnedIndex = intentId
-    ? versions.findIndex((entry) => entry.id === intentId)
-    : -1;
-  const pinned = pinnedIndex >= 0 ? versions[pinnedIndex] : undefined;
-  const intent: IntentState | undefined = pinned ?? intentQuery.data?.intent;
+export function TraceIntent({ intent }: { intent: TraceIntentView | null }) {
   if (!intent || (intent.objective.length === 0 && intent.extended.length === 0)) {
     return null;
   }
-  const isStale = pinnedIndex >= 0 && pinnedIndex < versions.length - 1;
-  const spannedVersions = intentIds.length;
 
   return (
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
       <div className="trace-intent-head">
         <h2 className="eyebrow" id="trace-intent-heading">
-          {spannedVersions > 1 ? "Spec at the start of this run" : "Spec in force"}
+          Intent
         </h2>
-        {pinnedIndex >= 0 && (
-          <span className="intent-version">
-            v{pinnedIndex + 1} of {versions.length}
-          </span>
-        )}
-        {/* The run outlived its own specification, so the findings below were
-            not all judged against the version shown here. */}
-        {spannedVersions > 1 && (
-          <span className="muted-cell">
-            The spec changed during this run ({spannedVersions} versions used)
-          </span>
-        )}
         {/* Classification runs after the message is sent, so a run can be
             judged against the version that preceded its own correction. */}
-        {isStale && (
+        {intent.stale && (
           <span className="muted-cell">
-            The spec has moved on since this run
+            This run used an earlier intent; it has changed since
           </span>
         )}
       </div>
-      <p className="trace-intent-objective">{intent.objective || "(no objective stated)"}</p>
+      <p className="trace-intent-objective">
+        {intent.objective || "(no objective stated)"}
+      </p>
       {intent.extended.length > 0 && (
         <>
-          <h3 className="eyebrow">Standing constraints</h3>
+          <h3 className="eyebrow">Constraints</h3>
           <ul className="trace-intent-list">
             {intent.extended.map((entry) => (
               <li key={entry}>{entry}</li>
@@ -74,7 +38,7 @@ export function TraceIntent({
 
 // The exhaustiveness check below is deliberate: adding a category without
 // giving it a label here is a compile error rather than a blank table cell.
-function findingTypeLabel(category: AuditTraceStep["category"]) {
+export function findingTypeLabel(category: AuditTraceStep["category"]) {
   if (category === "intent-check") return "Intent";
   if (category === "security") return "Security";
   if (category === "reliability") return "Reliability";
@@ -86,7 +50,10 @@ function findingTypeLabel(category: AuditTraceStep["category"]) {
 }
 
 export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
-  if (findings.length === 0) return null;
+  const shown = findings.filter(
+    (finding) => finding.category !== "audit-health",
+  );
+  if (shown.length === 0) return null;
   return (
     <div className="span-audits">
       <span className="eyebrow">Findings</span>
@@ -99,7 +66,7 @@ export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
           </tr>
         </thead>
         <tbody>
-          {findings.map((finding) => (
+          {shown.map((finding) => (
             <tr key={finding.id}>
               <td>
                 <span className={"finding-type finding-type-" + finding.type}>

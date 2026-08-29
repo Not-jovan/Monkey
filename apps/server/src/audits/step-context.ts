@@ -75,6 +75,7 @@ export interface StepContextInput {
   intent: IntentState;
   activity: StepActivity;
   deterministic: DeterministicFindings;
+  priorPromptInjections?: string[] | undefined;
   // What the agent inherited from earlier runs on this thread.
   priorContext?: string | undefined;
 }
@@ -147,6 +148,21 @@ export function buildStepContext(input: StepContextInput): string {
                 : " (received)"),
           )
           .join(", "),
+    );
+  }
+  if (input.priorPromptInjections && input.priorPromptInjections.length > 0) {
+    observed.push(
+      "Previously detected external directives: " +
+        input.priorPromptInjections
+          .join("; "),
+    );
+  }
+  if (deterministic.suspiciousActions.length > 0) {
+    observed.push(
+      "Suspicious actions in this step: " +
+        deterministic.suspiciousActions
+          .map((entry) => entry.summary)
+          .join("; "),
     );
   }
   if (observed.length > 0) {

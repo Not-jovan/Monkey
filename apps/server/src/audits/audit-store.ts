@@ -1,6 +1,6 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { TraceRecord } from "../traces/trace-model.js";
+import type { TraceRecord, TraceSpan } from "../traces/trace-model.js";
 import {
   chatAuditSchema,
   worstHealth,
@@ -22,6 +22,20 @@ function findingsOf(doc: ChatAudit) {
   return [...Object.values(doc.spanAudit).flat(), ...doc.runAudit].sort(
     (left, right) => left.id.localeCompare(right.id),
   );
+}
+
+// One health note is enough. A 30-step run that fell back on every call
+// would otherwise repeat the same "primary model is not available" line.
+function mergeSteps(doc: ChatAudit, steps: AuditTraceStep[]) {
+  const rest = steps.filter((step) => step.category !== "audit-health");
+  const incoming = steps.filter((step) => step.category === "audit-health");
+  if (incoming.length === 0) return rest;
+  const have = findingsOf(doc).filter((step) => step.category === "audit-health");
+  if (have.some((step) => step.type === "error")) return rest;
+  if (have.length > 0) {
+    return rest.concat(incoming.filter((step) => step.type === "error"));
+  }
+  return rest.concat(incoming);
 }
 
 // What the agent did, as opposed to what the auditor managed to do about it.
@@ -69,7 +83,7 @@ export class AuditStore {
   ) {
     const doc = this.ensure(trace, intentId);
     const existing = doc.spanAudit[spanId] ?? [];
-    doc.spanAudit[spanId] = existing.concat(steps);
+    doc.spanAudit[spanId] = existing.concat(mergeSteps(doc, steps));
     doc.health = worstHealth(doc.health, health);
     this.persist(trace.id);
   }
@@ -82,7 +96,7 @@ export class AuditStore {
     health: AuditHealth = "ok",
   ) {
     const doc = this.ensure(trace, intentId);
-    doc.runAudit = doc.runAudit.concat(steps);
+    doc.runAudit = doc.runAudit.concat(mergeSteps(doc, steps));
     doc.contextSummary = contextSummary;
     doc.health = worstHealth(doc.health, health);
     this.syncFromTrace(doc, trace);
@@ -110,6 +124,23 @@ export class AuditStore {
     doc.runAudit = doc.runAudit.concat(steps);
     doc.health = worstHealth(doc.health, health);
     this.persist(trace.id);
+  }
+
+  appendAuditorSpans(
+    trace: TraceRecord,
+    spans: TraceSpan[],
+    intentId: string,
+  ) {
+    if (spans.length === 0) return;
+    const doc = this.ensure(trace, intentId);
+    doc.auditorSpans = doc.auditorSpans.concat(spans);
+    this.persist(trace.id);
+  }
+
+  listAuditorSpans(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return [];
+    return [...doc.auditorSpans];
   }
 
   listByTrace(traceId: string) {
@@ -189,6 +220,7 @@ export class AuditStore {
         },
         spanAudit: {},
         runAudit: [],
+        auditorSpans: [],
       };
       this.docs.set(trace.id, doc);
       return doc;

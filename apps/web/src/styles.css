@@ -1592,6 +1592,84 @@ textarea:focus {
   color: var(--paper);
 }
 
+.pane-toggle {
+  align-self: flex-start;
+}
+
+.pane-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  font-size: 0.88rem;
+}
+
+.pane-toggle .warning-badge {
+  margin: 0;
+}
+
+.pane-mark {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #8a6a12;
+}
+
+.pane-toggle button.is-active .pane-mark {
+  color: #f3e3b4;
+}
+
+.trace-auditor {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.auditor-health {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--line);
+  border-radius: 16px;
+  padding: 16px 18px;
+}
+
+.auditor-health-ok {
+  border-left-color: var(--green);
+}
+
+.auditor-health-degraded {
+  border-left-color: #b8860b;
+}
+
+.auditor-health-failed {
+  border-left-color: var(--red);
+}
+
+.auditor-health-title {
+  margin: 6px 0 4px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.auditor-health-body {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
+.auditor-findings {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px 18px;
+  overflow-x: auto;
+}
+
+.auditor-findings h2 {
+  margin: 0 0 10px;
+}
+
 .step-list {
   max-height: 460px;
   overflow-y: auto;

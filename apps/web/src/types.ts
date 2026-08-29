@@ -175,6 +175,13 @@ export interface ContextView {
   nextTraceId: string | null;
 }
 
+export interface AuditorTrace {
+  traceId: string;
+  agentId: string;
+  health: AuditHealth;
+  spans: TraceSpan[];
+}
+
 export interface AuditTraceStep {
   id: string;
   traceId: string;
@@ -206,6 +213,12 @@ export type IntentUpdateKind =
   | "revert"
   | "instructions"
   | "adopted";
+// The spec a trace was judged against, resolved onto the response so a
+// download does not have to go looking it up by id.
+export interface TraceIntentView extends IntentState {
+  id: string;
+  stale: boolean;
+}
 
 export interface IntentUpdate {
   logs: string[];

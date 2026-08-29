@@ -99,8 +99,11 @@ const columns = [
           {/* Kept visibly apart from the count: the auditor failing is a
               limitation of the middleware, never a claim about the agent. */}
           {health !== "ok" && (
-            <span className="audit-health-badge" title="The auditor itself was degraded or failed on this run">
-              audit {health}
+            <span
+              className="audit-health-badge"
+              title="Open the trace and switch to View Auditor"
+            >
+              auditor
             </span>
           )}
         </>

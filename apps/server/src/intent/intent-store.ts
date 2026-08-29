@@ -59,6 +59,12 @@ export class IntentStore {
     return { intentId, version: structuredClone(version) };
   }
 
+  get(agentId: string, intentId: string): IntentVersionEntry | null {
+    const version = this.records.get(agentId)?.get(intentId);
+    if (!version) return null;
+    return { id: intentId, ...structuredClone(version) };
+  }
+
   seed(agentId: string, objective: string, instructions = "") {
     const existing = this.records.get(agentId);
     if (existing && existing.size > 0) {

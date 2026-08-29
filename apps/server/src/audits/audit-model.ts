@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { traceSpanSchema } from "../traces/trace-model.js";
 
 export interface SecretExposureFinding {
   location: "request" | "response";
@@ -11,6 +12,36 @@ export interface NewObjectiveFinding {
   objective: string;
   requestedByUser: boolean;
   actedUpon: boolean;
+}
+
+export type PromptInjectionKind =
+  | "secret-disclosure"
+  | "external-control"
+  | "instruction-override"
+  | "model";
+
+export type PromptInjectionSourceKind =
+  | "tool-output"
+  | "network-response"
+  | "file"
+  | "model";
+
+export interface SuspiciousActionFinding {
+  kind: "hidden-env-comment" | "hidden-secret-comment";
+  summary: string;
+  path?: string;
+  sourceKind: "tool-output" | "file";
+  lineStart?: number | null;
+  lineEnd?: number | null;
+}
+
+export interface PromptInjectionFinding {
+  quote: string;
+  kind: PromptInjectionKind;
+  sourceKind: PromptInjectionSourceKind;
+  path?: string;
+  url?: string;
+  line?: number | null;
 }
 
 export const auditTraceStepSchema = z.object({
@@ -77,9 +108,38 @@ export const chatAuditSchema = z.object({
   }),
   spanAudit: z.record(z.string(), z.array(auditTraceStepSchema)),
   runAudit: z.array(auditTraceStepSchema),
+  // The auditor's own steps. Kept off the agent TraceRecord so /api/traces/:id
+  // never mixes the two, and defaulted so older audit files still parse.
+  auditorSpans: z.array(traceSpanSchema).default([]),
 });
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;
+
+export function pushAuditorStatus(
+  push: (
+    type: AuditTraceStep["type"],
+    category: AuditTraceStep["category"],
+    finding: string,
+  ) => void,
+  status: "completed" | "degraded" | "failed",
+  failure: string | null,
+) {
+  if (status === "completed") return;
+  if (status === "degraded") {
+    push(
+      "warning",
+      "audit-health",
+      failure ??
+        "The primary audit model failed; a fallback model still produced a verdict.",
+    );
+    return;
+  }
+  push(
+    "error",
+    "audit-health",
+    "The auditor could not complete" + (failure ? ": " + failure : "."),
+  );
+}
 
 export function auditSteps(
   identity: {
@@ -158,6 +218,9 @@ export function emitPolicyFindings(
     newObjectives: NewObjectiveFinding[];
     networkViolations: string[];
     secretExposures: SecretExposureFinding[];
+    promptInjections?: PromptInjectionFinding[];
+    suspiciousActions?: SuspiciousActionFinding[];
+    actedOnExternalInstructions?: string[];
   },
 ) {
   for (const entry of policies.notInAlignment) {
@@ -170,6 +233,20 @@ export function emitPolicyFindings(
       "intent-check",
       "The agent acted on an objective the user never asked for: " +
         objective.objective,
+    );
+  }
+  for (const injection of policies.promptInjections ?? []) {
+    push("warning", "security", "prompt-injection: " + injection.quote);
+  }
+  for (const action of policies.suspiciousActions ?? []) {
+    push("warning", "security", action.summary);
+  }
+  for (const finding of policies.actedOnExternalInstructions ?? []) {
+    push(
+      "warning",
+      "security",
+      "The agent appears to have carried out a previously injected instruction: " +
+        finding,
     );
   }
   for (const url of policies.networkViolations) {

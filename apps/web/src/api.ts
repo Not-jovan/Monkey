@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentRun,
   AuditHealth,
+  AuditorTrace,
   AuditTraceStep,
   ContextView,
   IntentState,
@@ -9,6 +10,7 @@ import type {
   Message,
   RunFailure,
   SystemInfo,
+  TraceIntentView,
   TraceRecord,
   TraceSummary,
 } from "./types";
@@ -19,9 +21,7 @@ export interface TraceDetail {
   auditComplete: boolean;
   auditHealth: AuditHealth;
   intentId: string | null;
-  // Every spec version this run's findings were judged against. Length > 1
-  // means the spec moved mid-run.
-  intentIds: string[];
+  intent: TraceIntentView | null;
   context: ContextView | null;
 }
 
@@ -166,10 +166,7 @@ export const api = {
     request<TraceDetail & { exportedAt: string }>(
       "/api/traces/" + id + "/download",
     ),
-  exportTrace: (id: string) =>
-    request<TraceDetail & { exportedAt: string }>(
-      "/api/traces/" + id + "/export",
-    ),
+  auditor: (id: string) => request<AuditorTrace>("/api/audits/" + id),
 };
 
 export type { RunFailure };
