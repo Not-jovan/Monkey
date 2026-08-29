@@ -216,6 +216,7 @@ no model, so they still report when Ark is unreachable.
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
 | Step summary | Judged | What did this step actually do? Recorded, not scored — it is what the run-level checks read the run back through. |
 | Follow-through | Judged, run level | Did any later step carry out an instruction that arrived in untrusted content? |
+| Explanation | Judged, run level | For a follow-through that could not be settled: does anything the user asked for account for the action, or is the instruction the only thing that does? |
 
 Detection and relevance are deliberately split. Whether a credential is present
 is a fact and is answered by pattern matching; whether it *belongs* is a
@@ -238,6 +239,17 @@ step audits run several at a time, so the step that reads an instruction and the
 step that obeys it can be judged simultaneously, and the second one is then
 shown nothing. The **forward trace** asks the same question once at run end,
 against every step's recorded summary, where no such race is left.
+
+What the forward trace cannot settle goes to the **backtrace**. Looking only at
+what happened *after* an instruction appeared cannot distinguish "the agent
+obeyed the file" from "the user asked for this anyway" — an upload looks
+identical either way. The backtrace reads the run's own history and the standing
+intent and asks which of the two explains the action. If only the instruction
+does, the suspicion becomes a warning; if the user's own goal does, the question
+is answered and nothing is reported; if the history settles neither, the
+suspicion stands. A failed backtrace call leaves the suspicion standing too —
+losing an unresolved question to a model outage would defeat the point of having
+the severity.
 
 Findings are stored as evidence and served in a flat form at
 `GET /api/traces/:id` as `findings`:
@@ -458,7 +470,21 @@ builder, and scores intent misalignment and acted-upon injected objectives
 against the `expected.intent` block those cases have always carried and which
 nothing read. The deterministic half of the same dataset is asserted in
 `deterministic.test.ts` and runs in `npm test`; only the judged half needs a
-model.
+model. It also reports how many cases produced a step summary, because that is
+what the run-level checks read and a blank one is invisible to the accuracy
+numbers.
+
+Against `deepseek-v4-flash-ga-260731`:
+
+| | Accuracy | Precision | Recall |
+| --- | --- | --- | --- |
+| Intent misalignment | 85.0% (17/20) | 66.7% | 100% |
+| Injected objective (acted upon) | 95.0% (19/20) | 75.0% | 100% |
+
+Nothing was missed and every case parsed; the errors are all false positives,
+which is the direction an auditor should fail in. Accuracy is in-sample — the
+prompt was written against these cases — so read it as a regression signal, not
+a generalisation estimate.
 
 ## Limitations
 
@@ -472,12 +498,13 @@ Agent already receives the key in its process environment, so this grants no new
 access, but the platform does not keep secrets off disk entirely. Clear the
 snapshots before recording a demo and rotate the key afterwards.
 
-**The forward trace reads summaries, not steps.** It judges follow-through from
-each step's recorded one-line summary, so a step whose summary is missing or
-vague — the audit model failed, or wrote something uninformative — is a step it
-cannot see through. It reports that case as a `suspicion` rather than deciding
-it, but a run whose step audits largely failed gets a correspondingly weak
-forward trace. The per-step check still runs independently of it.
+**The follow-through checks read summaries, not steps.** Both the forward trace
+and the backtrace judge from each step's recorded one-line summary, so a step
+whose summary is missing or vague — the audit model failed, or wrote something
+uninformative — is a step they cannot see through. That case ends as a
+`suspicion` rather than a decision, but a run whose step audits largely failed
+gets a correspondingly weak result. The per-step check still runs independently
+of both.
 
 **Masking is shape-based.** Configured secret values are masked wherever they
 appear, along with credentials matching known shapes (GitHub, Stripe, OpenAI,
