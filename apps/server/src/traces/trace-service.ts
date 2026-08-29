@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+// Codex-specific, and deliberately so: its only consumer is onRunnerEvent,
+// which reads Codex's own stdout stream. Runtime-agnostic span building goes
+// through the injected trace adapter instead.
+import { readStreamError } from "../runtimes/codex.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
 import type { PartialUsage, RuntimeTraceAdapter } from "./runtime-events.js";
 import { detectSecretBindings } from "./secrets.js";
@@ -11,6 +15,7 @@ import type {
   TraceSpan,
 } from "./trace-model.js";
 import { emptyUsage } from "./trace-model.js";
+import { classifyRunFailure, type RunFailure } from "../failures.js";
 import type { TraceStore } from "./trace-store.js";
 
 interface RunStartAgent {
@@ -33,6 +38,9 @@ interface RunEndInput {
   // Applied only when the trace has no model yet, so Codex's authoritative
   // conversation_starts value is never overwritten.
   model?: string | null;
+  // Which layer is at fault and what to do about it. Recorded on the trace so
+  // the run list can say why a run failed, not merely that it did.
+  failure?: RunFailure | null;
 }
 
 interface ConversationScope {
@@ -149,6 +157,36 @@ function readChildThreadIds(
   return [...new Set(ids.filter((id) => id.length > 0))];
 }
 
+// Codex states the exit status two different ways: as a summary line above the
+// output of a command that ran, and as a struct field inside the envelope of
+// one that was denied. Both were being discarded.
+const EXIT_PATTERNS = [
+  /Process exited with code (-?\d+)/,
+  /\bexit_code:\s*(-?\d+)/,
+];
+
+function readExitCode(output: string): number | null {
+  for (const pattern of EXIT_PATTERNS) {
+    const match = pattern.exec(output);
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+// A non-zero exit alone is not a failure — `grep` finding nothing and `diff`
+// seeing a difference both exit non-zero as ordinary control flow. It is a
+// failure when the output also carries a recognisable failure signature, which
+// is exactly the question the taxonomy already answers.
+function readCommandFailure(output: string): RunFailure | null {
+  const exitCode = readExitCode(output);
+  if (exitCode === null || exitCode === 0) return null;
+  const failure = classifyRunFailure(output, {
+    exitCode,
+    source: "tool-step",
+  });
+  return failure.kind === "unknown" ? null : failure;
+}
+
 const runnerCompletedItemSchema = z.object({
   type: z.string(),
   tool: z.string().optional(),
@@ -247,6 +285,9 @@ export class TraceService {
       model: null,
       usage: emptyUsage(),
       failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
       unrecognizedEvents: 0,
       spans: [],
     });
@@ -319,6 +360,12 @@ export class TraceService {
 
     const state = this.runs.get(runId);
     if (!state) return;
+
+    const streamError = readStreamError(event);
+    if (streamError !== null) {
+      this.recordStreamError(runId, state, streamError);
+      return;
+    }
 
     if (event.type !== "item.completed") return;
     const item = runnerCompletedItemSchema.safeParse(event.item);
@@ -412,6 +459,28 @@ export class TraceService {
     );
   }
 
+  // Codex reports its own failures on the event stream. The runners collected
+  // them and then read only the last one, and only when the process also exited
+  // non-zero — so every error a run recovered from was discarded before anyone
+  // could see it. Turning each into a span means each gets audited too.
+  private recordStreamError(runId: string, state: RunState, message: string) {
+    const timestamp = this.now().toISOString();
+    const turnSpanId = this.ensureTurn(runId, state, timestamp);
+    const scope = this.rootScope(state);
+    this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+      name: "codex.error",
+      label: "Codex error",
+      kind: "system",
+      actor: "system",
+      status: "error",
+      startedAt: timestamp,
+      endedAt: timestamp,
+      durationMs: 0,
+      attributes: { laneId: this.laneIdFor(scope, false) },
+      error: this.redactor.redactText(message),
+    });
+  }
+
   onRunEnd(runId: string, outcome: RunEndInput) {
     const state = this.runs.get(runId);
     if (!state || state.completed) return;
@@ -465,6 +534,14 @@ export class TraceService {
         });
       }
     }
+    if (outcome.failure) {
+      const { layer, kind, retryability } = outcome.failure;
+      this.store.updateSpan(runId, state.rootSpanId, (span) => {
+        span.attributes.failureLayer = layer;
+        span.attributes.failureKind = kind;
+        span.attributes.retryability = retryability;
+      });
+    }
     this.closeSpan(
       runId,
       state.rootSpanId,
@@ -476,14 +553,53 @@ export class TraceService {
     this.store.updateTrace(runId, (trace) => {
       trace.status = outcome.status;
       trace.endedAt = endedAt;
-      if (failed) {
-        const failing = [...trace.spans]
-          .reverse()
-          .find(
-            (span) => span.status === "error" && span.id !== state.rootSpanId,
-          );
-        trace.failingSpanId = failing?.id ?? state.rootSpanId;
+      // The output cap discards the tail of the stream. Say so, rather than
+      // letting a diagnosis rest on evidence the platform knows it dropped.
+      if (outcome.failure?.kind === "output-cap") {
+        trace.evidenceComplete = false;
       }
+
+      // Found whatever the run's outcome was. A sandbox denial that the agent
+      // then worked around leaves the run "completed" — and gating the whole
+      // diagnosis on the run having failed made that case, the most common one
+      // in practice, completely undiagnosable.
+      const errored = trace.spans.filter(
+        (span) => span.status === "error" && span.id !== state.rootSpanId,
+      );
+      const failing = errored.at(-1);
+      trace.failingSpanId = failing?.id ?? (failed ? state.rootSpanId : null);
+
+      // Counted from the steps that actually failed, not from Codex's stream
+      // error events. Those events are rare — a denied command arrives as a
+      // tool result, not as a stream error — so counting them reported zero on
+      // runs that had visibly recovered from several failures.
+      trace.recoveredErrorCount =
+        outcome.status === "completed" ? errored.length : 0;
+
+      // The run's own attribution wins; otherwise attribute the step that
+      // broke, so `failure` answers "what went wrong here" rather than only
+      // "why did this run stop".
+      const failingExitCode = failing?.attributes.exitCode;
+      // The output is the richer evidence: a command that failed inside an
+      // otherwise-successful tool call has no error envelope, only its own
+      // stdout and stderr.
+      const failingOutput = failing?.attributes.output;
+      const evidence =
+        (typeof failingOutput === "string" ? failingOutput : "") ||
+        failing?.error ||
+        "";
+      trace.failure =
+        outcome.failure ??
+        (evidence
+          ? classifyRunFailure(evidence, {
+              source: "tool-step",
+              // Stated inside the envelope, and previously thrown away — the
+              // stored failure reported a null exit code for a step that had
+              // plainly exited 1.
+              exitCode:
+                typeof failingExitCode === "number" ? failingExitCode : null,
+            })
+          : null);
     });
     if (this.activeRunByAgent.get(state.agentId) === runId) {
       this.activeRunByAgent.delete(state.agentId);
@@ -738,6 +854,14 @@ export class TraceService {
             decision: normalized.rawDecision,
             decisionSource: normalized.source,
             laneId: this.laneIdFor(scope, subagent),
+            // The model call in flight when this tool call was decided. When
+            // the step fails, this is what separates a bad plan from a bad
+            // execution. It is an ordering inference over an async event
+            // stream, not something the runtime reports, so the UI presents it
+            // as a likelihood.
+            ...(scope.lastModelCallSpanId
+              ? { causedBySpanId: scope.lastModelCallSpanId }
+              : {}),
             ...(subagent ? { subagent: true } : {}),
           },
           error:
@@ -756,10 +880,28 @@ export class TraceService {
       case "tool_result": {
         const callId = normalized.callId ?? "";
         const existing = state.toolSpans.get(callId);
-        const succeeded = normalized.success;
+        const reportedSuccess = normalized.success;
         const output = normalized.output
           ? this.redactor.redactText(clip(normalized.output, OUTPUT_CLIP))
           : "";
+        // Codex calls the tool call successful whenever the tool itself ran —
+        // a command that exits 127 with "command not found" is reported as a
+        // success. That made the agent's own failures invisible: they were the
+        // one thing the failure taxonomy exists to identify, and they never
+        // produced a failing step.
+        //
+        // These three all read the tool's output, which Claude Code's OTLP
+        // never carries (only input and byte sizes), so for that runtime they
+        // resolve to null/false. That is the correct answer for it, not a gap:
+        // there is no output to find a command failure in.
+        const commandFailure = reportedSuccess
+          ? readCommandFailure(normalized.output ?? "")
+          : null;
+        const succeeded = reportedSuccess && commandFailure === null;
+        const exitCode = readExitCode(normalized.output ?? "");
+        // Marked rather than merely inlined into the text, so a reader can tell
+        // at a glance whether they are looking at the whole picture.
+        const outputTruncated = (normalized.output?.length ?? 0) > OUTPUT_CLIP;
         const toolArgumentsRaw = normalized.arguments
           ? this.redactor.redactText(normalized.arguments)
           : "";
@@ -803,6 +945,10 @@ export class TraceService {
               span.durationMs = normalized.durationMs;
               if (toolArguments) span.attributes.arguments = toolArguments;
               if (output) span.attributes.output = output;
+              if (outputTruncated) {
+                span.attributes.outputTruncated = true;
+                span.attributes.outputLength = normalized.output?.length ?? 0;
+              }
               if (requestSecrets.length > 0) {
                 span.attributes.secretsInRequest = requestSecrets.join(",");
               }
@@ -811,9 +957,8 @@ export class TraceService {
               }
               if (normalized.mcpServer)
                 span.attributes.mcpServer = normalized.mcpServer;
-              span.error = succeeded
-                ? null
-                : clip(output, 400) || "Tool failed";
+              if (exitCode !== null) span.attributes.exitCode = exitCode;
+              span.error = succeeded ? null : clip(output, 400) || "Tool failed";
               if (isSubagentTool(normalized.toolName)) {
                 const subagentLabel = readSubagentLabel(toolArguments);
                 if (subagentLabel) {
@@ -862,15 +1007,25 @@ export class TraceService {
                 toolName: normalized.toolName,
                 callId,
                 laneId: this.laneIdFor(scope, isSubagentTool(normalized.toolName)),
+                ...(scope.lastModelCallSpanId
+                  ? { causedBySpanId: scope.lastModelCallSpanId }
+                  : {}),
                 ...(isSubagentTool(normalized.toolName) ? { subagent: true } : {}),
                 ...(toolArguments ? { arguments: toolArguments } : {}),
                 ...(output ? { output } : {}),
+                ...(outputTruncated
+                  ? {
+                      outputTruncated: true,
+                      outputLength: normalized.output?.length ?? 0,
+                    }
+                  : {}),
                 ...(requestSecrets.length > 0
                   ? { secretsInRequest: requestSecrets.join(",") }
                   : {}),
                 ...(responseSecrets.length > 0
                   ? { secretsInResponse: responseSecrets.join(",") }
                   : {}),
+                ...(exitCode !== null ? { exitCode } : {}),
               },
               error: succeeded ? null : clip(output, 400) || "Tool failed",
             },

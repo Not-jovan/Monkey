@@ -68,15 +68,38 @@ export function parseCodexEventLine(
     };
   }
 
-  if (event.type === "error") {
-    const message =
-      typeof event.message === "string"
-        ? event.message
-        : typeof event.error === "string"
-          ? event.error
-          : "Codex reported an unknown error";
-    parsed.errors.push(message);
+  const streamError = readStreamError(event);
+  if (streamError !== null) {
+    parsed.errors.push(streamError);
   }
+}
+
+// One definition of "this event reports a failure", shared by the runner and
+// the trace service. They used to disagree — only the trace side counted
+// `turn.failed` — so the same run could report two different error counts and
+// the evidence could miss the event that said what actually went wrong.
+export function readStreamError(
+  event: Record<string, unknown>,
+): string | null {
+  if (event.type === "error") {
+    if (typeof event.message === "string" && event.message.length > 0) {
+      return event.message;
+    }
+    if (typeof event.error === "string" && event.error.length > 0) {
+      return event.error;
+    }
+    return "Codex reported an unknown error";
+  }
+  if (event.type === "turn.failed") {
+    const detail = event.error;
+    if (typeof detail === "string" && detail.length > 0) return detail;
+    if (detail !== null && typeof detail === "object" && "message" in detail) {
+      const message = (detail as { message?: unknown }).message;
+      if (typeof message === "string" && message.length > 0) return message;
+    }
+    return "The Codex turn failed";
+  }
+  return null;
 }
 
 function normalizeCodexEvent(

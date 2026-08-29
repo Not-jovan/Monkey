@@ -2,8 +2,10 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   getAgent,
   getIntent,
+  revertIntent,
   waitForAuditedTrace,
   waitForRun,
+  waitForTrace,
   type Agent,
   type TraceDetail,
 } from "./helpers/api";
@@ -19,6 +21,12 @@ const prompts = {
   youtube: "Go to https://www.youtube.com/",
   github: "Go to https://github.com/Acrylic125",
   html: "From now on, all documentation must use HTML instead of Markdown. Update the existing documentation accordingly.",
+  // The track's own gate: run a task that fails, then identify the failing step
+  // and its diagnostic context. Binding a port is refused by the
+  // workspace-write sandbox — a policy boundary doing its job, which is the
+  // case most easily misread as a defect in the agent.
+  denied:
+    "Start a web server that listens on port 8080 to preview the documentation. If it cannot bind, stop and report the failure exactly as the runtime gave it. Do not work around it and do not try an alternative approach.",
 } as const;
 
 let page: Page;
@@ -93,6 +101,25 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
     .toContain("html");
   traces[4] = htmlRun;
 });
+
+// A failed run produces no run-level audit summary, so this waits on the trace
+// reaching a terminal state rather than on the audit completing.
+async function sendAndWaitForOutcome(prompt: string) {
+  const composer = page.getByPlaceholder("Describe what you want the Agent to do…");
+  await expect(composer).toBeEnabled({ timeout: 30_000 });
+  await composer.fill(prompt);
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(`/api/agents/${agent.id}/messages`),
+  );
+  await page.getByRole("button", { name: "Send message" }).click();
+  const response = await responsePromise;
+  expect(response.status(), await response.text()).toBe(202);
+  const body = (await response.json()) as { run: { id: string } };
+  const run = await waitForRun(page.request, body.run.id);
+  return { run, detail: await waitForTrace(page.request, body.run.id) };
+}
 
 test.afterAll(async () => {
   await page?.close();
@@ -193,4 +220,124 @@ test("Trace 5 should apply the HTML intent update", async () => {
   await page.getByRole("button", { name: "Documentation Agent" }).click();
   await page.locator(".intent-toggle").click();
   await expect(page.locator(".intent-detail")).toContainText(/HTML/i);
+});
+
+// Applying the correction is only half the loop. The other half is seeing that
+// it happened, and being able to take it back.
+test("Trace 5 should show the intent update in the spec history", async () => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Documentation Agent" }).click();
+  await page.locator(".intent-toggle").click();
+  await page.locator(".intent-history-toggle").click();
+
+  const history = page.locator(".intent-history");
+  await expect(history).toBeVisible();
+  await expect(history).toContainText(/HTML/i);
+  // The message that caused the change is named, not merely its effect.
+  await expect(history).toContainText(/From your message/i);
+  await expect(page.locator(".message-spec-change").first()).toBeVisible();
+});
+
+test("An intent version can be restored without losing history", async () => {
+  const before = await getIntent(page.request, agent.id);
+  expect(before.versions.length).toBeGreaterThan(1);
+  const seed = before.versions[0]!;
+
+  const after = await revertIntent(page.request, agent.id, seed.id);
+  expect(after.versions).toHaveLength(before.versions.length + 1);
+  expect(after.versions.at(-1)?.update?.revertedFrom).toBe(seed.id);
+  expect(after.intent.extended).toEqual(seed.extended);
+  // Every superseded version stays readable, so an older trace's pinned spec
+  // still resolves.
+  for (const version of before.versions) {
+    expect(after.versions.some((entry) => entry.id === version.id)).toBe(true);
+  }
+
+  // Put the HTML rule back, so the agent is left as this suite found it.
+  const htmlVersion = before.versions.at(-1)!;
+  const restored = await revertIntent(page.request, agent.id, htmlVersion.id);
+  expect(restored.intent.extended).toEqual(htmlVersion.extended);
+});
+
+test.describe("A denied action is diagnosable", () => {
+  let outcome: Awaited<ReturnType<typeof sendAndWaitForOutcome>>;
+
+  test.beforeAll(async () => {
+    await page.goto("/");
+    await page.getByRole("button", { name: "Documentation Agent" }).click();
+    outcome = await sendAndWaitForOutcome(prompts.denied);
+  });
+
+  test("the denial is recorded as a failing step", () => {
+    const failing = outcome.detail.trace.spans.filter(
+      (span) => span.status === "error",
+    );
+    expect(
+      failing.length,
+      "a denied action must leave a failing step in the trace",
+    ).toBeGreaterThan(0);
+    // Recorded whatever the run's outcome was. In practice the agent explains
+    // the denial and the run completes, which is precisely the case that used
+    // to leave nothing to diagnose.
+    expect(
+      outcome.detail.trace.failingSpanId,
+      "the failing step must be identified even when the run completed",
+    ).not.toBeNull();
+  });
+
+  test("the failure is attributed to policy rather than to the agent", () => {
+    const failure = outcome.detail.trace.failure;
+    expect(failure, "a failing step must carry attribution").not.toBeNull();
+    expect(["policy", "platform", "provider"]).toContain(failure!.layer);
+    expect(failure!.remedy.length).toBeGreaterThan(0);
+  });
+
+  test("the trace answers what went wrong without hunting", async () => {
+    await page.goto(`/traces/${outcome.detail.trace.id}`);
+
+    const summary = page.locator(".failure-summary");
+    await expect(summary).toBeVisible();
+    await expect(summary.locator(".failure-layer")).toBeVisible();
+    // The remedy and the jump to the failing step are what turn a recorded
+    // failure into an answer.
+    await expect(summary.locator(".failure-remedy")).not.toBeEmpty();
+
+    // A run that completed anyway has to say so, or the banner reads as though
+    // the run died.
+    if (outcome.run.status === "completed") {
+      await expect(summary).toHaveClass(/failure-recovered/);
+      await expect(summary).toContainText(/worked around/i);
+    }
+
+    await page.getByRole("button", { name: /^Failing step:/ }).click();
+    await expect(page.locator(".span-panel-head")).toBeVisible();
+  });
+
+  test("the raw envelope is one click away from the diagnosis", async () => {
+    await page.goto(`/traces/${outcome.detail.trace.id}`);
+    const block = page.locator(".failure-block").first();
+    await expect(block).toBeVisible();
+    await block.getByRole("button", { name: "Raw" }).click();
+    // The "before" half of the comparison: the untouched, unreadable original.
+    await expect(block.locator(".failure-raw-view")).toBeVisible();
+    await expect(block.locator(".failure-raw-note")).toContainText(/characters/);
+  });
+});
+
+test("A later run shows what it carried in from the run before", async () => {
+  const detail = traces[1]!;
+  const response = await page.request.get(`/api/traces/${detail.trace.id}`);
+  expect(response.ok()).toBe(true);
+  const body = (await response.json()) as TraceDetail;
+
+  expect(body.context, "context must be established for every run").not.toBeNull();
+  expect(body.context!.position).toBeGreaterThan(1);
+  expect(body.context!.carriedIn).not.toBeNull();
+  expect(body.context!.carriedIn!.summary.length).toBeGreaterThan(0);
+
+  await page.goto(`/traces/${detail.trace.id}`);
+  const context = page.locator(".trace-context");
+  await expect(context).toBeVisible();
+  await expect(context).toContainText(/Carried in/i);
+  await expect(context).toContainText(/Run \d+ of \d+/i);
 });

@@ -10,6 +10,8 @@ import { AuditService } from "./audit-service.js";
 import { AuditStore } from "./audit-store.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
+import { ContextService } from "../context/context-service.js";
+import { ContextStore } from "../context/context-store.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 
@@ -39,12 +41,18 @@ async function makeStores() {
   await traceStore.initialize();
   const auditStore = new AuditStore(path.join(directory, "audits"));
   await auditStore.initialize();
+  const contextStore = new ContextStore(path.join(directory, "context"));
+  await contextStore.initialize();
+  // Mirrors production wiring: context is recorded from trace-completed, ahead
+  // of the auditor, so a run's own record exists before the audit reads back.
+  new ContextService({ traceStore, store: contextStore }).start();
   cleanups.push(async () => {
     await traceStore.flush();
     await auditStore.flush();
+    await contextStore.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
-  return { traceStore, auditStore, directory };
+  return { traceStore, auditStore, contextStore, directory };
 }
 
 function seedTrace(traceStore: TraceStore, id: string, agentId = "agent-1") {
@@ -60,6 +68,9 @@ function seedTrace(traceStore: TraceStore, id: string, agentId = "agent-1") {
     model: null,
     usage: emptyUsage(),
     failingSpanId: null,
+    failure: null,
+    recoveredErrorCount: 0,
+    evidenceComplete: true,
     unrecognizedEvents: 0,
     spans: [],
   };
@@ -118,6 +129,7 @@ function makeAudit(
   const service = new AuditService({
     traceStore: stores.traceStore,
     auditStore: stores.auditStore,
+    context: stores.contextStore,
     client: fakeClient(responder),
     securityModel: "sec-model",
     intentModel: "intent-model",
@@ -192,7 +204,13 @@ describe("AuditService", () => {
     await service.idle();
 
     expect(stores.auditStore.countStepsForTrace("trace-3")).toBe(1);
-    expect(stores.auditStore.listByTrace("trace-3")).toEqual([]);
+    expect(stores.auditStore.health("trace-3")).toBe("degraded");
+    const healthNotes = stores.auditStore
+      .listByTrace("trace-3")
+      .filter((step) => step.category === "audit-health");
+    expect(healthNotes).toHaveLength(1);
+    expect(healthNotes[0]?.type).toBe("warning");
+    expect(healthNotes[0]?.finding).toMatch(/Primary audit model/i);
     expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
       true,
     );
@@ -243,15 +261,16 @@ describe("AuditService", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]?.category).toBe("intent-check");
     expect(findings[0]?.finding).toContain("read credentials");
-    expect(stores.auditStore.priorRollout("agent-1")).toContain(
-      "Goal: count files",
-    );
-    await stores.auditStore.flush();
-    const reopened = new AuditStore(path.join(stores.directory, "audits"));
+    // The model's compression replaces the derived digest, and survives a
+    // restart because it is persisted by the context store rather than being
+    // recomputed from an audit that may never run again.
+    const carried = stores.contextStore.get("trace-5");
+    expect(carried?.source).toBe("model");
+    expect(carried?.summary).toContain("Goal: count files");
+    await stores.contextStore.flush();
+    const reopened = new ContextStore(path.join(stores.directory, "context"));
     await reopened.initialize();
-    expect(reopened.priorRollout("agent-1")).toContain(
-      "Goal: count files",
-    );
+    expect(reopened.get("trace-5")?.summary).toContain("Goal: count files");
 
     // The next run for the same agent must receive the compressed context.
     seedTrace(stores.traceStore, "trace-6");
@@ -346,7 +365,12 @@ describe("AuditService", () => {
       objective: "Build a TypeScript todo application",
       extended: ["Do not read .env files."],
       update: {
+        kind: "classified",
         logs: ["Do not read .env files.", "prohibition"],
+        addedConstraints: ["Do not read .env files."],
+        previousObjective: null,
+        traceId: null,
+        revertedFrom: null,
       },
     });
 
@@ -487,6 +511,11 @@ describe("AuditService", () => {
     // First step pays the failed call; the second goes straight to the fallback.
     expect(calls).toEqual(["sec-model", "intent-model", "intent-model"]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
+    expect(
+      stores.auditStore
+        .listByTrace(trace.id)
+        .filter((step) => step.category === "audit-health"),
+    ).toHaveLength(1);
   });
 
   it("keeps retrying after a transient failure", async () => {

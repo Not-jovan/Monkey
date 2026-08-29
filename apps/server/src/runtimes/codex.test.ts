@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../config.js";
-import { buildCodexArgs, codexRuntime, parseCodexEventLine } from "./codex.js";
+import {
+  buildCodexArgs,
+  codexRuntime,
+  parseCodexEventLine,
+  readStreamError,
+} from "./codex.js";
+import { runFailureDetail } from "../errors.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -120,5 +126,58 @@ describe("Codex runtime protocol", () => {
     // Codex leaves the model to config and to the OTLP conversation_starts
     // event; the stdout stream never sets it.
     expect(parsed.model).toBeNull();
+  });
+});
+
+// Ported from the retired codex-runner.test.ts. The runner and the trace
+// service used to disagree about what counts as an error — only the trace side
+// counted turn.failed — so the same run could report two different error counts
+// and the evidence could miss the event that said what went wrong.
+describe("readStreamError", () => {
+  it("reads both shapes Codex uses to report a failure", () => {
+    expect(readStreamError({ type: "error", message: "boom" })).toBe("boom");
+    expect(readStreamError({ type: "error", error: "boom" })).toBe("boom");
+    expect(readStreamError({ type: "error" })).toBe(
+      "Codex reported an unknown error",
+    );
+    expect(readStreamError({ type: "turn.failed", error: "stream reset" })).toBe(
+      "stream reset",
+    );
+    expect(
+      readStreamError({ type: "turn.failed", error: { message: "reset" } }),
+    ).toBe("reset");
+    expect(readStreamError({ type: "turn.failed" })).toBe(
+      "The Codex turn failed",
+    );
+  });
+
+  it("says nothing about events that are not failures", () => {
+    expect(readStreamError({ type: "turn.completed" })).toBeNull();
+    expect(readStreamError({ type: "item.completed" })).toBeNull();
+  });
+
+  it("collects turn.failed into the runner's own error list", () => {
+    const parsed = {
+      messages: [] as string[],
+      threadId: null as string | null,
+      usage: null,
+      errors: [] as string[],
+      model: null as string | null,
+    };
+    parseCodexEventLine('{"type":"error","message":"npm timeout"}', parsed);
+    parseCodexEventLine(
+      '{"type":"turn.failed","error":{"message":"stream reset"}}',
+      parsed,
+    );
+    expect(parsed.errors).toEqual(["npm timeout", "stream reset"]);
+
+    // The point of the original assertion: a turn.failed must not be passed
+    // over in favour of stderr. runFailureDetail keeps it — and keeps the
+    // earlier error too, because Claude Code reports the real cause first and
+    // a generic code last, so taking only the last one loses the diagnosis.
+    const evidence = runFailureDetail(parsed.errors, "some stderr");
+    expect(evidence).toContain("stream reset");
+    expect(evidence).toContain("npm timeout");
+    expect(evidence).not.toBe("some stderr");
   });
 });

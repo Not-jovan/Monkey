@@ -35,19 +35,23 @@ const FACT_PATTERNS: { label: string; pattern: RegExp }[] = [
   { label: "signal", pattern: /\bsignal:\s*'([^']+)'/ },
 ];
 
-// Turns Rust's escaped string body back into real text.
+// Turns one level of Rust's escaping back into real text.
+//
+// Single pass, because a chain of .replace() calls gets the nesting wrong: on
+// `\\n` the old chain matched the trailing `\n` first and left a stray
+// backslash before every newline, which then broke both de-duplication and the
+// end-anchored problem patterns below.
 function unescape(text: string) {
-  return text
-    .replace(/\\r\\n/g, "\n")
-    .replace(/\\n/g, "\n")
-    .replace(/\\t/g, "\t")
-    .replace(/\\"/g, '"')
-    .replace(/\\'/g, "'")
-    .replace(/\\\\/g, "\\");
+  return text.replace(/\\(.)/g, (_match, char: string) => {
+    if (char === "n") return "\n";
+    if (char === "r") return "\r";
+    if (char === "t") return "\t";
+    // Covers \" \' \\ and anything else Rust escaped verbatim.
+    return char;
+  });
 }
 
-// Pulls every double-quoted body out of the struct, longest first, so the
-// payload that carries the failure is found before incidental short fields.
+// Pulls every double-quoted body out of the struct.
 function quotedBodies(text: string) {
   const bodies: string[] = [];
   const pattern = /"((?:[^"\\]|\\.)*)"/g;
@@ -57,6 +61,33 @@ function quotedBodies(text: string) {
     if (body.length > 0) bodies.push(body);
   }
   return bodies;
+}
+
+// A payload that is still a Debug struct with its own string fields, meaning
+// there is another level of escaping under it.
+const STILL_NESTED = /\w+:\s*"|StreamOutput|ExecToolCallOutput/;
+const MAX_NESTING = 4;
+
+// Codex nests Debug-formatted structs inside each other's string fields, and
+// the depth is not fixed: this run reported
+// `CreateProcess { message: "Codex(Sandbox(Denied { ... }))" }`, one level
+// deeper than the same failure used to arrive, so every payload was escaped
+// twice. Unescaping a fixed number of times is therefore wrong in both
+// directions — descend until the text stops looking like a struct.
+function extractPayloads(text: string, depth = 0): string[] {
+  const bodies = quotedBodies(text);
+  if (bodies.length === 0 || depth >= MAX_NESTING) return [text];
+
+  const payloads: string[] = [];
+  for (const body of bodies) {
+    const unescaped = unescape(body);
+    if (STILL_NESTED.test(unescaped)) {
+      payloads.push(...extractPayloads(unescaped, depth + 1));
+    } else {
+      payloads.push(unescaped);
+    }
+  }
+  return payloads;
 }
 
 const STACK_FRAME = /^\s+at\s/;
@@ -69,6 +100,24 @@ const PROBLEM = [
 
 function isProblem(line: string) {
   return PROBLEM.some((pattern) => pattern.test(line.trim()));
+}
+
+// The outer struct name is the mechanism Codex used, not the reason it failed:
+// this run's denial arrived as `CreateProcess`, with `Codex(Sandbox(Denied` —
+// the part a reader actually needs — nested inside it. Prefer the inner cause
+// when one is recognisable.
+const INNER_CAUSES: { pattern: RegExp; label: string }[] = [
+  { pattern: /Sandbox\(Denied/, label: "SandboxDenied" },
+  { pattern: /\bSandboxDenied\b/, label: "SandboxDenied" },
+  { pattern: /\bTimedOut\b|timed_out:\s*true/, label: "TimedOut" },
+  { pattern: /Signal\(/, label: "Signal" },
+];
+
+function innerCause(text: string): string | null {
+  for (const { pattern, label } of INNER_CAUSES) {
+    if (pattern.test(text)) return label;
+  }
+  return null;
 }
 
 export function parseCodexFailure(text: string): CodexFailure | null {
@@ -84,7 +133,7 @@ export function parseCodexFailure(text: string): CodexFailure | null {
 
   // message, stderr and aggregated_output normally carry the same text; keep
   // one copy of each distinct body rather than printing it three times.
-  const bodies = quotedBodies(text).map(unescape);
+  const bodies = extractPayloads(text);
   const distinct: string[] = [];
   for (const body of bodies) {
     if (body.trim().length === 0) continue;
@@ -105,7 +154,10 @@ export function parseCodexFailure(text: string): CodexFailure | null {
   for (const body of distinct) {
     for (const line of body.split("\n")) {
       if (STACK_FRAME.test(line)) {
-        stack.push(line.trim());
+        const trimmed = line.trim();
+        // The same frame arrives once per copy of the payload. Reporting "24
+        // frames" for a 12-frame trace is worse than not counting at all.
+        if (!stack.includes(trimmed)) stack.push(trimmed);
       } else if (isProblem(line)) {
         const trimmed = line.trim();
         if (!problems.includes(trimmed)) problems.push(trimmed);
@@ -117,7 +169,7 @@ export function parseCodexFailure(text: string): CodexFailure | null {
 
   return {
     tool: header[1] ?? null,
-    kind: header[2] ?? null,
+    kind: innerCause(text) ?? header[2] ?? null,
     exitCode: exitMatch ? Number(exitMatch[1]) : null,
     problems,
     facts,

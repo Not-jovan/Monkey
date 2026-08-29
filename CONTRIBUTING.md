@@ -22,6 +22,12 @@ terraform fmt -check -recursive deploy/volcengine
 docker compose config
 ```
 
+`npm run typecheck` covers tests as well as sources: `tsconfig.json` builds
+`src` with `src/**/*.test.ts` excluded, and `tsconfig.test.json` type-checks
+everything including the tests. Adding a required field to a shared type such
+as `RunnerResult` or `ParsedEvents` therefore does surface in any fixture
+still missing it — fix the fixture rather than widening the type.
+
 ## Pull requests
 
 - Explain the behavior and reason for the change.

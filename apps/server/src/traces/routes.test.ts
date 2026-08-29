@@ -6,6 +6,8 @@ import type { AgentService } from "../agent-service.js";
 import { AuditStore } from "../audits/audit-store.js";
 import { createApp } from "../app.js";
 import { loadConfig } from "../config.js";
+import { ContextService } from "../context/context-service.js";
+import { ContextStore } from "../context/context-store.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
 import { createRedactor } from "./redaction.js";
@@ -52,7 +54,21 @@ async function makeApp(environment: Record<string, string> = {}) {
     model: "intent-model",
     enabled: false,
   });
-  const traceService = new TraceService(traceStore, createRedactor([]), codexRuntime.trace);
+  const contextStore = new ContextStore(path.join(directory, "context"));
+  await contextStore.initialize();
+  cleanups.push(async () => {
+    await contextStore.flush();
+  });
+  const traceService = new TraceService(
+    traceStore,
+    createRedactor([]),
+    codexRuntime.trace,
+  );
+  const contextService = new ContextService({
+    traceStore,
+    store: contextStore,
+  });
+  contextService.start();
   const app = await createApp(
     loadConfig({ NODE_ENV: "test", ...environment }),
     service,
@@ -61,10 +77,19 @@ async function makeApp(environment: Record<string, string> = {}) {
       auditStore,
       traceService,
       intentService,
+      contextService,
       collectorToken: "collector-token-1",
     },
   );
-  return { app, traceStore, auditStore, traceService, intentStore, intentService };
+  return {
+    app,
+    traceStore,
+    auditStore,
+    traceService,
+    intentStore,
+    intentService,
+    contextStore,
+  };
 }
 
 const AGENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -179,13 +204,6 @@ describe("Glassbox routes", () => {
     });
     expect(missing.statusCode).toBe(404);
 
-    const exported = await app.inject({
-      method: "GET",
-      url: "/api/traces/" + RUN_ID + "/export",
-    });
-    expect(exported.statusCode).toBe(200);
-    expect(exported.headers["content-disposition"]).toContain("trace-" + RUN_ID);
-
     const downloaded = await app.inject({
       method: "GET",
       url: "/api/traces/" + RUN_ID + "/download",
@@ -215,7 +233,12 @@ describe("Glassbox routes", () => {
       objective: "Build a todo list web application",
       extended: ["Do not read .env files."],
       update: {
+        kind: "classified",
         logs: ["Do not read .env files.", "prohibition"],
+        addedConstraints: ["Do not read .env files."],
+        previousObjective: null,
+        traceId: null,
+        revertedFrom: null,
       },
     });
 
@@ -226,15 +249,15 @@ describe("Glassbox routes", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json<{
       intent: { objective: string; extended: string[] };
-      versions: Record<string, { objective: string; extended: string[] }>;
+      versions: { id: string; objective: string; extended: string[] }[];
       intentId: string | null;
     }>();
     expect(body.intent.objective).toBe("Build a todo list web application");
     expect(body.intent.extended).toEqual(["Do not read .env files."]);
     expect(body.intentId).toBe(intentId);
-    expect(body.versions[intentId]?.extended).toEqual([
-      "Do not read .env files.",
-    ]);
+    // Ordered, so position in the list is the version number a reader sees.
+    expect(body.versions.map((entry) => entry.id).at(-1)).toBe(intentId);
+    expect(body.versions.at(-1)?.extended).toEqual(["Do not read .env files."]);
     expect(body).not.toHaveProperty("pending");
     expect(body).not.toHaveProperty("requiresConfirmation");
 
@@ -244,5 +267,167 @@ describe("Glassbox routes", () => {
       payload: { decision: "confirm" },
     });
     expect(gone.statusCode).toBe(404);
+  });
+
+  // Reverting appends; it must never rewind, or an audit that pinned the
+  // reverted-away-from version would resolve to nothing.
+  it("restores an earlier intent version without erasing history", async () => {
+    const { app, intentStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    intentStore.seed(AGENT_ID, "Build a todo list web application");
+    const seedId = intentStore.latest(AGENT_ID)?.intentId ?? "";
+    const updatedId = intentStore.append(AGENT_ID, {
+      objective: "Build a todo list web application",
+      extended: ["Do not read .env files."],
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { intentId: seedId },
+    });
+    expect(response.statusCode).toBe(201);
+    const body = response.json<{
+      intent: { extended: string[] };
+      versions: { id: string; update?: { revertedFrom: string | null } }[];
+      intentId: string | null;
+    }>();
+    expect(body.intent.extended).toEqual([]);
+    expect(body.versions).toHaveLength(3);
+    expect(body.versions.at(-1)?.update?.revertedFrom).toBe(seedId);
+    expect(body.versions.map((entry) => entry.id)).toContain(updatedId);
+
+    const conflict = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { intentId: "not-a-version" },
+    });
+    expect(conflict.statusCode).toBe(409);
+  });
+
+  it("serves prior context and the thread position with a trace", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+
+    const seed = (id: string, startedAt: string) => {
+      traceStore.create({
+        version: 1,
+        id,
+        agentId: AGENT_ID,
+        conversationId: "thread-1",
+        status: "running",
+        startedAt,
+        endedAt: null,
+        prompt: "document the install flow",
+        model: null,
+        usage: {
+          inputTokens: 0,
+          cachedTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          toolTokens: 0,
+        },
+        failingSpanId: null,
+        failure: null,
+        recoveredErrorCount: 0,
+        evidenceComplete: true,
+        unrecognizedEvents: 0,
+        spans: [],
+      });
+      traceStore.updateTrace(id, (trace) => {
+        trace.status = "completed";
+        trace.endedAt = startedAt;
+      });
+    };
+
+    seed(RUN_ID, "2026-08-28T00:00:00.000Z");
+    seed("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "2026-08-28T00:01:00.000Z");
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/traces/cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{
+      auditHealth: string;
+      context: {
+        position: number;
+        chainLength: number;
+        previousTraceId: string | null;
+        carriedIn: { summary: string; source: string } | null;
+      } | null;
+    }>();
+    // No auditor ran at all here, which is exactly the case that used to leave
+    // prior context empty.
+    expect(body.auditHealth).toBe("ok");
+    expect(body.context?.position).toBe(2);
+    expect(body.context?.chainLength).toBe(2);
+    expect(body.context?.previousTraceId).toBe(RUN_ID);
+    expect(body.context?.carriedIn?.source).toBe("derived");
+    expect(body.context?.carriedIn?.summary).toContain("document the install flow");
+  });
+
+  it("groups an agent's failures by kind", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+
+    const denied = {
+      layer: "policy" as const,
+      kind: "sandbox-denied",
+      retryability: "user-action" as const,
+      title: "The Runtime sandbox denied this operation",
+      detail: "listen EPERM",
+      remedy: "Keep the work inside /workspace.",
+      exitCode: 1,
+    };
+    for (const [id, startedAt] of [
+      [RUN_ID, "2026-08-28T00:00:00.000Z"],
+      ["cccccccc-cccc-4ccc-8ccc-cccccccccccc", "2026-08-28T00:01:00.000Z"],
+    ] as const) {
+      traceStore.create({
+        version: 1,
+        id,
+        agentId: AGENT_ID,
+        conversationId: "thread-1",
+        status: "failed",
+        startedAt,
+        endedAt: startedAt,
+        prompt: "serve on port 8080",
+        model: null,
+        usage: {
+          inputTokens: 0,
+          cachedTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          toolTokens: 0,
+        },
+        failingSpanId: null,
+        failure: denied,
+        recoveredErrorCount: 0,
+        evidenceComplete: true,
+        unrecognizedEvents: 0,
+        spans: [],
+      });
+    }
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/failures",
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{
+      failures: { kind: string; layer: string; count: number }[];
+    }>();
+    // One failure is an incident; the same one twice is the thing to fix.
+    expect(body.failures).toHaveLength(1);
+    expect(body.failures[0]?.kind).toBe("sandbox-denied");
+    expect(body.failures[0]?.layer).toBe("policy");
+    expect(body.failures[0]?.count).toBe(2);
   });
 });

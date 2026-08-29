@@ -3,6 +3,11 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
 import { RunCancelledError, runFailureDetail } from "./errors.js";
+import {
+  classifyRunFailure,
+  noAgentMessageFailure,
+  RunFailureError,
+} from "./failures.js";
 import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
 import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
@@ -126,7 +131,13 @@ export class ProcessRuntimeRunner implements AgentRunner {
 
     try {
       const exitCode = await new Promise<number>((resolve, reject) => {
-        child.once("error", reject);
+        child.once("error", (error: Error) =>
+          reject(
+            new RunFailureError(
+              classifyRunFailure(error.message, { spawnFailed: true }),
+            ),
+          ),
+        );
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
@@ -136,32 +147,45 @@ export class ProcessRuntimeRunner implements AgentRunner {
         throw new RunCancelledError();
       }
       if (active.timedOut) {
-        throw new Error(
-          this.runtime.id + " timed out after " + this.config.codexTimeoutMs + " ms",
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            timedOut: true,
+            timeoutMs: this.config.codexTimeoutMs,
+            exitCode,
+          }),
         );
       }
       if (active.outputExceeded) {
-        throw new Error(
-          this.runtime.id + " output exceeded CODEX_MAX_OUTPUT_BYTES",
+        throw new RunFailureError(
+          classifyRunFailure("", {
+            outputExceeded: true,
+            maxOutputBytes: this.config.codexMaxOutputBytes,
+            exitCode,
+          }),
         );
       }
       if (exitCode !== 0) {
-        const detail = runFailureDetail(parsed.errors, stderr);
-        throw new Error(
-          this.runtime.id + " exited with code " + exitCode + ": " + detail,
+        throw new RunFailureError(
+          classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
+            exitCode,
+            source: "process-exit",
+          }),
         );
       }
       const output = parsed.messages.at(-1)?.trim();
       if (!output) {
         // A runtime can report a failure and still exit 0 (Claude Code sets
-        // is_error on the result event), so prefer the reported reason over
-        // the generic "no message" wording.
+        // is_error on the result event). Attribute it from what it reported
+        // rather than falling through to the generic "no message" verdict,
+        // which would blame the agent for a provider or policy failure.
         if (parsed.errors.length > 0) {
-          throw new Error(
-            this.runtime.id + " failed: " + runFailureDetail(parsed.errors, stderr),
+          throw new RunFailureError(
+            classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
+              exitCode,
+            }),
           );
         }
-        throw new Error(this.runtime.id + " completed without an agent message");
+        throw new RunFailureError(noAgentMessageFailure());
       }
       return {
         output,

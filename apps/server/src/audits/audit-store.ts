@@ -3,6 +3,8 @@ import path from "node:path";
 import type { TraceRecord } from "../traces/trace-model.js";
 import {
   chatAuditSchema,
+  worstHealth,
+  type AuditHealth,
   type AuditTraceStep,
   type ChatAudit,
 } from "./audit-model.js";
@@ -19,6 +21,28 @@ function tokensFrom(trace: TraceRecord) {
 function findingsOf(doc: ChatAudit) {
   return [...Object.values(doc.spanAudit).flat(), ...doc.runAudit].sort(
     (left, right) => left.id.localeCompare(right.id),
+  );
+}
+
+// One health note is enough. A 30-step run that fell back on every call
+// would otherwise repeat the same "primary model is not available" line.
+function mergeSteps(doc: ChatAudit, steps: AuditTraceStep[]) {
+  const rest = steps.filter((step) => step.category !== "audit-health");
+  const incoming = steps.filter((step) => step.category === "audit-health");
+  if (incoming.length === 0) return rest;
+  const have = findingsOf(doc).filter((step) => step.category === "audit-health");
+  if (have.some((step) => step.type === "error")) return rest;
+  if (have.length > 0) {
+    return rest.concat(incoming.filter((step) => step.type === "error"));
+  }
+  return rest.concat(incoming);
+}
+
+// What the agent did, as opposed to what the auditor managed to do about it.
+// Only these belong in a warning count.
+function agentFindingsOf(doc: ChatAudit) {
+  return findingsOf(doc).filter(
+    (finding) => finding.category !== "audit-health",
   );
 }
 
@@ -48,10 +72,12 @@ export class AuditStore {
     spanId: string,
     steps: AuditTraceStep[],
     intentId: string,
+    health: AuditHealth = "ok",
   ) {
     const doc = this.ensure(trace, intentId);
     const existing = doc.spanAudit[spanId] ?? [];
-    doc.spanAudit[spanId] = existing.concat(steps);
+    doc.spanAudit[spanId] = existing.concat(mergeSteps(doc, steps));
+    doc.health = worstHealth(doc.health, health);
     this.persist(trace.id);
   }
 
@@ -60,10 +86,12 @@ export class AuditStore {
     steps: AuditTraceStep[],
     contextSummary: string,
     intentId: string,
+    health: AuditHealth = "ok",
   ) {
     const doc = this.ensure(trace, intentId);
-    doc.runAudit = doc.runAudit.concat(steps);
+    doc.runAudit = doc.runAudit.concat(mergeSteps(doc, steps));
     doc.contextSummary = contextSummary;
+    doc.health = worstHealth(doc.health, health);
     this.syncFromTrace(doc, trace);
     if (trace.status !== "running") {
       if (trace.endedAt) {
@@ -93,22 +121,23 @@ export class AuditStore {
     return Object.keys(this.docs.get(traceId)?.spanAudit ?? {}).length;
   }
 
+  // Findings about the agent only. An auditor outage no longer inflates this.
   warningCountByTrace() {
     const counts = new Map<string, number>();
     for (const [chatId, doc] of this.docs) {
-      counts.set(chatId, findingsOf(doc).length);
+      counts.set(chatId, agentFindingsOf(doc).length);
     }
     return counts;
   }
 
-  priorRollout(agentId: string) {
-    let best: ChatAudit | null = null;
-    for (const doc of this.docs.values()) {
-      if (doc.agentId !== agentId) continue;
-      if (doc.summary.endTime <= 0) continue;
-      if (!best || doc.summary.endTime > best.summary.endTime) best = doc;
-    }
-    return best?.contextSummary ?? "";
+  health(traceId: string): AuditHealth {
+    return this.docs.get(traceId)?.health ?? "ok";
+  }
+
+  healthByTrace() {
+    const health = new Map<string, AuditHealth>();
+    for (const [chatId, doc] of this.docs) health.set(chatId, doc.health);
+    return health;
   }
 
   async flush() {
@@ -121,9 +150,9 @@ export class AuditStore {
       doc = {
         agentId: trace.agentId,
         intentId,
+        health: "ok",
         contextSummary: "",
         summary: {
-          priorRollout: this.priorRollout(trace.agentId),
           tokenSummary: tokensFrom(trace),
           startTime: Date.parse(trace.startedAt),
           endTime: 0,
