@@ -10,6 +10,7 @@ import { ArkApiError, type ArkClient } from "./ark-client.js";
 import {
   auditSteps,
   emitPolicyFindings,
+  pushAuditorStatus,
   type AuditHealth,
   type SecretExposureFinding,
 } from "./audit-model.js";
@@ -315,13 +316,7 @@ export class AuditService {
             }
             push("warning", "security", tag + (reason ? ": " + reason : ""));
           }
-          if (status === "failed") {
-            push(
-              "error",
-              "audit-health",
-              "The audit could not be completed" + (reason ? ": " + reason : "."),
-            );
-          }
+          pushAuditorStatus(push, status, failure);
         },
       ),
       this.deps.intent?.currentId(trace.agentId) ?? "",
@@ -387,7 +382,6 @@ export class AuditService {
     // failed verdict leaves the digest in place rather than erasing it.
     this.deps.context?.enrich(traceId, verdict?.context_summary ?? "");
 
-    const reason = verdict?.deviation ?? (verdict ? "" : (failure ?? ""));
     this.deps.auditStore.recordRun(
       trace,
       auditSteps(
@@ -414,13 +408,7 @@ export class AuditService {
                 (repeat.attempt ? ": " + repeat.attempt : "."),
             );
           }
-          if (status === "failed") {
-            push(
-              "error",
-              "audit-health",
-              "The audit could not be completed" + (reason ? ": " + reason : "."),
-            );
-          }
+          pushAuditorStatus(push, status, failure);
         },
       ),
       verdict?.context_summary ?? "",

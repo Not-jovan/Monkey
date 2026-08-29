@@ -74,6 +74,32 @@ export const chatAuditSchema = z.object({
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;
 
+export function pushAuditorStatus(
+  push: (
+    type: AuditTraceStep["type"],
+    category: AuditTraceStep["category"],
+    finding: string,
+  ) => void,
+  status: "completed" | "degraded" | "failed",
+  failure: string | null,
+) {
+  if (status === "completed") return;
+  if (status === "degraded") {
+    push(
+      "warning",
+      "audit-health",
+      failure ??
+        "The primary audit model failed; a fallback model still produced a verdict.",
+    );
+    return;
+  }
+  push(
+    "error",
+    "audit-health",
+    "The auditor could not complete" + (failure ? ": " + failure : "."),
+  );
+}
+
 export function auditSteps(
   identity: {
     id: string;

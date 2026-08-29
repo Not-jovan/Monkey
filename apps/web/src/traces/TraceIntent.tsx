@@ -1,6 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
-import type { AuditTraceStep, IntentState, TraceRecord } from "../types";
+import type {
+  AuditTraceStep,
+  IntentState,
+  IntentVersionEntry,
+  TraceRecord,
+} from "../types";
 
 export function TraceIntent({
   trace,
@@ -15,7 +20,7 @@ export function TraceIntent({
     staleTime: 30_000,
   });
 
-  const versions = intentQuery.data?.versions ?? [];
+  const versions: IntentVersionEntry[] = intentQuery.data?.versions ?? [];
   const pinnedIndex = intentId
     ? versions.findIndex((entry) => entry.id === intentId)
     : -1;
@@ -30,25 +35,20 @@ export function TraceIntent({
     <section className="trace-intent" aria-labelledby="trace-intent-heading">
       <div className="trace-intent-head">
         <h2 className="eyebrow" id="trace-intent-heading">
-          Spec in force
+          Intent
         </h2>
-        {pinnedIndex >= 0 && (
-          <span className="intent-version">
-            v{pinnedIndex + 1} of {versions.length}
-          </span>
-        )}
         {/* Classification runs after the message is sent, so a run can be
             judged against the version that preceded its own correction. */}
         {isStale && (
           <span className="muted-cell">
-            The spec has moved on since this run
+            This run used an earlier intent; it has changed since
           </span>
         )}
       </div>
       <p className="trace-intent-objective">{intent.objective || "(no objective stated)"}</p>
       {intent.extended.length > 0 && (
         <>
-          <h3 className="eyebrow">Standing constraints</h3>
+          <h3 className="eyebrow">Constraints</h3>
           <ul className="trace-intent-list">
             {intent.extended.map((entry) => (
               <li key={entry}>{entry}</li>
@@ -62,7 +62,7 @@ export function TraceIntent({
 
 // The exhaustiveness check below is deliberate: adding a category without
 // giving it a label here is a compile error rather than a blank table cell.
-function findingTypeLabel(category: AuditTraceStep["category"]) {
+export function findingTypeLabel(category: AuditTraceStep["category"]) {
   if (category === "intent-check") return "Intent";
   if (category === "security") return "Security";
   if (category === "reliability") return "Reliability";
@@ -74,7 +74,10 @@ function findingTypeLabel(category: AuditTraceStep["category"]) {
 }
 
 export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
-  if (findings.length === 0) return null;
+  const shown = findings.filter(
+    (finding) => finding.category !== "audit-health",
+  );
+  if (shown.length === 0) return null;
   return (
     <div className="span-audits">
       <span className="eyebrow">Findings</span>
@@ -87,7 +90,7 @@ export function SpanFindings({ findings }: { findings: AuditTraceStep[] }) {
           </tr>
         </thead>
         <tbody>
-          {findings.map((finding) => (
+          {shown.map((finding) => (
             <tr key={finding.id}>
               <td>
                 <span className={"finding-type finding-type-" + finding.type}>

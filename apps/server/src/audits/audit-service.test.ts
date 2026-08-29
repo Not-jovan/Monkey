@@ -204,7 +204,13 @@ describe("AuditService", () => {
     await service.idle();
 
     expect(stores.auditStore.countStepsForTrace("trace-3")).toBe(1);
-    expect(stores.auditStore.listByTrace("trace-3")).toEqual([]);
+    expect(stores.auditStore.health("trace-3")).toBe("degraded");
+    const healthNotes = stores.auditStore
+      .listByTrace("trace-3")
+      .filter((step) => step.category === "audit-health");
+    expect(healthNotes).toHaveLength(1);
+    expect(healthNotes[0]?.type).toBe("warning");
+    expect(healthNotes[0]?.finding).toMatch(/Primary audit model/i);
     expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
       true,
     );
@@ -505,6 +511,11 @@ describe("AuditService", () => {
     // First step pays the failed call; the second goes straight to the fallback.
     expect(calls).toEqual(["sec-model", "intent-model", "intent-model"]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
+    expect(
+      stores.auditStore
+        .listByTrace(trace.id)
+        .filter((step) => step.category === "audit-health"),
+    ).toHaveLength(1);
   });
 
   it("keeps retrying after a transient failure", async () => {
