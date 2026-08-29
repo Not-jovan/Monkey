@@ -133,6 +133,49 @@ const DEFAULT_BATCH_CONCURRENCY = 2;
 // notifications, re-reads persisted (already redacted) trace data, and writes
 // only to its own store. It never mutates traces and a failure here never
 // blocks a run.
+// The forward trace and the backtrace look at the same suspicions from
+// opposite directions, so both can land on the same instruction — one saying a
+// later step carried it out, the other that nothing the user asked for accounts
+// for it. That is one problem, and reporting it twice inflates the run's count
+// and reads as two separate failures.
+//
+// The forward trace wins because it names the step that did it. Matched on the
+// quoted instruction rather than on the finding text, since the two phrase
+// their conclusions differently by design.
+function withoutDuplicatesOf(
+  reported: AuditTraceStep[],
+  candidates: AuditTraceStep[],
+): AuditTraceStep[] {
+  const already = reported
+    .filter((finding) => finding.category === "security")
+    .map((finding) => finding.finding.toLowerCase());
+  if (already.length === 0) return candidates;
+  return candidates.filter((candidate) => {
+    // Only a confirmed follow-through can duplicate one: a suspicion that
+    // survived both passes is still worth saying.
+    if (candidate.type !== "warning" || candidate.category !== "security") {
+      return true;
+    }
+    const directive = quotedDirective(candidate.finding);
+    if (directive === null) return true;
+    return !already.some((seen) => seen.includes(directive));
+  });
+}
+
+// The instruction both checks quote, pulled out of the sentence each wraps it
+// in. Returns null for a finding that is not about a directive at all.
+function quotedDirective(finding: string): string | null {
+  const marker = "untrusted content";
+  const at = finding.toLowerCase().indexOf(marker);
+  if (at === -1) return null;
+  const rest = finding.slice(at + marker.length);
+  const colon = rest.indexOf(": ");
+  if (colon === -1) return null;
+  const directive = rest.slice(colon + 2).split(". ")[0] ?? "";
+  const trimmed = directive.trim().toLowerCase();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export class AuditService {
   // PLAN_AUDITOR's BatchCaller, replacing the single serial chain. Safe to run
   // audits concurrently because each captures the intent version it judges
@@ -364,6 +407,22 @@ export class AuditService {
       )
       .slice(0, MAX_TRACED_DIRECTIVES)
       .map((step) => ({ kind: "deviation" as const, action: step.finding }));
+  }
+
+  // PLAN_AUDITOR's auditAll check 2 reads "steps that have suspicions", which
+  // includes the instructions check 4 found in untrusted content. Taken from
+  // the store rather than from the forward trace's leftovers, so the backtrace
+  // examines them on its own evidence — and still examines them when the
+  // forward trace produced no verdict at all.
+  private injectionSuspicions(traceId: string): OpenQuestion[] {
+    return this.injectionsInTrace(traceId)
+      .slice(0, MAX_TRACED_DIRECTIVES)
+      .map((entry) => ({
+        kind: "follow-through" as const,
+        directive: entry.quote,
+        step: "",
+        evidence: "",
+      }));
   }
 
   // What the per-step audits already reported as followed-through, so the
@@ -626,14 +685,14 @@ export class AuditService {
   private async forwardTrace(
     trace: TraceRecord,
     intentId: string,
-  ): Promise<{ findings: AuditTraceStep[]; unresolved: FollowThrough[] } | null> {
+  ): Promise<AuditTraceStep[]> {
     const memory = this.deps.memory;
-    if (!memory) return null;
+    if (!memory) return [];
     const injections = this.injectionsInTrace(trace.id).slice(
       0,
       MAX_TRACED_DIRECTIVES,
     );
-    if (injections.length === 0) return null;
+    if (injections.length === 0) return [];
 
     const meta = await memory.readMeta(trace.agentId, trace.id);
     const positionOf = new Map(
@@ -652,7 +711,7 @@ export class AuditService {
       .slice(-MAX_TRACED_STEPS);
     // Nothing happened after the instruction appeared, so nothing can have
     // carried it out.
-    if (later.length === 0) return null;
+    if (later.length === 0) return [];
 
     const user = [
       "## Directives found in untrusted content",
@@ -723,12 +782,7 @@ export class AuditService {
         pushAuditorStatus(push, status, failure);
       },
     );
-    return {
-      findings,
-      unresolved: (verdict?.unclear ?? []).filter((entry) =>
-        isNew(entry.directive),
-      ),
-    };
+    return findings;
   }
 
   // PLAN_AUDITOR's auditAll check 2. Every step was judged on its own, which
@@ -945,23 +999,23 @@ export class AuditService {
       // Re-read: the wait above is exactly the window in which the last step
       // audits appended their auditor spans and findings.
       const settled = this.deps.traceStore.get(traceId) ?? trace;
-      const forward = await this.forwardTrace(settled, intentId);
-      followThrough = forward?.findings ?? [];
-      // Everything the run left unanswered, settled in one pass: the questions
-      // differ but the evidence that decides them — the run's own history and
-      // the standing intent — is the same, so asking twice would only pay
-      // twice for the same context.
+      // PLAN_AUDITOR's auditAll 2 and 3, concurrently, because they are two
+      // independent looks at the same suspicions rather than one feeding the
+      // other. The forward trace reads what happened *after* an instruction
+      // appeared; the backtrace reads what came before and what the user asked
+      // for. Chaining them meant a forward trace that produced no verdict took
+      // the question down with it — the backtrace was never told there was one.
       const open: OpenQuestion[] = [
         ...this.deviationSuspicions(traceId),
-        ...(forward?.unresolved ?? []).map(
-          (entry) => ({ kind: "follow-through" as const, ...entry }),
-        ),
+        ...this.injectionSuspicions(traceId),
       ];
-      if (open.length > 0) {
-        followThrough = followThrough.concat(
-          await this.backTrace(settled, intentId, open),
-        );
-      }
+      const [forward, back] = await Promise.all([
+        this.forwardTrace(settled, intentId),
+        open.length === 0
+          ? Promise.resolve<AuditTraceStep[]>([])
+          : this.backTrace(settled, intentId, open),
+      ]);
+      followThrough = forward.concat(withoutDuplicatesOf(forward, back));
     } catch (error) {
       this.deps.log?.("follow-through trace failed for run " + traceId, error);
     }
