@@ -4,25 +4,39 @@ import { buildClaudeCodeArgs, claudeCodeRuntime, parseClaudeCodeEventLine } from
 
 describe("Claude Code runtime protocol", () => {
   it("builds a new-session invocation", () => {
-    const args = buildClaudeCodeArgs({
-      prompt: "build a calculator",
-      threadId: null,
-    });
+    const args = buildClaudeCodeArgs(
+      { prompt: "build a calculator", threadId: null },
+      "acceptEdits",
+    );
     expect(args).toEqual([
       "-p",
       "build a calculator",
       "--output-format",
       "stream-json",
       "--verbose",
+      "--permission-mode",
+      "acceptEdits",
     ]);
   });
 
+  // Headless runs have nobody to answer a permission prompt, so the mode is
+  // not cosmetic: the wrong one denies every command and every file write.
+  it("passes the configured permission mode through", () => {
+    const args = buildClaudeCodeArgs(
+      { prompt: "go", threadId: null },
+      "bypassPermissions",
+    );
+    expect(args[args.indexOf("--permission-mode") + 1]).toBe("bypassPermissions");
+  });
+
   it("resumes a stored session", () => {
-    const args = buildClaudeCodeArgs({
-      prompt: "add tests",
-      threadId: "session-123",
-    });
+    const args = buildClaudeCodeArgs(
+      { prompt: "add tests", threadId: "session-123" },
+      "acceptEdits",
+    );
     expect(args.slice(-2)).toEqual(["--resume", "session-123"]);
+    // A forked session would get a new id and orphan the trace binding.
+    expect(args).not.toContain("--fork-session");
   });
 
   it("extracts the session id, final message and usage from stream-json", () => {

@@ -21,9 +21,15 @@ import { z } from "zod";
 //     the audit pipeline's secret-detection/network-whitelist checks, which
 //     read tool call arguments *and output* off span attributes, only ever
 //     see the input half for this runtime.
-//  3. `claude_code.api_error` was not observed live (the verification run
-//     had no failing request) — its shape below is still the best-effort
+//  3. `claude_code.api_error` was not observed live (neither verification run
+//     had a failing request) — its shape below is still the best-effort
 //     reconstruction from the docs and should be treated as unverified.
+//  4. `session.id` is on every log *record*'s attributes, alongside `user.id`
+//     and `terminal.type`. Re-confirmed on a second capture (2026-08-29)
+//     because the CLI bundle also contains a resource-attribute builder that
+//     sets `session.id` under OTEL_METRICS_INCLUDE_SESSION_ID — that one is
+//     the *metrics* resource, and reading it led to a wrong diagnosis. The
+//     logs resource carries only host/os/service attributes.
 export const ClaudeCodeCommonAttributes = z.object({
   "event.name": z.string(),
   "session.id": z.string().optional(),
@@ -49,6 +55,10 @@ export const ClaudeCodeUserPrompt = z.object({
 export const ClaudeCodeApiRequest = z.object({
   "event.name": z.literal("api_request"),
   model: z.string().optional(),
+  // Which part of the CLI made the call. "sdk" is the agent's own turn;
+  // background helpers name themselves here (see BACKGROUND_QUERY_SOURCES in
+  // runtimes/claude-code.ts).
+  query_source: z.string().optional(),
   duration_ms: z.coerce.number().optional(),
   input_tokens: z.coerce.number().optional(),
   output_tokens: z.coerce.number().optional(),
@@ -77,6 +87,7 @@ export const ClaudeCodeApiError = z.object({
 // unrecognizedEvents counter for something that fires on every turn.
 export const ClaudeCodeAssistantResponse = z.object({
   "event.name": z.literal("assistant_response"),
+  query_source: z.string().optional(),
 });
 
 export const ClaudeCodeToolDecision = z.object({
@@ -113,6 +124,18 @@ export const ClaudeCodeToolResult = z.object({
   mcp_server_scope: z.string().optional(),
 });
 
+// Housekeeping the CLI does on its own schedule, unrelated to the run. Seen
+// live mid-run, and with nothing declared for it every claude-code trace was
+// reporting an unrecognized event it had understood perfectly well. The CLI's
+// full vocabulary is larger than this file covers (auth, compaction,
+// mcp_server_connection, skill_activated, subagent_completed, hook_*,
+// plugin_*, internal_error, api_refusal, api_retries_exhausted, …); the
+// unrecognized counter is deliberately left to flag those, since several are
+// worth surfacing properly rather than silencing.
+export const ClaudeCodeRetentionSweep = z.object({
+  "event.name": z.literal("retention_sweep"),
+});
+
 const claudeCodeEventVariants = z.discriminatedUnion("event.name", [
   ClaudeCodeUserPrompt,
   ClaudeCodeApiRequest,
@@ -120,6 +143,7 @@ const claudeCodeEventVariants = z.discriminatedUnion("event.name", [
   ClaudeCodeAssistantResponse,
   ClaudeCodeToolDecision,
   ClaudeCodeToolResult,
+  ClaudeCodeRetentionSweep,
 ]);
 
 export const ClaudeCodeEvent = claudeCodeEventVariants;

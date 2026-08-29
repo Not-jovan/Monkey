@@ -343,21 +343,26 @@ export class TraceService {
     }
   }
 
-  onRunnerEvent(runId: string, event: Record<string, unknown>) {
-    if (
-      event.type === "thread.started" &&
-      typeof event.thread_id === "string"
-    ) {
-      const threadId = event.thread_id;
-      const state = this.runs.get(runId);
-      if (state) state.rootConversationId = threadId;
-      this.store.updateTrace(runId, (trace) => {
-        trace.conversationId = threadId;
-      });
-      this.bindConversation(threadId, runId);
-      return;
-    }
+  // The runtime has named the conversation this run belongs to. Until this
+  // lands, every OTLP record the runtime exports correlates to an id nothing
+  // is listening for and is parked in `pending` — so a run whose conversation
+  // is never announced ends with a prompt span and nothing else.
+  //
+  // Announced by the runner through RunnerRequest.onThread rather than
+  // sniffed off the event stream here: Codex says it with a `thread.started`
+  // event and Claude Code with `system`/`init` carrying `session_id`, and
+  // each runtime's own parser is the only thing that should have to know that.
+  onConversation(runId: string, conversationId: string) {
+    if (conversationId.length === 0) return;
+    const state = this.runs.get(runId);
+    if (state) state.rootConversationId = conversationId;
+    this.store.updateTrace(runId, (trace) => {
+      trace.conversationId = conversationId;
+    });
+    this.bindConversation(conversationId, runId);
+  }
 
+  onRunnerEvent(runId: string, event: Record<string, unknown>) {
     const state = this.runs.get(runId);
     if (!state) return;
 
@@ -1084,8 +1089,8 @@ export class TraceService {
       id: spanId,
       traceId: runId,
       parentId: state.rootSpanId,
-      name: "codex.turn",
-      label: "Codex turn",
+      name: this.traceAdapter.runtimeId + ".turn",
+      label: this.traceAdapter.displayName + " turn",
       kind: "turn",
       actor: "agent",
       status: "running",

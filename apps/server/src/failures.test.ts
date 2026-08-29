@@ -230,6 +230,20 @@ describe("runtime-neutral provider failures", () => {
     expect(failure.retryability).toBe("user-action");
   });
 
+  // Verbatim stderr from the CLI, which exits 1 before running anything when
+  // it is asked to bypass its permission prompts as uid 0. Without a rule the
+  // whole run reports "unknown": a container that dies instantly, with the
+  // one line explaining why left unattributed.
+  it("attributes the runtime's root refusal to the platform", () => {
+    const failure = classifyRunFailure(
+      "stderr: --dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons",
+      { exitCode: 1, source: "process-exit" },
+    );
+    expect(failure.layer).toBe("platform");
+    expect(failure.kind).toBe("container-misconfigured");
+    expect(failure.remedy).toContain("CONTAINER_USER");
+  });
+
   // The new rules sit ahead of the Ark one and overlap it on status codes, so
   // Ark's own wording has to survive.
   it("still gives an Ark credential failure Ark's remedy", () => {

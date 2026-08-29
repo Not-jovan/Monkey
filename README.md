@@ -215,6 +215,7 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `AGENT_RUNTIME` | `codex` | `claude-code` to run Agents through Claude Code CLI instead. See [Agent runtime](#agent-runtime). |
 | `ANTHROPIC_API_KEY` | Unset | Console API key for `claude-code`; billed against your Console credit balance. |
 | `CLAUDE_CODE_OAUTH_TOKEN` | Unset | Subscription token from `claude setup-token` for `claude-code`; used in preference to the API key. |
+| `CLAUDE_CODE_PERMISSION_MODE` | `acceptEdits` | How `claude-code` answers its own permission prompts. See the runtime section. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
@@ -286,6 +287,21 @@ outside a container (`RUNTIME_PROVIDER=local-process` on the host, i.e. the
    | --- | --- | --- |
    | `CLAUDE_CODE_BIN` | `claude` | Path to the Claude Code CLI binary. |
    | `CLAUDE_CODE_HOME` | `claude-home` | Claude Code's config/session/credentials directory (`CLAUDE_CONFIG_DIR`) — the runtime-agnostic analog of `CODEX_HOME`. |
+   | `CLAUDE_CODE_PERMISSION_MODE` | `acceptEdits` | `default`, `acceptEdits`, or `bypassPermissions`. |
+
+   `CLAUDE_CODE_PERMISSION_MODE` deserves a moment. Codex confines its agent
+   with an OS sandbox, so `CODEX_SANDBOX_MODE` tightens a boundary. Claude
+   Code has no sandbox — it gates tools behind approval prompts — so this
+   setting loosens one instead, and there is nobody to answer a prompt in a
+   headless run:
+
+   - `default` denies every Bash command and every file write. The agent can
+     still read, so it will happily report on a task it never performed.
+   - `acceptEdits` (the default here) lets file edits through; commands are
+     still denied.
+   - `bypassPermissions` lets everything through. Pair it with
+     `RUNTIME_PROVIDER=container`, where the container is the boundary —
+     under `local-process` it gives the agent your own user account.
 
 No other configuration changes are needed. The Launchpad points Claude
 Code's own OTLP telemetry exporter at the same collector Codex uses, so

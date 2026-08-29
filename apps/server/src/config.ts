@@ -17,6 +17,17 @@ const envSchema = z.object({
   CODEX_MAX_OUTPUT_BYTES: z.coerce.number().int().min(65_536).default(2_097_152),
   CLAUDE_CODE_HOME: z.string().default(path.resolve("claude-home")),
   CLAUDE_CODE_BIN: z.string().default("claude"),
+  // Claude Code's analog of CODEX_SANDBOX_MODE, with one important
+  // difference: Codex sandboxes at the OS level, Claude Code does not
+  // sandbox at all — it gates tools behind approval prompts. Under
+  // headless `-p` there is nobody to approve, so the default mode denies
+  // every Bash command and every file write, and the agent silently does
+  // nothing but read. "acceptEdits" frees file edits; only
+  // "bypassPermissions" frees commands, and it is only defensible with
+  // RUNTIME_PROVIDER=container, where the container is the boundary.
+  CLAUDE_CODE_PERMISSION_MODE: z
+    .enum(["default", "acceptEdits", "bypassPermissions"])
+    .default("acceptEdits"),
   ANTHROPIC_API_KEY: z.string().optional(),
   // Subscription credential from `claude setup-token`. Claude Code ranks
   // ANTHROPIC_API_KEY above this, so the two are mutually exclusive in
@@ -105,6 +116,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     codexMaxOutputBytes: env.CODEX_MAX_OUTPUT_BYTES,
     claudeCodeHome: path.resolve(env.CLAUDE_CODE_HOME),
     claudeCodeBin: env.CLAUDE_CODE_BIN,
+    claudeCodePermissionMode: env.CLAUDE_CODE_PERMISSION_MODE,
     anthropicApiKey: env.ANTHROPIC_API_KEY?.trim() ?? "",
     claudeCodeOauthToken: env.CLAUDE_CODE_OAUTH_TOKEN?.trim() ?? "",
     runtimeProvider: env.RUNTIME_PROVIDER,

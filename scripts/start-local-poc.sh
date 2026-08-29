@@ -104,6 +104,22 @@ if [[ "$agent_runtime" == "claude-code" ]]; then
   else
     log "Agent runtime: $agent_runtime (Console API key)"
   fi
+  # Claude Code has no sandbox of its own, so this is what decides whether an
+  # Agent can run a command at all. Stated at startup because the quiet
+  # failure mode — an Agent that only ever reads and then reports success —
+  # is hard to recognise from the outside.
+  #
+  # This script never names the fallback itself. It has no way to read the
+  # control plane's default, and printing a second copy of it here would be a
+  # claim that silently becomes false the day that default moves.
+  if [[ -n "${CLAUDE_CODE_PERMISSION_MODE:-}" ]]; then
+    log "Permission mode: $CLAUDE_CODE_PERMISSION_MODE"
+  else
+    log "Permission mode: unset — the control plane's own default applies."
+    log "  Set CLAUDE_CODE_PERMISSION_MODE to choose one explicitly."
+  fi
+  log "  Only bypassPermissions lets an Agent run commands; under any other"
+  log "  mode it can read but not act. The Runtime container is the boundary."
 else
   log "Agent runtime: $agent_runtime"
 fi

@@ -20,6 +20,7 @@ services:
       CODEX_HOME: /app/codex-home
       CLAUDE_CODE_HOME: /app/claude-home
       CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-workspace-write}
+      CLAUDE_CODE_PERMISSION_MODE: ${CLAUDE_CODE_PERMISSION_MODE:-acceptEdits}
     ports:
       - "${PUBLIC_PORT:-3000}:3000"
     volumes:

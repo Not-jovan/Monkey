@@ -199,6 +199,23 @@ const RULES: Rule[] = [
       "Top up the account behind the runtime's credential, or switch to a credential with available balance.",
     pattern: /billing_error|credit balance is too low|insufficient (quota|credit|balance)/i,
   },
+  // Claude Code refuses to bypass its own permission prompts for uid 0 and
+  // exits immediately, before the run does any work at all — so the evidence
+  // is one line of stderr and nothing else. Attributed to the platform
+  // because it is the Launchpad's choice of container user that decides this,
+  // not the provider and certainly not the agent. Reachable through
+  // CONTAINER_USER=0:0, a control plane running as root, or a local-process
+  // server started under sudo.
+  {
+    layer: "platform",
+    kind: "container-misconfigured",
+    retryability: "user-action",
+    title: "The Agent runtime refused to run as root",
+    remedy:
+      "Run the Agent Runtime as a non-root user: set CONTAINER_USER to a uid:gid, " +
+      "or start the control plane as a normal user, then retry.",
+    pattern: /cannot be used with root\/sudo privileges/i,
+  },
   {
     layer: "provider",
     kind: "auth-rejected",

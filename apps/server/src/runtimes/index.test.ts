@@ -42,6 +42,16 @@ describe("selectRuntime", () => {
     expect(runtime.trace.correlationAttribute).toBe("session.id");
   });
 
+  // TraceService is handed only the adapter, and names the turn span from
+  // its runtimeId. If the two ever drift, a run gets a turn labelled with
+  // somebody else's runtime.
+  it("keeps every adapter's identity in step with its runtime", () => {
+    for (const runtime of [codexRuntime, claudeCodeRuntime]) {
+      expect(runtime.trace.runtimeId).toBe(runtime.id);
+      expect(runtime.trace.displayName.length).toBeGreaterThan(0);
+    }
+  });
+
   it("rejects an unknown AGENT_RUNTIME at config load rather than falling back", () => {
     expect(() => loadConfig({ ...baseEnv, AGENT_RUNTIME: "gemini-cli" })).toThrow();
   });

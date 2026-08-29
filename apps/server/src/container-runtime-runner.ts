@@ -198,6 +198,26 @@ export class ContainerRuntimeRunner implements AgentRunner {
     let stderr = "";
     let totalBytes = 0;
     let modelReported = false;
+    // Seeded from the resumed id: onRunStart already bound that one, so
+    // re-announcing it would be noise. A runtime that mints a fresh id on
+    // resume still gets announced, because the value differs.
+    let reportedThreadId = request.threadId;
+
+    // Both ids are resolved by the runtime mid-run rather than known up
+    // front, and both have a caller waiting on them — the sidebar for the
+    // model, the trace pipeline for the conversation. Announced from one
+    // place so neither can be missed on a stream that ends without a
+    // trailing newline.
+    const reportRuntimeIds = () => {
+      if (parsed.model && !modelReported) {
+        modelReported = true;
+        request.onModel?.(parsed.model);
+      }
+      if (parsed.threadId && parsed.threadId !== reportedThreadId) {
+        reportedThreadId = parsed.threadId;
+        request.onThread?.(parsed.threadId);
+      }
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -213,10 +233,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
         stdout = lines.pop() ?? "";
         for (const line of lines) {
           this.runtime.parseEventLine(line, parsed, request.onEvent);
-          if (parsed.model && !modelReported) {
-            modelReported = true;
-            request.onModel?.(parsed.model);
-          }
+          reportRuntimeIds();
         }
       } else {
         transcript.recordStderr(chunk.toString("utf8"));
@@ -245,7 +262,10 @@ export class ContainerRuntimeRunner implements AgentRunner {
         );
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
+      if (stdout.trim()) {
+        this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
+        reportRuntimeIds();
+      }
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new RunFailureError(

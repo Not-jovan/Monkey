@@ -247,6 +247,69 @@ describe("trace model handoff", () => {
   });
 });
 
+// A run's OTLP records correlate on the id the runtime picks at run time, so
+// the trace pipeline cannot bind them until the runner says what it is. When
+// that handoff was missing, a first run's telemetry — every model call and
+// every tool call — was buffered against an id nothing was listening for and
+// then dropped.
+describe("conversation handoff", () => {
+  class RunnerThatNamesItsSession implements AgentRunner {
+    async run(request: RunnerRequest): Promise<RunnerResult> {
+      request.onThread?.("session-from-runtime");
+      return {
+        output: "done",
+        threadId: "session-from-runtime",
+        usage: null,
+        model: null,
+      };
+    }
+    async cancel(): Promise<boolean> {
+      return false;
+    }
+    async isAvailable(): Promise<boolean> {
+      return true;
+    }
+  }
+
+  it("binds the trace to the session the runtime announces", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
+    temporaryDirectories.push(root);
+    const store = new TraceStore(path.join(root, "data", "traces"));
+    await store.initialize();
+    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const service = await makeService(new RunnerThatNamesItsSession(), traces);
+    const agent = await service.createAgent({ name: "Traced" });
+    const { run } = await service.sendMessage(agent.id, "write hello");
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+
+    expect(store.get(run.id)?.conversationId).toBe("session-from-runtime");
+    // The binding is what makes a record land rather than buffer.
+    expect(
+      traces.ingestLogs({
+        resourceLogs: [
+          {
+            scopeLogs: [
+              {
+                logRecords: [
+                  {
+                    attributes: [
+                      { key: "event.name", value: { stringValue: "codex.tool_result" } },
+                      {
+                        key: "conversation.id",
+                        value: { stringValue: "session-from-runtime" },
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toMatchObject({ buffered: 0 });
+  });
+});
+
 // A run that fails never returns a RunnerResult, so a model carried only on
 // the result was lost exactly when it mattered most — the trace for a failed
 // run showed no model even though the runtime had announced one and it was

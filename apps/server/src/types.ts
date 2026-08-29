@@ -92,8 +92,15 @@ export interface RunnerRequest {
   // RunnerResult because a run that fails never returns one, and a failed run
   // is exactly when knowing the model matters.
   onModel?: ((model: string) => void) | undefined;
-  // Streams every parsed Codex JSONL event to the caller while the run is
-  // still in flight (trace middleware binds thread ids through this).
+  // Fires as soon as the runtime names the conversation this run belongs to
+  // (Codex's thread id, Claude Code's session id). The trace pipeline binds
+  // its OTLP records on that id, so until this fires every record a runtime
+  // exports is buffered unattached. Reported here rather than read off
+  // onEvent because the announcing event is runtime-shaped, and only the
+  // runtime's own parser knows it.
+  onThread?: ((threadId: string) => void) | undefined;
+  // Streams every parsed runtime JSONL event to the caller while the run is
+  // still in flight.
   onEvent?: ((event: Record<string, unknown>) => void) | undefined;
 }
 

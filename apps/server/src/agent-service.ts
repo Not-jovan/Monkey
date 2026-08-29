@@ -323,6 +323,7 @@ export class AgentService {
           observedModel = model;
           this.lastRuntimeModel = model;
         },
+        onThread: (threadId) => this.traces?.onConversation(run.id, threadId),
         onEvent: (event) => this.traces?.onRunnerEvent(run.id, event),
       });
       const completedAt = now();

@@ -107,6 +107,14 @@ export type NormalizedRuntimeEvent =
     };
 
 export interface RuntimeTraceAdapter {
+  // Mirrors RuntimeDefinition.id. TraceService is handed the adapter rather
+  // than the whole definition, and it needs the runtime's identity for the
+  // spans it names itself (the turn span) — a Claude Code run was rendering
+  // a "Codex turn" on its trace page. Kept in sync by an assertion in
+  // runtimes/index.test.ts rather than by hope.
+  runtimeId: "codex" | "claude-code";
+  // How the runtime is written in span labels a human reads.
+  displayName: string;
   // The OTLP attribute key that correlates records to a run/conversation —
   // "conversation.id" for Codex, "session.id" for Claude Code.
   correlationAttribute: string;

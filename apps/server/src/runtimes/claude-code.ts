@@ -1,18 +1,39 @@
-import { collectorLogsUrl } from "../config.js";
+import { collectorLogsUrl, type AppConfig } from "../config.js";
 import { parseClaudeCodeEvent } from "../traces/claude-code-events.js";
 import type { NormalizedRuntimeEvent } from "../traces/runtime-events.js";
 import type { ParsedEvents, RuntimeDefinition } from "./types.js";
 
-// `-p --output-format stream-json --verbose` verified against a live run
-// (Claude Code CLI 2.1.250, 2026-08-28): the system/init and result/success
-// event shapes below match real output exactly. `--resume <threadId>` is
-// still unverified live (the check only exercised a fresh session).
-export function buildClaudeCodeArgs(request: {
-  prompt: string;
-  threadId: string | null;
-}): string[] {
-  const args = ["-p", request.prompt, "--output-format", "stream-json", "--verbose"];
+// `-p --output-format stream-json --verbose --permission-mode <mode>`
+// verified against live runs (Claude Code CLI 2.1.250 on 2026-08-28,
+// 2.1.251 on 2026-08-29): the system/init and result/success event shapes
+// below match real output exactly, a bypassPermissions run really does execute
+// Bash, and `--resume <sessionId>` continues the session in place: a second
+// turn through the Launchpad reported the same session id as the first, which
+// is what keeps its trace bound.
+export function buildClaudeCodeArgs(
+  request: { prompt: string; threadId: string | null },
+  permissionMode: AppConfig["claudeCodePermissionMode"],
+): string[] {
+  const args = [
+    "-p",
+    request.prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    // Without this the CLI runs in its default mode, which asks before every
+    // command and every write. Headless there is nobody to ask, so each one
+    // is auto-denied — the CLI answers the model with "Claude requested
+    // permissions to use Bash, but you haven't granted it yet." An agent in
+    // that state reads files and reports back, and looks from the outside
+    // like an agent that simply chose to do nothing.
+    "--permission-mode",
+    permissionMode,
+  ];
   if (request.threadId) {
+    // Resumes in place. `--fork-session` is the flag that would mint a new
+    // session id instead ("branch off a copy"), and it is deliberately not
+    // passed: a stable id across turns is what keeps the trace pipeline
+    // bound to the same conversation.
     args.push("--resume", request.threadId);
   }
   return args;
@@ -147,12 +168,33 @@ export function parseClaudeCodeEventLine(
   }
 }
 
+// Model calls the CLI makes for its own housekeeping, on the session's
+// telemetry stream but not on the agent's behalf. Observed live: naming the
+// session costs a full haiku call, and it lands *first* — so before this was
+// filtered it became the run's "Model · plan" span, contributed 926 input
+// tokens to the run's usage, and pushed every later model-call label one step
+// out of phase.
+//
+// A denylist, not an allowlist of "sdk": a background source we have not seen
+// yet should show up as a visible extra span, which someone will notice and
+// come fix, rather than being silently swallowed along with a real turn.
+const BACKGROUND_QUERY_SOURCES = new Set(["generate_session_title"]);
+
 function normalizeClaudeCodeEvent(
   attributes: Record<string, unknown>,
 ): NormalizedRuntimeEvent | null {
   const parsed = parseClaudeCodeEvent(attributes);
   if (!parsed) return null;
   const { event } = parsed;
+
+  if (
+    (event["event.name"] === "api_request" ||
+      event["event.name"] === "assistant_response") &&
+    event.query_source !== undefined &&
+    BACKGROUND_QUERY_SOURCES.has(event.query_source)
+  ) {
+    return { kind: "ignored" };
+  }
 
   switch (event["event.name"]) {
     case "user_prompt": {
@@ -231,7 +273,8 @@ export const claudeCodeRuntime: RuntimeDefinition = {
   homeDir: (config) => config.claudeCodeHome,
   homeEnvVar: "CLAUDE_CONFIG_DIR",
 
-  buildArgs: (request) => buildClaudeCodeArgs(request),
+  buildArgs: (request, _workspacePath, config) =>
+    buildClaudeCodeArgs(request, config.claudeCodePermissionMode),
 
   parseEventLine: parseClaudeCodeEventLine,
 
@@ -271,6 +314,8 @@ export const claudeCodeRuntime: RuntimeDefinition = {
   }),
 
   trace: {
+    runtimeId: "claude-code",
+    displayName: "Claude Code",
     correlationAttribute: "session.id",
     normalize: normalizeClaudeCodeEvent,
   },

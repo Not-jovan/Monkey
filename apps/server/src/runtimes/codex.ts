@@ -262,6 +262,8 @@ export const codexRuntime: RuntimeDefinition = {
   }),
 
   trace: {
+    runtimeId: "codex",
+    displayName: "Codex",
     correlationAttribute: "conversation.id",
     normalize: normalizeCodexEvent,
   },
