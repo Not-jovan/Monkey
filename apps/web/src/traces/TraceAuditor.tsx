@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useNavigate } from "react-router";
-import { api } from "../api";
+import { api, type IntentView } from "../api";
 import type {
   AuditHealth,
   AuditTraceStep,
   ContextView,
+  IntentVersionEntry,
   TraceIntentView,
   TraceRecord,
   TraceSpan,
@@ -31,21 +32,22 @@ function HumanCorrection({
   const [editing, setEditing] = useState(false);
   const [correction, setCorrection] = useState("");
   const queryClient = useQueryClient();
-  const intentQuery = useQuery({
+  const intentQuery = useQuery<IntentView>({
     queryKey: ["intent", trace.agentId],
     queryFn: () => api.intent(trace.agentId),
   });
-  const appliedIndex =
-    intentQuery.data?.versions.findIndex(
-      (entry) => entry.update?.sourceFindingId === finding.id,
-    ) ?? -1;
+  const versions: IntentVersionEntry[] = intentQuery.data?.versions ?? [];
+  const appliedIndex = versions.findIndex(
+    (entry) => entry.update?.sourceFindingId === finding.id,
+  );
   const appliedVersion =
-    appliedIndex >= 0 ? intentQuery.data?.versions[appliedIndex] : undefined;
-  const appliedConstraints = appliedVersion?.update?.addedConstraints ?? [];
+    appliedIndex >= 0 ? versions[appliedIndex] : undefined;
+  const appliedConstraints: string[] =
+    appliedVersion?.update?.addedConstraints ?? [];
   const isActive =
     appliedConstraints.length > 0 &&
     appliedConstraints.every((entry) =>
-      intentQuery.data?.intent.extended.includes(entry),
+      (intentQuery.data?.intent.extended ?? []).includes(entry),
     );
   const apply = useMutation({
     mutationFn: () => api.correctIntent(trace.id, finding.id, correction),
@@ -60,8 +62,7 @@ function HumanCorrection({
       <div className="finding-correction finding-correction-applied">
         <span
           className={
-            "intent-status intent-status-" +
-            (isActive ? "applied" : "rejected")
+            "intent-status intent-status-" + (isActive ? "applied" : "rejected")
           }
         >
           {isActive
@@ -89,7 +90,9 @@ function HumanCorrection({
 
   return (
     <div className="finding-correction">
-      <label htmlFor={"correction-" + finding.id}>Correction for future runs</label>
+      <label htmlFor={"correction-" + finding.id}>
+        Correction for future runs
+      </label>
       <textarea
         id={"correction-" + finding.id}
         value={correction}
@@ -264,7 +267,9 @@ function AuditorSpanDetails({
               {relatedFindings.map((finding) => (
                 <tr key={finding.id}>
                   <td>
-                    <span className={"finding-type finding-type-" + finding.type}>
+                    <span
+                      className={"finding-type finding-type-" + finding.type}
+                    >
                       {finding.type}
                     </span>
                   </td>
@@ -432,7 +437,11 @@ export function TraceAuditor({
               Download artifacts
             </a>
           </div>
-          <div className="view-toggle" role="group" aria-label="Auditor step view">
+          <div
+            className="view-toggle"
+            role="group"
+            aria-label="Auditor step view"
+          >
             <button
               type="button"
               className={view === "list" ? "is-active" : ""}
@@ -452,7 +461,9 @@ export function TraceAuditor({
           </div>
         </div>
         {auditorSpans.length === 0 ? (
-          <p className="muted-cell">The auditor has not recorded any steps yet.</p>
+          <p className="muted-cell">
+            The auditor has not recorded any steps yet.
+          </p>
         ) : view === "list" ? (
           <TraceStepList
             spans={auditorSpans}
@@ -484,7 +495,10 @@ export function TraceAuditor({
       {agentFindings.length === 0 ? (
         <p className="muted-cell">No findings about this run.</p>
       ) : (
-        <section className="auditor-findings" aria-labelledby="auditor-findings-heading">
+        <section
+          className="auditor-findings"
+          aria-labelledby="auditor-findings-heading"
+        >
           <h2 className="eyebrow" id="auditor-findings-heading">
             Findings
           </h2>
@@ -513,7 +527,9 @@ export function TraceAuditor({
                     }
                   >
                     <td>
-                      <span className={"finding-type finding-type-" + finding.type}>
+                      <span
+                        className={"finding-type finding-type-" + finding.type}
+                      >
                         {finding.type}
                       </span>
                     </td>
