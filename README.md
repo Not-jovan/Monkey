@@ -8,8 +8,8 @@ Run it locally with Docker, Colima, or rootless Podman, or deploy it to
 Volcengine ECS.
 
 > [!WARNING]
-> This is a single-user proof of concept. It intentionally has no identity,
-> tracing, audit, or hardened sandbox middleware. Do not use production data or
+> This is a single-user proof of concept. It intentionally has no identity or
+> hardened multi-tenant sandbox boundary. Do not use production data or
 > credentials. See [SECURITY.md](SECURITY.md).
 
 ## Screenshots
@@ -35,6 +35,8 @@ Volcengine ECS.
   a remedy and a link from the failing step to the model call that planned it
 - A versioned intent timeline showing what changed the Agent's specification,
   when, and why — with one-click revert
+- Evidence-linked human correction: turn an audit finding into a reversible
+  intent constraint for future Runs
 - Prior-run context carried between Runs on the same session, established from
   the trace itself so it survives an unavailable audit model
 - Docker and Terraform deployment paths for Volcengine ECS
@@ -388,9 +390,10 @@ docker compose config
 
 ### Live Playwright pipeline
 
-The opt-in browser suite creates a **Documentation Agent**, runs five real
+The opt-in browser suite creates a **Documentation Agent**, runs six real
 multi-turn tasks, and verifies trace rendering, audit findings, conversation
-continuity, the network whitelist, and reverting an intent version. It uses
+continuity, the network whitelist, an evidence-linked human correction, and an
+intent update. It uses
 an isolated state directory under `/tmp` and is intentionally separate from
 `npm run check` because it requires Ark, internet access, and a running Docker,
 Colima, or Podman engine.
@@ -405,10 +408,11 @@ ARK_MODEL=ep-your-endpoint-id \
 npm run test:e2e
 ```
 
-The test server configures `tanstack.com`, `youtube.com`, and YouTube
-subdomains as permitted destinations. Intent updates apply automatically — there
-is no confirmation step; a spec change is instead reversible through
-`POST /api/agents/:id/intent/revert` and visible in the Playground timeline.
+The test server automatically enables intent tracking and configures
+`tanstack.com`, `youtube.com`, and YouTube subdomains as permitted destinations.
+Intent updates apply automatically — there is no confirmation step; a spec
+change is instead reversible through `POST /api/agents/:id/intent/revert` and
+visible in the Playground timeline.
 Override `E2E_PORT` if port `3100` is already in use. Failure screenshots,
 videos, and Playwright traces are retained under `test-results/`; the HTML
 report is written to `playwright-report/`.

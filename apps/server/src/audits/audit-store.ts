@@ -265,7 +265,10 @@ export class AuditStore {
       this.docs.set(trace.id, doc);
       return doc;
     }
-    if (intentId.length > 0) doc.intentId = intentId;
+    // The first audit pins the specification for this trace. Later step
+    // records may finish after the Agent's active intent changes, but they
+    // must not relabel historical evidence with that newer version (including
+    // replacing an intentionally empty id for a trace with no standing spec).
     this.syncFromTrace(doc, trace);
     return doc;
   }

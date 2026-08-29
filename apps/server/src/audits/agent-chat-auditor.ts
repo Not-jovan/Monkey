@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { IntentState } from "../intent/intent-model.js";
 
 // PLAN_AUDITOR's AgentChatAuditor: one auditor per (agentId, chatId). It owns
 // the identity every finding for that chat is stamped with, the folder its
@@ -17,6 +18,11 @@ import path from "node:path";
 // the memo of models the account has not activated, because a model that does
 // not exist for this chat does not exist for the next one either. Those stay on
 // the service, and the chat auditor calls into it for them.
+export interface PinnedIntent {
+  intentId: string;
+  state: IntentState;
+}
+
 export interface ChatAuditorWork {
   runStepAudit(chat: AgentChatAuditor, spanId: string): Promise<void>;
   runAll(chat: AgentChatAuditor): Promise<void>;
@@ -27,10 +33,22 @@ export class AgentChatAuditor {
   // agent-runs/{agentId}/{chatId}/, the folder this chat's step records and
   // meta index live in and the archive download serves.
   readonly memoryFolderPath: string;
-  // The spec version this chat is currently judged against. Read with the spec
-  // at the start of each audit rather than after it, so a finding cites the
-  // version it was actually judged under.
-  intentId = "";
+  // The spec this chat is judged against, pinned the first time an audit asks
+  // for it. Pinned rather than re-read because a correction applied later must
+  // not rewrite the specification an older run appears to have been judged
+  // against — every finding for this chat cites one version. Captured on first
+  // use rather than at construction, so the classification of the message that
+  // opened the run is already in it.
+  private pinned: PinnedIntent | null = null;
+
+  get intentId() {
+    return this.pinned?.intentId ?? "";
+  }
+
+  pinIntent(capture: () => PinnedIntent): PinnedIntent {
+    if (this.pinned === null) this.pinned = capture();
+    return this.pinned;
+  }
 
   // Step audits queued or running for this chat. Counted at enqueue rather than
   // at start, or a step still sitting in the batch queue would not be waited

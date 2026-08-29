@@ -101,13 +101,15 @@ export interface TraceDetail {
 
 export interface IntentUpdate {
   logs: string[];
-  kind: "seed" | "classified" | "revert";
+  kind: "seed" | "classified" | "revert" | "human-correction";
   message?: string;
   reason?: string;
   addedConstraints: string[];
   previousObjective: string | null;
   traceId: string | null;
   revertedFrom: string | null;
+  sourceFindingId?: string | null;
+  sourceSpanId?: string | null;
 }
 
 export interface IntentVersionEntry {

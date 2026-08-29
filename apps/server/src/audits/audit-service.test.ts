@@ -479,7 +479,7 @@ describe("AuditService", () => {
     );
     expect(
       findings.some((step) =>
-        step.finding.includes("not on the configured whitelist"),
+        step.finding.includes("outside the configured whitelist"),
       ),
     ).toBe(true);
   });
@@ -507,7 +507,14 @@ describe("AuditService", () => {
     expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
   });
-  it("pins each finding to the spec version it was judged against", async () => {
+  // Attribution used to be last-writer-wins on the document, so a finding
+  // judged early could be attributed to a spec that arrived after it — even one
+  // appended later than the run itself. Every finding in a run now cites the
+  // one version pinned when its auditing began. That is deliberately a single
+  // version per run rather than per step: a correction applied afterwards must
+  // not rewrite what an older run appears to have been judged against, and the
+  // auditor cannot tell a mid-run reclassification from a later correction.
+  it("pins every finding in a run to one spec version", async () => {
     const stores = await makeStores();
     const directory = await mkdtemp(path.join(tmpdir(), "audit-pin-"));
     const intentStore = new IntentStore(path.join(directory, "intent"));
@@ -552,9 +559,6 @@ describe("AuditService", () => {
     stores.traceStore.appendSpan("trace-pin", toolSpan("trace-pin", "ok"));
     await service.idle();
 
-    // Before this, the document carried a single last-writer-wins version and
-    // every finding in the run was attributed to whichever spec happened to be
-    // current when the last one landed — including the ones judged earlier.
     const findings = stores.auditStore.listByTrace("trace-pin");
     const promptFinding = findings.find(
       (step) => step.spanId === "span-prompt-trace-pin",
@@ -563,7 +567,9 @@ describe("AuditService", () => {
       (step) => step.spanId === "span-tool-trace-pin-ok",
     );
     expect(promptFinding?.intentId).toBe(firstVersion);
-    expect(toolFinding?.intentId).toBe(secondVersion);
+    expect(toolFinding?.intentId).toBe(firstVersion);
+    // Not the version that appeared partway through.
+    expect(toolFinding?.intentId).not.toBe(secondVersion);
   });
 
   it("flags a camouflaged gist that dumps env vars and obeys an external reply", async () => {
@@ -789,6 +795,72 @@ describe("AuditService", () => {
         step.finding.includes("read .env despite the current intent"),
       ),
     ).toBe(true);
+  });
+
+  it("pins queued audits to the intent active when the trace began", async () => {
+    const stores = await makeStores();
+    const directory = await mkdtemp(path.join(tmpdir(), "audit-pinned-intent-"));
+    const intentStore = new IntentStore(path.join(directory, "intent"));
+    await intentStore.initialize();
+    cleanups.push(async () => {
+      await intentStore.flush();
+      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    });
+    const intent = new IntentService({
+      store: intentStore,
+      client: fakeClient({ calls: [], respond: () => "" }),
+      model: "intent-model",
+      enabled: false,
+    });
+    intent.seed("agent-1", "Write installation documentation");
+    intent.applyHumanCorrection("agent-1", {
+      correction: "Use Markdown for all documentation.",
+      traceId: "source-trace",
+      findingId: "source-finding",
+      spanId: null,
+    });
+    const pinnedIntentId = intent.currentId("agent-1");
+
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (model) =>
+        model === "intent-model"
+          ? '{"aligned":true,"deviation":null,"context_summary":"Documentation run."}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder, null, intent);
+    const trace = seedTrace(stores.traceStore, "trace-pinned");
+    stores.traceStore.appendSpan(
+      trace.id,
+      promptSpan(trace.id, "Add an installation example"),
+    );
+
+    // Change the active intent while the trace's audits are still queued.
+    // Both its step and run-level audit must retain the earlier snapshot.
+    intent.applyHumanCorrection("agent-1", {
+      correction: "Use HTML for all documentation.",
+      traceId: "later-trace",
+      findingId: "later-finding",
+      spanId: null,
+    });
+    stores.traceStore.updateTrace(trace.id, (record) => {
+      record.status = "completed";
+      record.endedAt = "2026-08-26T12:00:10.000Z";
+    });
+    await service.idle();
+
+    expect(stores.auditStore.intentId(trace.id)).toBe(pinnedIntentId);
+    // Asserted on every call rather than on a count: auditStep now asks its
+    // checks concurrently, so the number of calls is a property of the split
+    // rather than of the pinning this test is about.
+    expect(responder.calls.length).toBeGreaterThan(0);
+    for (const call of responder.calls) {
+      expect(call.user).toContain("Use Markdown for all documentation.");
+      expect(call.user).not.toContain("Use HTML for all documentation.");
+    }
+    // Both phases ran under the pin, which is what "queued audits" means here.
+    expect(responder.calls.some((call) => call.check === "intent")).toBe(true);
+    expect(responder.calls.some((call) => call.check === "run")).toBe(true);
   });
 
   it("audits a subagent reply, and only warns once the agent acts on it", async () => {

@@ -14,6 +14,10 @@ import type { TraceService } from "./trace-service.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const revertBody = z.object({ intentId: z.string().min(1) });
+const correctionBody = z.object({
+  findingId: z.string().min(1).max(200),
+  correction: z.string().trim().min(1).max(1_000),
+});
 const traceParams = z.object({ id: z.string().min(8).max(64) });
 
 export interface GlassboxDeps {
@@ -32,6 +36,7 @@ export interface GlassboxDeps {
 export function registerGlassboxRoutes(
   app: FastifyInstance,
   deps: GlassboxDeps,
+  agentExists: (agentId: string) => boolean,
 ) {
   const tokenMatches = (candidate: string) => {
     const expected = Buffer.from(deps.collectorToken);
@@ -177,6 +182,78 @@ export function registerGlassboxRoutes(
     }
     // The appended version is by definition the newest, so view.intentId is
     // already the id that was just created.
+    return reply.code(201).send(result.view);
+  });
+
+  // A finding is evidence, not authority to rewrite the Agent. Only this
+  // explicit operator action appends the correction to the active intent.
+  app.post("/api/traces/:id/intent/correct", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    const body = correctionBody.parse(request.body);
+    if (!deps.intentService) {
+      throw new HttpError(503, "Intent tracking is not enabled");
+    }
+    const trace = deps.traceStore.get(id);
+    if (!trace) throw new HttpError(404, "Trace not found");
+    if (!agentExists(trace.agentId)) throw new HttpError(404, "Agent not found");
+    if (trace.status === "running") {
+      throw new HttpError(409, "Wait for the run to finish before correcting it");
+    }
+    if (!deps.auditStore.isRunComplete(id)) {
+      throw new HttpError(
+        409,
+        "Wait for the audit to finish before correcting this run",
+      );
+    }
+    const activeTrace = deps.traceStore
+      .listByAgent(trace.agentId)
+      .find((entry) => entry.status === "running");
+    if (activeTrace) {
+      throw new HttpError(
+        409,
+        "Wait for the Agent's active run to finish before changing its intent",
+      );
+    }
+    const finding = deps.auditStore
+      .listByTrace(id)
+      .find((entry) => entry.id === body.findingId);
+    if (
+      !finding ||
+      finding.traceId !== trace.id ||
+      finding.agentId !== trace.agentId ||
+      (finding.spanId !== null &&
+        !trace.spans.some((span) => span.id === finding.spanId))
+    ) {
+      throw new HttpError(404, "Audit finding not found on this trace");
+    }
+    if (finding.category === "audit-health") {
+      throw new HttpError(400, "Auditor health cannot change the Agent's intent");
+    }
+    const correction = deps.traceService.redactText(body.correction);
+    if (
+      !deps.intentService.canApplyHumanCorrection(
+        trace.agentId,
+        finding.id,
+        correction,
+      )
+    ) {
+      throw new HttpError(
+        409,
+        "This finding was already corrected or the constraint is already active",
+      );
+    }
+    const result = deps.intentService.applyHumanCorrection(trace.agentId, {
+      correction,
+      traceId: trace.id,
+      findingId: finding.id,
+      spanId: finding.spanId,
+    });
+    if (!result.created) {
+      throw new HttpError(
+        409,
+        "This finding was already corrected or the constraint is already active",
+      );
+    }
     return reply.code(201).send(result.view);
   });
 

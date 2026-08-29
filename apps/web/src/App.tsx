@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { api, ApiError, setAuthToken } from "./api";
 import { IntentPanel } from "./intent/IntentPanel";
 import {
@@ -76,6 +76,8 @@ function RunFailureNotice({ run }: { run: AgentRun }) {
 }
 
 export default function App() {
+  const [searchParams] = useSearchParams();
+  const requestedAgentId = searchParams.get("agent");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -115,12 +117,17 @@ export default function App() {
   const refreshAgents = useCallback(async () => {
     const { agents: next } = await api.listAgents();
     setAgents(next);
-    setSelectedId((current) =>
-      current && next.some((agent) => agent.id === current)
-        ? current
-        : (next[0]?.id ?? null),
-    );
-  }, []);
+    setSelectedId((current) => {
+      if (current && next.some((agent) => agent.id === current)) return current;
+      if (
+        requestedAgentId &&
+        next.some((agent) => agent.id === requestedAgentId)
+      ) {
+        return requestedAgentId;
+      }
+      return next[0]?.id ?? null;
+    });
+  }, [requestedAgentId]);
 
   const refreshMessages = useCallback(async (agentId: string) => {
     const result = await api.messages(agentId);

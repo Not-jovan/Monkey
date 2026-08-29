@@ -63,16 +63,13 @@ describe("RunTranscript", () => {
 
   // A diagnostic aid must never be able to mask the failure it describes.
   it("never throws when the transcript cannot be written", async () => {
-    // A regular file standing where the data directory should be: creating a
-    // directory under it fails on every platform. `/proc/...` only fails on
-    // Linux — on Windows it resolves to a perfectly writable C:\proc\..., so
-    // the write succeeded and this test asserted the opposite of what ran.
-    const blocker = path.join(await scratchDir(), "not-a-directory");
-    await writeFile(blocker, "", "utf8");
+    const dataDirectory = await scratchDir();
+    const fileInsteadOfDirectory = path.join(dataDirectory, "not-a-directory");
+    await writeFile(fileInsteadOfDirectory, "block directory creation");
     const error = new Error("boom");
     await expect(
       attachFailureTranscript(new RunTranscript(), error, {
-        dataDirectory: blocker,
+        dataDirectory: fileInsteadOfDirectory,
         runtimeId: "codex",
         argv: ["codex"],
         runId: "run-3",

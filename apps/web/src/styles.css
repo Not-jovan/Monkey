@@ -1900,9 +1900,62 @@ textarea:focus {
   border-bottom: none;
 }
 
+.findings-table .finding-row-focused td {
+  background: #fff8df;
+}
+
 .findings-table td:last-child,
 .findings-table th:last-child {
   padding-right: 0;
+}
+
+.finding-copy {
+  line-height: 1.5;
+}
+
+.finding-correction {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7f6f2;
+}
+
+.finding-correction-applied {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.finding-correction label {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.finding-correction textarea {
+  width: 100%;
+  min-height: 84px;
+  resize: vertical;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  color: inherit;
+  background: var(--paper);
+  font: inherit;
+  line-height: 1.45;
+}
+
+.finding-correction p {
+  margin: 0;
+}
+
+.finding-correction-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .failure-block {

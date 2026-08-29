@@ -162,6 +162,11 @@ export const api = {
     request<{ intent: IntentView }>("/api/agents/" + id + "/intent/adopt", {
       method: "POST",
     }),
+  correctIntent: (traceId: string, findingId: string, correction: string) =>
+    request<IntentView>("/api/traces/" + traceId + "/intent/correct", {
+      method: "POST",
+      body: JSON.stringify({ findingId, correction }),
+    }),
   downloadTrace: (id: string) =>
     request<TraceDetail & { exportedAt: string }>(
       "/api/traces/" + id + "/download",

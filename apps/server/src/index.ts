@@ -15,6 +15,7 @@ import { ContextService } from "./context/context-service.js";
 import { ContextStore } from "./context/context-store.js";
 import { IntentService } from "./intent/intent-service.js";
 import { IntentStore } from "./intent/intent-store.js";
+import { describeIntent } from "./intent/intent-model.js";
 import { createRunner } from "./runner-factory.js";
 import { selectRuntime } from "./runtimes/index.js";
 import { JsonStore } from "./store.js";
@@ -148,6 +149,13 @@ const service = new AgentService(
   workspaces,
   runner,
   traceService,
+  // The standing spec, handed to the runtime so the agent works under it.
+  (agentId) => {
+    const intent = intentService.state(agentId);
+    return intent.objective.length > 0 || intent.extended.length > 0
+      ? describeIntent(intent)
+      : "";
+  },
   // AGENTS.md is the spec the agent actually reads, it lives inside the
   // workspace, and the default sandbox is workspace-write — so the agent can
   // edit what governs it. Nothing else writes the file between runs, so a

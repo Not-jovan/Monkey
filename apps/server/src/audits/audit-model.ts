@@ -49,12 +49,13 @@ export const auditTraceStepSchema = z.object({
   traceId: z.string(),
   agentId: z.string(),
   spanId: z.string().nullable(),
-  // The specification version this finding was actually judged against, read
-  // with the spec rather than after the model call. The document carries one
-  // too, but that is last-writer-wins: a run spanning a spec change would
-  // otherwise attribute all of its findings to whichever version happened to
-  // be current when the last one landed. Defaulted for audit files written
-  // before findings carried it.
+  // The specification version this finding was judged against, pinned when the
+  // run's auditing was queued rather than read when the model call returns.
+  // The document carries one too, but that is last-writer-wins: without this a
+  // run would attribute all of its findings to whichever version happened to be
+  // current when the last one landed — including a correction appended after
+  // the run had finished. Defaulted for audit files written before findings
+  // carried it.
   intentId: z.string().default(""),
   // PLAN_AUDITOR separates warnings from suspicions. A suspicion is what a
   // step audit raises when it can see something questionable but cannot decide
@@ -300,7 +301,7 @@ export function emitPolicyFindings(
     push(
       "warning",
       "security",
-      "Contacted " + url + ", which is not on the configured whitelist.",
+      "Contacted " + url + ", which is outside the configured whitelist.",
     );
   }
   for (const exposure of policies.secretExposures) {

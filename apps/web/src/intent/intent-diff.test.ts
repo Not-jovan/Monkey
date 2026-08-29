@@ -129,6 +129,31 @@ describe("intentChanges", () => {
     expect(describeChange(changes[0]!)).toContain("Spec set");
   });
 
+  it("labels a human correction and keeps its evidence link", () => {
+    const changes = intentChanges([
+      version("v1"),
+      version("v2", {
+        extended: ["Do not contact hosts outside the whitelist."],
+        update: update({
+          kind: "human-correction",
+          message: "Do not contact hosts outside the whitelist.",
+          traceId: "trace-2",
+          sourceFindingId: "finding-2",
+          sourceSpanId: "span-7",
+        }),
+      }),
+    ]);
+
+    expect(changes[1]).toMatchObject({
+      kind: "human-correction",
+      sourceFindingId: "finding-2",
+      sourceSpanId: "span-7",
+      traceId: "trace-2",
+    });
+    expect(describeChange(changes[1]!)).toBe("Human correction applied");
+    expect(versionByTrace(changes).has("trace-2")).toBe(false);
+  });
+
   it("survives an empty history", () => {
     expect(intentChanges([])).toEqual([]);
   });

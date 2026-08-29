@@ -222,7 +222,9 @@ export type IntentUpdateKind =
   | "classified"
   | "revert"
   | "instructions"
-  | "adopted";
+  | "adopted"
+  // A person corrected the spec after the run, against the evidence.
+  | "human-correction";
 // The spec a trace was judged against, resolved onto the response so a
 // download does not have to go looking it up by id.
 export interface TraceIntentView extends IntentState {
@@ -241,6 +243,8 @@ export interface IntentUpdate {
   // The run whose message moved the spec, so the Playground can mark it.
   traceId: string | null;
   revertedFrom: string | null;
+  sourceFindingId?: string | null;
+  sourceSpanId?: string | null;
 }
 
 export interface IntentVersion {

@@ -25,6 +25,9 @@ interface IntentServiceDeps {
 
 export interface IntentObserveInput {
   content: string;
+  // Optional because our caller does not send it: main declares it and its
+  // tests pass it, but nothing reads it yet.
+  messageId?: string;
   // The run this message opened. Known before the run starts, so the version
   // this message produces can be traced back to it.
   traceId: string;
@@ -38,8 +41,16 @@ function sameConstraint(left: string, right: string) {
   return normalize(left) === normalize(right) && normalize(left).length > 0;
 }
 
+export interface HumanCorrectionInput {
+  correction: string;
+  traceId: string;
+  findingId: string;
+  spanId: string | null;
+}
+
 export class IntentService {
   private chain = Promise.resolve();
+  private readonly forgotten = new Set<string>();
 
   constructor(private readonly deps: IntentServiceDeps) {}
 
@@ -99,11 +110,63 @@ export class IntentService {
     return { created, view: this.view(agentId) };
   }
 
+  applyHumanCorrection(agentId: string, input: HumanCorrectionInput) {
+    const correction = input.correction.trim();
+    const view = this.view(agentId);
+    if (!this.canApplyHumanCorrection(agentId, input.findingId, correction)) {
+      return { created: null, view };
+    }
+    const created = this.deps.store.append(agentId, {
+      // A correction changes the standing constraints, never the instructions
+      // the agent reads — rewriting AGENTS.md is a separate, human action.
+      instructions: view.intent.instructions,
+      objective: view.intent.objective,
+      extended: [...view.intent.extended, correction],
+      update: {
+        kind: "human-correction",
+        // Ours added removal support to the update record; a correction only
+        // ever adds, so it declares an empty list rather than omitting it.
+        removedConstraints: [],
+        logs: [
+          "Human correction applied from audit finding " + input.findingId,
+          "Added constraint: " + correction,
+        ],
+        message: correction,
+        reason: "Applied by a human after reviewing Glass Box evidence.",
+        addedConstraints: [correction],
+        previousObjective: null,
+        traceId: input.traceId,
+        revertedFrom: null,
+        sourceFindingId: input.findingId,
+        sourceSpanId: input.spanId,
+      },
+    });
+    return { created, view: this.view(agentId) };
+  }
+
+  canApplyHumanCorrection(
+    agentId: string,
+    findingId: string,
+    correction: string,
+  ) {
+    const view = this.view(agentId);
+    return (
+      !this.forgotten.has(agentId) &&
+      correction.trim().length > 0 &&
+      !view.intent.extended.includes(correction.trim()) &&
+      !view.versions.some(
+        (entry) => entry.update?.sourceFindingId === findingId,
+      )
+    );
+  }
+
   forget(agentId: string) {
+    this.forgotten.add(agentId);
     this.deps.store.remove(agentId);
   }
 
   seed(agentId: string, instructions: string) {
+    if (this.forgotten.has(agentId)) return;
     const trimmed = instructions.trim();
     this.deps.store.seed(agentId, trimmed, trimmed);
   }
@@ -126,6 +189,7 @@ export class IntentService {
   }
 
   observe(agentId: string, instructions: string, input: IntentObserveInput) {
+    if (this.forgotten.has(agentId)) return;
     const message = input.content.trim();
     const trimmedInstructions = instructions.trim();
     const existing = this.deps.store.latest(agentId);
@@ -153,6 +217,7 @@ export class IntentService {
   }
 
   private async classify(agentId: string, message: string, traceId?: string) {
+    if (this.forgotten.has(agentId)) return;
     const state = this.state(agentId);
     const result = await classifyIntent(
       this.deps.client,
@@ -176,6 +241,9 @@ export class IntentService {
       });
       return;
     }
+    // The model call can finish after Agent deletion. Do not recreate the
+    // in-memory or persisted intent that forget() just removed.
+    if (this.forgotten.has(agentId)) return;
     const { classification, reason, extendedIntent, removedIntent, objective } =
       result.classification;
     if (classification === "NO_CHANGE") return;

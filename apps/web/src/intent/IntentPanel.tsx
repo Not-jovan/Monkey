@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { api } from "../api";
 import type { IntentState } from "../types";
 import { describeChange, intentChanges, isMeaningful } from "./intent-diff";
@@ -181,13 +182,39 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                 )}
               </div>
 
-              {change.trigger && (
+              {change.trigger && change.kind !== "human-correction" && (
                 <p className="intent-change-trigger">
                   From your message: &ldquo;{change.trigger}&rdquo;
                 </p>
               )}
+              {change.kind === "human-correction" && change.trigger && (
+                <p className="intent-change-trigger">
+                  Human correction: &ldquo;{change.trigger}&rdquo;
+                  {change.traceId && (
+                    <>
+                      {" "}
+                      <Link
+                        to={
+                          "/traces/" +
+                          change.traceId +
+                          "?pane=auditor" +
+                          (change.sourceFindingId
+                            ? "&finding=" +
+                              encodeURIComponent(change.sourceFindingId)
+                            : "")
+                        }
+                      >
+                        View source finding
+                      </Link>
+                    </>
+                  )}
+                </p>
+              )}
               {change.reason && (
-                <p className="muted-cell">Classifier: {change.reason}</p>
+                <p className="muted-cell">
+                  {change.kind === "human-correction" ? "Decision: " : "Classifier: "}
+                  {change.reason}
+                </p>
               )}
               {change.objectiveBefore !== null && (
                 <p className="intent-change-objective">

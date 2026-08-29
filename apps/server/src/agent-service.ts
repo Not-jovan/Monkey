@@ -31,6 +31,12 @@ export interface InstructionsDrift {
   when: "before" | "during";
 }
 
+const INTENT_PRECEDENCE = [
+  "Use the standing intent as persistent context.",
+  "If the current user request explicitly states that it changes or relaxes the standing intent, follow that change; otherwise follow both the standing intent and the current user request.",
+  "A conflicting task does not by itself override the standing intent.",
+].join(" ");
+
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
@@ -46,6 +52,7 @@ export class AgentService {
     private readonly workspaces: WorkspaceManager,
     private readonly runner: AgentRunner,
     private readonly traces?: TraceService,
+    private readonly activeIntent?: (agentId: string) => string,
     // Reports AGENTS.md no longer matching the agent's recorded instructions.
     // The file is inside the workspace and the default sandbox is
     // workspace-write, so the agent can edit the spec it is governed by.
@@ -263,8 +270,12 @@ export class AgentService {
       storedAgent.updatedAt = timestamp;
       return snapshot;
     });
+    // Capture once for both Runtime execution and the synchronous trace-start
+    // event. A classifier finishing while the run is starting must not make
+    // the Runtime and auditor use two different standing specifications.
+    const intentAtStart = this.activeIntent?.(agentAtStart.id).trim() ?? "";
     this.traces?.onRunStart(agentAtStart, { id: runId, prompt });
-    const execution = this.executeRun(agentAtStart, run, prompt);
+    const execution = this.executeRun(agentAtStart, run, prompt, intentAtStart);
     this.activeExecutions.set(agentId, execution);
     void execution
       .finally(() => {
@@ -313,6 +324,7 @@ export class AgentService {
     agentAtStart: Agent,
     run: AgentRun,
     rawPrompt = run.prompt,
+    intentAtStart = "",
   ): Promise<void> {
     await this.store.mutate((database) => {
       const storedRun = database.runs.find((item) => item.id === run.id);
@@ -337,10 +349,21 @@ export class AgentService {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
       }
+      const runtimePrompt = intentAtStart
+        ? [
+            INTENT_PRECEDENCE,
+            "",
+            "Standing intent for this Agent:",
+            intentAtStart,
+            "",
+            "Current user request:",
+            rawPrompt,
+          ].join("\n")
+        : rawPrompt;
       const result = await this.runner.run({
         agentId: agentAtStart.id,
         workspacePath: agentAtStart.workspacePath,
-        prompt: rawPrompt,
+        prompt: runtimePrompt,
         threadId: agentAtStart.codexThreadId,
         runId: run.id,
         redact: (text) => this.redact(text),

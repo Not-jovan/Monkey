@@ -45,6 +45,8 @@ export const intentUpdateSchema = z.object({
       "instructions",
       // A diverged objective was written back into the instructions.
       "adopted",
+      // A person corrected the spec after the run, against the evidence.
+      "human-correction",
     ])
     .default("classified"),
   // The user message that changed the spec.
@@ -61,6 +63,10 @@ export const intentUpdateSchema = z.object({
   traceId: z.string().nullable().default(null),
   // Set when this version restores an earlier one.
   revertedFrom: z.string().nullable().default(null),
+  // A human correction is evidence-backed: these fields lead back to the
+  // audit finding and step the operator reviewed before changing the spec.
+  sourceFindingId: z.string().nullable().optional(),
+  sourceSpanId: z.string().nullable().optional(),
 });
 
 export type IntentUpdate = z.infer<typeof intentUpdateSchema>;

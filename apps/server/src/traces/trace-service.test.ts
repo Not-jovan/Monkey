@@ -144,6 +144,39 @@ describe("TraceService", () => {
     expect(store.get(RUN_ID)?.spans.length).toBeGreaterThan(2);
   });
 
+  it("keeps the human message when telemetry carries a wrapped runtime prompt", async () => {
+    const { store, service } = await makeService();
+    const humanPrompt = "Add a troubleshooting section";
+    const runtimePrompt = [
+      "Standing intent for this Agent:",
+      "Do not contact hosts outside the whitelist.",
+      "Current user request:",
+      humanPrompt,
+    ].join("\n");
+    service.onRunStart(
+      { ...agent, codexThreadId: CONVERSATION_ID },
+      { id: RUN_ID, prompt: humanPrompt },
+    );
+    service.ingestLogs(
+      logs([
+        {
+          "event.name": "codex.user_prompt",
+          "conversation.id": CONVERSATION_ID,
+          prompt_length: String(runtimePrompt.length),
+          prompt: runtimePrompt,
+        },
+      ]),
+    );
+
+    const prompt = store
+      .get(RUN_ID)
+      ?.spans.find((span) => span.name === "user.prompt");
+    expect(prompt?.attributes.prompt).toBe(humanPrompt);
+    expect(prompt?.attributes.promptLength).toBe(humanPrompt.length);
+    expect(prompt?.attributes.runtimePromptLength).toBe(runtimePrompt.length);
+    expect(prompt?.attributes.runtimePromptWrapped).toBe(true);
+  });
+
   it("masks secrets before tool output reaches the store", async () => {
     const { store, service } = await makeService();
     const payload = fixture();

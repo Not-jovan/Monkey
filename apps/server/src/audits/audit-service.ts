@@ -176,6 +176,22 @@ function quotedDirective(finding: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// A fresh copy of the chat's pinned spec. Copied because callers fall back to
+// the run's own prompt when the objective is empty, and that must not write
+// itself into the pin every other audit then reads.
+function pinnedState(
+  chat: AgentChatAuditor,
+  trace: TraceRecord,
+  capture: () => { intentId: string; state: IntentState },
+): IntentState {
+  const { state } = chat.pinIntent(capture);
+  const copy = { ...state, extended: [...state.extended] };
+  // Agents created before intent tracking existed have no objective, so a step
+  // is never judged against an empty spec.
+  if (copy.objective.length === 0) copy.objective = trace.prompt;
+  return copy;
+}
+
 export class AuditService {
   // PLAN_AUDITOR's BatchCaller, replacing the single serial chain. Safe to run
   // audits concurrently because each captures the intent version it judges
@@ -208,6 +224,10 @@ export class AuditService {
     this.deps.traceStore.on("span", ({ trace, span }) => {
       if (!this.shouldAuditStep(span, trace)) return;
       const chat = this.auditorFor(trace);
+      // Pinned here, synchronously, rather than when the audit runs: a
+      // correction applied while this run's audits are still queued must not
+      // change the specification they are judged against.
+      chat.pinIntent(() => this.captureIntent(trace));
       chat.openStep();
       this.enqueue(() =>
         chat.auditStep(span.id).finally(() => chat.closeStep()),
@@ -215,6 +235,7 @@ export class AuditService {
     });
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
       const chat = this.auditorFor(trace);
+      chat.pinIntent(() => this.captureIntent(trace));
       this.enqueue(() => chat.auditAll());
     });
     this.resumeUnfinishedRunAudits();
@@ -369,6 +390,17 @@ export class AuditService {
     }
   }
 
+  // The spec, captured once per chat. Main's human corrections can append a
+  // version after a run has been judged, and re-reading here would make an old
+  // trace look as though it had been judged against a rule that did not exist
+  // when it ran.
+  private captureIntent(trace: TraceRecord) {
+    return {
+      intentId: this.deps.intent?.currentId(trace.agentId) ?? "",
+      state: this.intentState(trace.agentId),
+    };
+  }
+
   private intentState(agentId: string): IntentState {
     const state = this.deps.intent?.state(agentId);
     return state ? { ...state, extended: [...state.extended] } : {
@@ -466,14 +498,11 @@ export class AuditService {
     const deterministic = runDeterministicChecks(activity, {
       whitelist: this.deps.networkWhitelist,
     });
-    const intent = this.intentState(trace.agentId);
+    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
     // Read with the spec, not after the model call below. Stamping the version
     // afterwards labelled the finding with whatever the spec had become in the
     // meantime, so a finding could cite a version it was never judged against.
-    const intentId = this.deps.intent?.currentId(trace.agentId) ?? "";
-    // Recorded on the chat's auditor too, so its identity says which spec
-    // its findings are currently being stamped with.
-    chat.intentId = intentId;
+    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
     // Falls back to the run's own prompt for agents created before intent
     // tracking existed, so a step is never judged against an empty spec.
     if (intent.objective.length === 0) intent.objective = trace.prompt;
@@ -797,6 +826,7 @@ export class AuditService {
   // point of the severity, so losing one to a model outage would be the single
   // outcome worse than reporting it.
   private async backTrace(
+    chat: AgentChatAuditor,
     trace: TraceRecord,
     intentId: string,
     open: OpenQuestion[],
@@ -823,8 +853,7 @@ export class AuditService {
     }
 
     const meta = await memory.readMeta(trace.agentId, trace.id);
-    const intent = this.intentState(trace.agentId);
-    if (intent.objective.length === 0) intent.objective = trace.prompt;
+    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
     const history = trace.spans
       .map((span, index) => ({ span, number: index + 1 }))
       .filter(({ span }) => meta[span.id])
@@ -928,12 +957,9 @@ export class AuditService {
         : "";
     const prior = this.deps.context?.priorFor(traceId) ?? null;
     const priorContext = prior?.summary ?? "";
-    const intent = this.intentState(trace.agentId);
+    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
     // Captured with the spec, for the same reason the step audit does it.
-    const intentId = this.deps.intent?.currentId(trace.agentId) ?? "";
-    // Recorded on the chat's auditor too, so its identity says which spec
-    // its findings are currently being stamped with.
-    chat.intentId = intentId;
+    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
 
     const steps = trace.spans
       .filter((span) => span.kind !== "run")
@@ -1013,7 +1039,7 @@ export class AuditService {
         this.forwardTrace(settled, intentId),
         open.length === 0
           ? Promise.resolve<AuditTraceStep[]>([])
-          : this.backTrace(settled, intentId, open),
+          : this.backTrace(chat, settled, intentId, open),
       ]);
       followThrough = forward.concat(withoutDuplicatesOf(forward, back));
     } catch (error) {
@@ -1082,7 +1108,10 @@ export class AuditService {
     this.deps.auditStore.appendAuditorSpans(
       trace,
       spans,
-      this.deps.intent?.currentId(trace.agentId) ?? "",
+      // The chat's pinned spec, not whatever is current now: this call stamps
+      // the audit document, so reading fresh here would let a correction made
+      // mid-run relabel the whole run.
+      this.auditorFor(trace).intentId,
     );
   }
 
@@ -1113,8 +1142,7 @@ export class AuditService {
     // A snapshot, taken once. Anything appended while this runs belongs to the
     // next meta-audit, not this one.
     const auditorSpans = this.deps.auditStore.listAuditorSpans(chat.chatId);
-    const intentId = this.deps.intent?.currentId(trace.agentId) ?? "";
-    chat.intentId = intentId;
+    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
     await this.batch.queue(async () => {
       const steps = await this.metaFindings(trace, auditorSpans, intentId);
       this.deps.auditStore.recordMetaAudit(
