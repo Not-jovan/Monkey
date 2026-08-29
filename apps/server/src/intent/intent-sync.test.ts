@@ -6,6 +6,7 @@ import { AgentService } from "../agent-service.js";
 import { createApp } from "../app.js";
 import { AuditStore } from "../audits/audit-store.js";
 import { loadConfig } from "../config.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { JsonStore } from "../store.js";
 import { createRedactor } from "../traces/redaction.js";
 import { TraceService } from "../traces/trace-service.js";
@@ -25,6 +26,7 @@ class IdleRunner implements AgentRunner {
       output: "done",
       threadId: request.threadId ?? "thread",
       usage: { inputTokens: 1, outputTokens: 1 },
+      model: null,
     };
   }
   async cancel(): Promise<boolean> {
@@ -80,7 +82,11 @@ async function makeApp() {
   const app = await createApp(config, service, {
     traceStore,
     auditStore,
-    traceService: new TraceService(traceStore, createRedactor([])),
+    traceService: new TraceService(
+      traceStore,
+      createRedactor([]),
+      codexRuntime.trace,
+    ),
     intentService,
     collectorToken: "token",
   });

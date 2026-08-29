@@ -212,6 +212,10 @@ cp deploy/volcengine/terraform.tfvars.example \
 | `ARK_BASE_URL` | Beijing v3 endpoint | Ark OpenAI-compatible API URL. |
 | `APP_AUTH_TOKEN` | Empty on loopback | Shared demo token; use 24+ random characters remotely. |
 | `RUNTIME_PROVIDER` | `local-process` | `container` for disposable local Runtime containers. |
+| `AGENT_RUNTIME` | `codex` | `claude-code` to run Agents through Claude Code CLI instead. See [Agent runtime](#agent-runtime). |
+| `ANTHROPIC_API_KEY` | Unset | Console API key for `claude-code`; billed against your Console credit balance. |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Unset | Subscription token from `claude setup-token` for `claude-code`; used in preference to the API key. |
+| `CLAUDE_CODE_PERMISSION_MODE` | `acceptEdits` | How `claude-code` answers its own permission prompts. See the runtime section. |
 | `CODEX_SANDBOX_MODE` | `workspace-write` | Codex inner sandbox mode. |
 | `CODEX_TIMEOUT_MS` | `600000` | Maximum duration of one turn. |
 | `LOCAL_POC_DATA_ROOT` | Platform-specific | Local metadata, workspace, and session directory. |
@@ -220,6 +224,133 @@ cp deploy/volcengine/terraform.tfvars.example \
 
 See [.env.example](.env.example) for all Runtime and resource-limit options,
 and [docs/GLASS_BOX.md](docs/GLASS_BOX.md) for the audit middleware options.
+
+## Agent runtime
+
+The Launchpad runs every Agent turn through one configurable Runtime CLI.
+`AGENT_RUNTIME` selects which one — it's a single, server-wide setting, not
+a per-Agent choice, and every other part of the platform (workspace
+persistence, multi-turn resume, container execution, Glass Box tracing and
+auditing) works the same regardless of which one is active.
+
+| `AGENT_RUNTIME` | CLI used | Notes |
+| --- | --- | --- |
+| `codex` (default) | [Codex CLI](https://github.com/openai/codex) | See [Requirements](#requirements) — included in the Runtime container image, no host install needed for the Local POC or Docker Compose paths. |
+| `claude-code` | [Claude Code CLI](https://code.claude.com/docs) | Also included in the Runtime and application images; needs a subscription token or Console API key — see below. |
+
+Both CLIs are baked into the images, so switching `AGENT_RUNTIME` does not
+require rebuilding. A host install is only needed when running the Agent
+outside a container (`RUNTIME_PROVIDER=local-process` on the host, i.e. the
+`npm run dev` path).
+
+### Switching to Claude Code
+
+1. Set the runtime and its credential. Claude Code talks to Anthropic
+   directly, so it needs its own credential **in addition to** the Ark
+   values — Ark still powers the Glass Box audit models whichever runtime
+   is selected. Pick **one** of the two:
+
+   **Subscription** (Claude Pro/Max/Team/Enterprise). Generate a one-year
+   token once with `claude setup-token`, then:
+
+   ```bash
+   AGENT_RUNTIME=claude-code \
+   CLAUDE_CODE_OAUTH_TOKEN=your-setup-token \
+   ARK_API_KEY=your-ark-api-key \
+   ARK_MODEL=ep-your-endpoint-id \
+   npm run poc
+   ```
+
+   **Console API key**, billed against your Console credit balance, which is
+   separate from any subscription — a run fails with
+   `billing_error · Credit balance is too low` when that balance is empty:
+
+   ```bash
+   AGENT_RUNTIME=claude-code \
+   ANTHROPIC_API_KEY=your-anthropic-api-key \
+   ARK_API_KEY=your-ark-api-key \
+   ARK_MODEL=ep-your-endpoint-id \
+   npm run poc
+   ```
+
+   Set only one. Claude Code ranks `ANTHROPIC_API_KEY` above
+   `CLAUDE_CODE_OAUTH_TOKEN` and always uses a present API key in headless
+   (`-p`) mode, so setting both would quietly bill the Console balance; the
+   Launchpad forwards just the token when both are configured, and says
+   which one it used at startup.
+
+   For Docker Compose, put the chosen value in `.env` instead.
+
+2. Optional overrides:
+
+   | Variable | Default | Purpose |
+   | --- | --- | --- |
+   | `CLAUDE_CODE_BIN` | `claude` | Path to the Claude Code CLI binary. |
+   | `CLAUDE_CODE_HOME` | `claude-home` | Claude Code's config/session/credentials directory (`CLAUDE_CONFIG_DIR`) — the runtime-agnostic analog of `CODEX_HOME`. |
+   | `CLAUDE_CODE_PERMISSION_MODE` | `acceptEdits` | `default`, `acceptEdits`, or `bypassPermissions`. |
+
+   `CLAUDE_CODE_PERMISSION_MODE` deserves a moment. Codex confines its agent
+   with an OS sandbox, so `CODEX_SANDBOX_MODE` tightens a boundary. Claude
+   Code has no sandbox — it gates tools behind approval prompts — so this
+   setting loosens one instead, and there is nobody to answer a prompt in a
+   headless run:
+
+   - `default` denies every Bash command and every file write. The agent can
+     still read, so it will happily report on a task it never performed.
+   - `acceptEdits` (the default here) lets file edits through; commands are
+     still denied.
+   - `bypassPermissions` lets everything through. Pair it with
+     `RUNTIME_PROVIDER=container`, where the container is the boundary —
+     under `local-process` it gives the agent your own user account.
+
+No other configuration changes are needed. The Launchpad points Claude
+Code's own OTLP telemetry exporter at the same collector Codex uses, so
+traces, masking, and audits keep working without extra setup.
+
+Because the Launchpad gives Claude Code its own `CLAUDE_CODE_HOME` rather
+than your personal `~/.claude`, it never picks up a host `/login` session —
+it authenticates only with whichever credential you set above.
+
+The sidebar reports the active runtime and the model it is running on. Under
+`codex` that is `ARK_MODEL`; Claude Code resolves its own model from the
+account behind the credential, so there is no model setting here and the
+sidebar reads "model resolved at run time" until the first Run reports one.
+
+**Known limitation:** Claude Code's OTLP telemetry does not carry tool call
+*output* content (only input and byte sizes), so the audit pipeline's
+secret-detection and network-whitelist checks see less of what happened for
+a Claude Code-backed Agent than for a Codex one. See
+[docs/GLASS_BOX.md](docs/GLASS_BOX.md).
+
+## Troubleshooting a failed run
+
+A failed Run's error names the cause directly in the Playground, for example:
+
+```text
+docker Runtime exited with code 1: assistant error: billing_error ·
+Credit balance is too low · api_error_status=400 ·
+full transcript: /app/data/run-logs/<runId>.log
+```
+
+The transcript that error points at holds the whole picture — the Runtime
+binary and argv, the reported error, and the Runtime's raw stdout and stderr:
+
+```text
+# Runtime failure transcript
+runtime:  claude-code
+runId:    ff4c506d-0410-4762-8cb4-eb88b8c5e66b
+argv:     run --rm --init ... volc-agent-runtime:local claude -p ...
+error:    docker Runtime exited with code 1: ...
+
+## stdout
+{"type":"system","subtype":"init","session_id":"...","model":"..."}
+...
+```
+
+It is written under `APP_DATA_DIR` only when a Run fails, with mode `0600`,
+and passes through the same secret masking as traces and audits. Reach for it
+whenever a Run dies before producing any trace spans — that is the case where
+the Glass Box UI has nothing to show and the transcript has everything.
 
 ## How it works
 

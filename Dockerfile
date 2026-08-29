@@ -17,6 +17,8 @@ WORKDIR /app
 
 ARG DEBIAN_MIRROR=""
 ARG DEBIAN_SECURITY_MIRROR=""
+ARG CODEX_VERSION=0.111.0
+ARG CLAUDE_CODE_VERSION=2.1.250
 
 RUN if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
       find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
@@ -28,8 +30,11 @@ RUN if [ -n "$DEBIAN_SECURITY_MIRROR" ]; then \
     fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git ripgrep \
-    && npm install --global @openai/codex@0.111.0 \
+    && npm install --global \
+         "@openai/codex@${CODEX_VERSION}" \
+         "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && codex --version \
+    && claude --version \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/node_modules ./node_modules
@@ -37,7 +42,7 @@ COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 
-RUN mkdir -p /app/data /app/workspaces /app/codex-home \
+RUN mkdir -p /app/data /app/workspaces /app/codex-home /app/claude-home \
     && chown -R node:node /app
 
 USER node

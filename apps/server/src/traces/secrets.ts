@@ -23,6 +23,10 @@ const secretValuePatterns: { secretType: string; pattern: RegExp }[] = [
     secretType: "STRIPE_SECRET_KEY",
     pattern: /\bsk_(?:test|live)_[A-Za-z0-9_]{6,}\b/,
   },
+  {
+    secretType: "ANTHROPIC_API_KEY",
+    pattern: /\bsk-ant-[A-Za-z0-9_-]{16,}\b/,
+  },
   { secretType: "OPENAI_API_KEY", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
   { secretType: "ARK_API_KEY", pattern: /\bark-[A-Za-z0-9][A-Za-z0-9-]{14,}\b/ },
   {
