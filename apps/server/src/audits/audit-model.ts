@@ -56,7 +56,12 @@ export const auditTraceStepSchema = z.object({
   // be current when the last one landed. Defaulted for audit files written
   // before findings carried it.
   intentId: z.string().default(""),
-  type: z.enum(["warning", "error"]),
+  // PLAN_AUDITOR separates warnings from suspicions. A suspicion is what a
+  // step audit raises when it can see something questionable but cannot decide
+  // it alone -- an action that *might* deviate from intent, an instruction that
+  // *might* have been obeyed. auditAll resolves each one into a warning or
+  // leaves it standing, because that judgement needs the whole run.
+  type: z.enum(["warning", "suspicion", "error"]),
   // "audit-health" is the auditor reporting on itself. Kept apart from the two
   // agent categories because "our auditor could not run" and "the agent
   // misbehaved" are opposite claims, and counting them together made a model
@@ -111,6 +116,15 @@ export const chatAuditSchema = z.object({
   // The auditor's own steps. Kept off the agent TraceRecord so /api/traces/:id
   // never mixes the two, and defaulted so older audit files still parse.
   auditorSpans: z.array(traceSpanSchema).default([]),
+  // Findings from auditing the auditor itself. Deliberately a separate field
+  // rather than more auditorSpans: a meta-audit reads auditorSpans and writes
+  // here, so it can never produce input for another meta-audit. That is what
+  // makes the recursion structurally impossible rather than merely discouraged
+  // -- and it is why nothing subscribes to this field.
+  metaAudit: z.array(auditTraceStepSchema).default([]),
+  // When the last meta-audit ran, so the UI can say whether what it is showing
+  // predates the auditor spans below it.
+  metaAuditedAt: z.string().nullable().default(null),
 });
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;

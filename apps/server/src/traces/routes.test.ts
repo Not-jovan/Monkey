@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentService } from "../agent-service.js";
+import { AuditMemory } from "../audits/audit-memory.js";
 import { AuditStore } from "../audits/audit-store.js";
 import { createApp } from "../app.js";
 import { loadConfig } from "../config.js";
@@ -37,9 +38,11 @@ async function makeApp(environment: Record<string, string> = {}) {
   await traceStore.initialize();
   const auditStore = new AuditStore(path.join(directory, "audits"));
   await auditStore.initialize();
+  const auditMemory = new AuditMemory(path.join(directory, "agent-runs"));
   cleanups.push(async () => {
     await traceStore.flush();
     await auditStore.flush();
+    await auditMemory.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
   const intentStore = new IntentStore(path.join(directory, "intent"));
@@ -70,6 +73,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     {
       traceStore,
       auditStore,
+      auditMemory,
       traceService,
       intentService,
       contextService,
@@ -80,6 +84,7 @@ async function makeApp(environment: Record<string, string> = {}) {
     app,
     traceStore,
     auditStore,
+    auditMemory,
     traceService,
     intentStore,
     intentService,
@@ -599,5 +604,50 @@ describe("Glassbox routes", () => {
     expect(body.failures[0]?.kind).toBe("sandbox-denied");
     expect(body.failures[0]?.layer).toBe("policy");
     expect(body.failures[0]?.count).toBe(2);
+  });
+
+  // The archive is the only way the audit memory leaves the server, so the
+  // route has to carry the files the step audits wrote and not just the audit
+  // document. It shipped serving an always-empty memory/ folder because
+  // nothing wrote to the memory at all.
+  it("streams the audit memory alongside the audit document", async () => {
+    const { app, traceService, auditMemory } = await makeApp();
+    startRun(traceService);
+    await auditMemory.writeStep(
+      AGENT_ID,
+      RUN_ID,
+      "span-1",
+      ["# Step span-1", "", "Ran ls and listed the workspace.", ""].join("\n"),
+    );
+    await auditMemory.updateMeta(AGENT_ID, RUN_ID, "span-1", {
+      summary: "Ran ls and listed the workspace.",
+      findings: [],
+      error: "",
+    });
+    await auditMemory.flush();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/audits/" + RUN_ID + "/archive",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/zip");
+    const zip = response.rawPayload;
+    // Local file headers name every entry, which is enough to assert what the
+    // archive carries without unzipping it.
+    const names: string[] = [];
+    const localFileHeader = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+    for (
+      let at = zip.indexOf(localFileHeader);
+      at !== -1;
+      at = zip.indexOf(localFileHeader, at + 4)
+    ) {
+      const length = zip.readUInt16LE(at + 26);
+      names.push(zip.subarray(at + 30, at + 30 + length).toString());
+    }
+    expect(names).toContain("memory/span-1.md");
+    expect(names).toContain("memory/steps-meta.json");
+    expect(names).toContain("audit.json");
   });
 });

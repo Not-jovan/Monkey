@@ -137,6 +137,30 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
+  // Replaces the previous meta-audit rather than appending: re-auditing the
+  // auditor answers the same question again, it does not accumulate history.
+  //
+  // Writes only to metaAudit. It must never touch auditorSpans, because those
+  // are this method's own input — appending there would make each meta-audit
+  // produce material for the next one, without limit.
+  recordMetaAudit(
+    trace: TraceRecord,
+    steps: AuditTraceStep[],
+    intentId: string,
+    at: string,
+  ) {
+    const doc = this.ensure(trace, intentId);
+    doc.metaAudit = [...steps];
+    doc.metaAuditedAt = at;
+    this.persist(trace.id);
+  }
+
+  metaAudit(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return { findings: [], auditedAt: null };
+    return { findings: [...doc.metaAudit], auditedAt: doc.metaAuditedAt };
+  }
+
   listAuditorSpans(traceId: string) {
     const doc = this.docs.get(traceId);
     if (!doc) return [];
@@ -221,6 +245,8 @@ export class AuditStore {
         spanAudit: {},
         runAudit: [],
         auditorSpans: [],
+        metaAudit: [],
+        metaAuditedAt: null,
       };
       this.docs.set(trace.id, doc);
       return doc;

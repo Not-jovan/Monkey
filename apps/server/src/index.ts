@@ -7,6 +7,7 @@ import {
   auditSteps,
   instructionsDriftFinding,
 } from "./audits/audit-model.js";
+import { AuditMemory } from "./audits/audit-memory.js";
 import { AuditService } from "./audits/audit-service.js";
 import { AuditStore } from "./audits/audit-store.js";
 import {
@@ -59,6 +60,12 @@ const contextStore = new ContextStore(
   onStoreError,
 );
 await contextStore.initialize();
+// PLAN_AUDITOR's audit memory: agent-runs/{agentId}/{chatId}/ holding one
+// markdown record per audited step plus the meta index the analyses read.
+const auditMemory = new AuditMemory(
+  path.join(config.dataDirectory, "agent-runs"),
+  onStoreError,
+);
 
 const arkClient = createArkClient(config);
 const auditingAvailable = config.auditEnabled && isArkConfigured(config);
@@ -132,6 +139,7 @@ const auditService = new AuditService({
   intentModel: config.auditIntentModel,
   networkWhitelist: config.auditNetworkWhitelist,
   intent: intentService,
+  memory: auditMemory,
   enabled: auditingAvailable,
   log: (message, error) => console.error(message, error),
 });
@@ -170,6 +178,9 @@ const app = await createApp(config, service, {
   traceService,
   intentService,
   contextService,
+  // Reached only by the manual meta-audit route; nothing subscribes to it.
+  auditService,
+  auditMemory,
   collectorToken,
 });
 
@@ -180,6 +191,7 @@ const shutdown = async (signal: string) => {
   await auditStore.flush();
   await intentStore.flush();
   await contextStore.flush();
+  await auditMemory.flush();
   process.exit(0);
 };
 

@@ -389,6 +389,8 @@ export function TraceDetailPage() {
           intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
           auditorSpans={auditorQuery.data?.spans ?? []}
+          metaAudit={auditorQuery.data?.metaAudit ?? []}
+          metaAuditedAt={auditorQuery.data?.metaAuditedAt ?? null}
           onShowStep={showStep}
         />
       )}

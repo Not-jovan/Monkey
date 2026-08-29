@@ -180,6 +180,10 @@ export interface AuditorTrace {
   agentId: string;
   health: AuditHealth;
   spans: TraceSpan[];
+  // Findings from auditing the auditor. Empty until someone asks: this never
+  // runs on its own, because its output would otherwise be the next run's input.
+  metaAudit: AuditTraceStep[];
+  metaAuditedAt: string | null;
 }
 
 export interface AuditTraceStep {
@@ -190,7 +194,10 @@ export interface AuditTraceStep {
   // The spec version this finding was judged against. Empty for findings about
   // the auditor itself, and for audits written before findings carried it.
   intentId: string;
-  type: "warning" | "error";
+  // A suspicion is something the auditor could see but not decide on its own —
+  // an action that *might* have deviated, an instruction that *might* have been
+  // obeyed. It is deliberately weaker than a warning and is rendered as such.
+  type: "warning" | "suspicion" | "error";
   // "audit-health" is the auditor reporting on itself, never a claim about the
   // agent. Kept out of warning counts for that reason.
   category: "intent-check" | "security" | "reliability" | "audit-health";

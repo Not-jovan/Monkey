@@ -167,6 +167,14 @@ export const api = {
       "/api/traces/" + id + "/download",
     ),
   auditor: (id: string) => request<AuditorTrace>("/api/audits/" + id),
+  // Audits the auditor's own run. Manual by design; the server has no path
+  // that reaches this on its own.
+  auditAuditor: (id: string) =>
+    request<{ traceId: string; findings: AuditTraceStep[]; auditedAt: string | null }>(
+      "/api/audits/" + id + "/meta",
+      { method: "POST" },
+    ),
+  auditArchiveUrl: (id: string) => "/api/audits/" + id + "/archive",
 };
 
 export type { RunFailure };
