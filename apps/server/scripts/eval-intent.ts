@@ -12,8 +12,8 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createArkClient } from "../src/audits/ark-client.js";
-import { classifyIntent } from "../src/intent/intent-classifier.js";
+import { createArkClient } from "../src/ark-client.js";
+import { classifyIntent } from "../src/middlewares/intent/intent-classifier.js";
 
 interface IntentCase {
   originalIntent: string;
@@ -63,7 +63,7 @@ async function main() {
   });
 
   const fixture = path.join(
-    fileURLToPath(new URL("../src/intent/__fixtures__/", import.meta.url)),
+    fileURLToPath(new URL("../src/middlewares/intent/__fixtures__/", import.meta.url)),
     "intent-cases.json",
   );
   const cases = JSON.parse(await readFile(fixture, "utf8")) as IntentCase[];

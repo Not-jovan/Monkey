@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { TraceSpan } from "../types";
-import { isSubagentTask, orderedSteps, stepHeadline, stepRole } from "./steps";
+import {
+  isSubagentTask,
+  isVisibleStep,
+  orderedSteps,
+  stepHeadline,
+  stepRole,
+} from "./steps";
 
 function span(overrides: Partial<TraceSpan> & Pick<TraceSpan, "id" | "name">) {
   return {
@@ -74,5 +80,34 @@ describe("subagent detection", () => {
     expect(orderedSteps([spawn, result]).map((step) => step.span.id)).toEqual([
       "spawn",
     ]);
+  });
+});
+
+// The one lever the server has for "keep this span, do not call it a step".
+// An auditor's synthetic prompt rides on it, and so does anything the layout
+// needs but the reader does not.
+describe("layout-only spans", () => {
+  it("keeps a layout-only span out of the step list", () => {
+    const prompt = span({
+      id: "prompt",
+      name: "user.prompt",
+      kind: "user_action",
+      actor: "user",
+      attributes: { prompt: "Audit of trace abc", layoutOnly: true },
+    });
+    expect(isVisibleStep(prompt)).toBe(false);
+    expect(orderedSteps([prompt])).toHaveLength(0);
+  });
+
+  it("still shows an ordinary prompt span", () => {
+    const prompt = span({
+      id: "prompt",
+      name: "user.prompt",
+      kind: "user_action",
+      actor: "user",
+      attributes: { prompt: "count files" },
+    });
+    expect(isVisibleStep(prompt)).toBe(true);
+    expect(orderedSteps([prompt])).toHaveLength(1);
   });
 });

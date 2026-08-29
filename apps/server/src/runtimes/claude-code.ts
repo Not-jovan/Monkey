@@ -1,6 +1,6 @@
 import { collectorLogsUrl, type AppConfig } from "../config.js";
-import { parseClaudeCodeEvent } from "../traces/claude-code-events.js";
-import type { NormalizedRuntimeEvent } from "../traces/runtime-events.js";
+import { parseClaudeCodeEvent } from "../middlewares/trace/claude-code-events.js";
+import type { NormalizedRuntimeEvent } from "../middlewares/trace/runtime-events.js";
 import type { ParsedEvents, RuntimeDefinition } from "./types.js";
 
 // `-p --output-format stream-json --verbose --permission-mode <mode>`

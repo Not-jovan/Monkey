@@ -1,0 +1,120 @@
+import type { FastifyInstance } from "fastify";
+import { z } from "zod";
+import { ZipArchive } from "archiver";
+import { HttpError } from "../../errors.js";
+import type { MiddlewareDeps } from "../types.js";
+
+const traceParams = z.object({ id: z.string().min(8).max(64) });
+
+export function registerAuditRoutes(
+  app: FastifyInstance,
+  deps: MiddlewareDeps,
+) {
+  app.get("/api/audits/:id", async (request) => {
+    const { id } = traceParams.parse(request.params);
+    const payload = auditorTrace(id);
+    if (!payload) {
+      throw new HttpError(404, "Audit not found");
+    }
+    return payload;
+  });
+
+  // Audits any trace, whatever produced it: an Agent's run, or the run of the
+  // auditor that judged it, or the run of the auditor that judged *that*.
+  //
+  // On demand only, at every depth. Nothing subscribes to this — the automatic
+  // audit fires for depth 0 alone — so a stack of auditors goes exactly as deep
+  // as someone has asked for and no further.
+  app.post("/api/traces/:id/audit", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    if (!deps.auditService) {
+      throw new HttpError(503, "Auditing is not enabled");
+    }
+    const result = await deps.auditService.audit(id);
+    if (result === null) {
+      throw new HttpError(404, "Trace not found");
+    }
+    if (result === "in-flight") {
+      throw new HttpError(409, "An audit is already running for this trace");
+    }
+    return reply.send(result);
+  });
+
+  // The plan's /audit/{chatId} download: every artifact the auditor wrote for
+  // this chat, plus the audit document, as one zip.
+  app.get("/api/audits/:id/archive", async (request, reply) => {
+    const { id } = traceParams.parse(request.params);
+    const trace = deps.traceStore.get(id);
+    if (!trace) {
+      throw new HttpError(404, "Audit not found");
+    }
+    const artifacts =
+      (await deps.auditMemory?.listArtifacts(trace.agentId, id)) ?? [];
+
+    reply.header("content-type", "application/zip");
+    reply.header(
+      "content-disposition",
+      'attachment; filename="audit-' + id + '.zip"',
+    );
+    const archive = new ZipArchive({ zlib: { level: 9 } });
+    // Streamed rather than buffered: a long run's memory folder is many files,
+    // and the reply should start before the last one is read.
+    reply.send(archive);
+    for (const artifact of artifacts) {
+      archive.file(artifact.filePath, { name: "memory/" + artifact.name });
+    }
+    // The audit document itself is not in the memory folder, and it is the part
+    // that carries the findings the UI shows.
+    const auditTraceId = deps.traceStore.auditorTraceFor(id);
+    archive.append(
+      JSON.stringify(
+        {
+          traceId: id,
+          agentId: trace.agentId,
+          findings: deps.auditStore.listByTrace(id),
+          auditTraceId,
+          auditorSpans: auditorSpans(id),
+          health: deps.auditStore.health(id),
+          // Written by an earlier version, which kept an audit of the auditor
+          // on the audited trace's document instead of giving it one of its own.
+          legacyMetaAudit: deps.auditStore.metaAudit(id),
+        },
+        null,
+        1,
+      ) + "\n",
+      { name: "audit.json" },
+    );
+    await archive.finalize();
+    return reply;
+  });
+
+  // What the auditor did while judging this trace. Its own trace's spans, or —
+  // for a run audited before auditors had traces — the array those spans used
+  // to be stashed in on this document.
+  function auditorSpans(traceId: string) {
+    const auditTraceId = deps.traceStore.auditorTraceFor(traceId);
+    if (auditTraceId === null) return deps.auditStore.listAuditorSpans(traceId);
+    return deps.traceStore.get(auditTraceId)?.spans ?? [];
+  }
+
+  function auditorTrace(id: string) {
+    const trace = deps.traceStore.get(id);
+    if (!trace) return null;
+    const legacy = deps.auditStore.metaAudit(id);
+    return {
+      traceId: id,
+      agentId: trace.agentId,
+      health: deps.auditStore.health(id),
+      spans: auditorSpans(id),
+      // The auditor's own run. Present once this trace has been audited, and
+      // the thing "audit this auditor" navigates to — the next level up reads
+      // it exactly as this level reads the Agent's run.
+      auditTraceId: deps.traceStore.auditorTraceFor(id),
+      // An audit of the auditor recorded before that run had a trace of its
+      // own. Read-only: nothing writes here any more, but a finding already
+      // recorded should not vanish because the shape around it changed.
+      legacyMetaAudit: legacy.findings,
+      legacyMetaAuditedAt: legacy.auditedAt,
+    };
+  }
+}

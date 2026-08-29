@@ -8,7 +8,7 @@ import {
   type RunFailure,
 } from "./failures.js";
 import { JsonStore } from "./store.js";
-import type { TraceService } from "./traces/trace-service.js";
+import type { TraceService } from "./middlewares/trace/trace-service.js";
 import type {
   Agent,
   AgentRun,

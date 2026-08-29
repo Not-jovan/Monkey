@@ -174,6 +174,47 @@ function SpanDetails({
   );
 }
 
+// Where this trace sits in the stack of audits above the Agent run at the root
+// of it. Rendered only once there is a stack: a run nobody has audited has a
+// chain of one, and saying so would be noise.
+//
+// There is no ceiling here on purpose. However deep someone has chosen to go,
+// the way back is the same list.
+function AuditChain({
+  chain,
+  current,
+}: {
+  chain: { id: string; auditDepth: number }[];
+  current: string;
+}) {
+  if (chain.length < 2) return null;
+  return (
+    <nav className="audit-chain" aria-label="Audit chain">
+      {chain.map((entry, index) => (
+        <span key={entry.id}>
+          {index > 0 && <span className="audit-chain-separator"> › </span>}
+          {entry.id === current ? (
+            <span className="audit-chain-current" aria-current="page">
+              {auditChainLabel(entry.auditDepth)}
+            </span>
+          ) : (
+            <Link to={"/traces/" + entry.id}>
+              {auditChainLabel(entry.auditDepth)}
+            </Link>
+          )}
+        </span>
+      ))}
+    </nav>
+  );
+}
+
+// One entry per level, all named the same. The position in the chain already
+// says how deep it is, and numbering them made a stack read as a single
+// summarised hop rather than as the sequence of audits it is.
+export function auditChainLabel(depth: number) {
+  return depth === 0 ? "Agent run" : "Audit";
+}
+
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
   const [searchParams] = useSearchParams();
@@ -327,6 +368,7 @@ export function TraceDetailPage() {
 
       {trace && (
         <>
+          <AuditChain chain={detailQuery.data?.auditChain ?? []} current={traceId} />
           <p className="trace-instruction" title={trace.prompt}>
             {trace.prompt}
           </p>
@@ -404,8 +446,9 @@ export function TraceDetailPage() {
           intent={detailQuery.data?.intent ?? null}
           context={detailQuery.data?.context ?? null}
           auditorSpans={auditorQuery.data?.spans ?? []}
-          metaAudit={auditorQuery.data?.metaAudit ?? []}
-          metaAuditedAt={auditorQuery.data?.metaAuditedAt ?? null}
+          auditTraceId={auditorQuery.data?.auditTraceId ?? null}
+          legacyMetaAudit={auditorQuery.data?.legacyMetaAudit ?? []}
+          legacyMetaAuditedAt={auditorQuery.data?.legacyMetaAuditedAt ?? null}
           onShowStep={showStep}
           focusedFindingId={focusedFindingId}
         />
