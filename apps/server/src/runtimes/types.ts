@@ -1,5 +1,5 @@
 import type { AppConfig } from "../config.js";
-import type { RuntimeTraceAdapter } from "../traces/runtime-events.js";
+import type { RuntimeTraceAdapter } from "../middlewares/trace/runtime-events.js";
 import type { RunUsage, RunnerRequest } from "../types.js";
 
 export interface ParsedEvents {

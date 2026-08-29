@@ -1,8 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { collectorLogsUrl, type AppConfig } from "../config.js";
-import { parseCodexEvent } from "../traces/codex-events.js";
-import type { NormalizedRuntimeEvent } from "../traces/runtime-events.js";
+import { parseCodexEvent } from "../middlewares/trace/codex-events.js";
+import type { NormalizedRuntimeEvent } from "../middlewares/trace/runtime-events.js";
 import type { RunnerRequest } from "../types.js";
 import type { ParsedEvents, RuntimeDefinition } from "./types.js";
 

@@ -17,17 +17,17 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { createArkClient } from "../src/audits/ark-client.js";
+import { createArkClient } from "../src/ark-client.js";
 import {
   intentStepVerdict,
   summaryVerdict,
   INTENT_STEP_SYSTEM_PROMPT,
   SUMMARY_SYSTEM_PROMPT,
-} from "../src/audits/step-checks.js";
-import { runDeterministicChecks } from "../src/audits/deterministic.js";
-import { activityFromDatasetCase } from "../src/audits/step-activity.js";
-import { buildStepContext } from "../src/audits/step-context.js";
-import { emptyUsage, type TraceRecord, type TraceSpan } from "../src/traces/trace-model.js";
+} from "../src/middlewares/audit/step-checks.js";
+import { runDeterministicChecks } from "../src/middlewares/audit/deterministic.js";
+import { activityFromDatasetCase } from "../src/middlewares/audit/step-activity.js";
+import { buildStepContext } from "../src/middlewares/audit/step-context.js";
+import { emptyUsage, type TraceRecord, type TraceSpan } from "../src/middlewares/trace/trace-model.js";
 
 interface AuditCase {
   id: string;
@@ -203,7 +203,7 @@ async function main() {
   });
 
   const fixture = path.join(
-    fileURLToPath(new URL("../src/audits/__fixtures__/", import.meta.url)),
+    fileURLToPath(new URL("../src/middlewares/audit/__fixtures__/", import.meta.url)),
     "audit-cases.json",
   );
   const cases = JSON.parse(await readFile(fixture, "utf8")) as AuditCase[];

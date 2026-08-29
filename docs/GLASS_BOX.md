@@ -538,7 +538,7 @@ a later change:
 
 The audit policies are verified against the 20-case dataset from the audit
 plan, kept verbatim at
-`apps/server/src/audits/__fixtures__/audit-cases.json`. Production traces and
+`apps/server/src/middlewares/audit/__fixtures__/audit-cases.json`. Production traces and
 fixture cases both reduce to the same `StepActivity` value, so the dataset
 exercises the real code path rather than a parallel one.
 
@@ -615,7 +615,7 @@ itself, unlike Codex which reports it inline. The secret-detection and
 network-whitelist checks read both call arguments and output off span
 attributes, so for a Claude Code-backed Agent they only ever see the input
 half of a tool call. See
-`apps/server/src/traces/claude-code-events.ts` for the field-level detail.
+`apps/server/src/middlewares/trace/claude-code-events.ts` for the field-level detail.
 
 **Claude Code's model calls are logged after the tool calls they cause.**
 The CLI emits `tool_decision` the moment a tool-use block finishes streaming,

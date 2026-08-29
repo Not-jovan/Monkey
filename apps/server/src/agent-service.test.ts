@@ -6,9 +6,9 @@ import { AgentService, type InstructionsDrift } from "./agent-service.js";
 import { loadConfig } from "./config.js";
 import { codexRuntime } from "./runtimes/codex.js";
 import { JsonStore } from "./store.js";
-import { createRedactor } from "./traces/redaction.js";
-import { TraceService } from "./traces/trace-service.js";
-import { TraceStore } from "./traces/trace-store.js";
+import { createRedactor } from "./middlewares/trace/redaction.js";
+import { TraceService } from "./middlewares/trace/trace-service.js";
+import { TraceStore } from "./middlewares/trace/trace-store.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 import { WorkspaceManager } from "./workspace.js";
 

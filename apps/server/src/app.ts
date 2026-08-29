@@ -7,7 +7,10 @@ import { z } from "zod";
 import type { AppConfig } from "./config.js";
 import { HttpError } from "./errors.js";
 import type { AgentService } from "./agent-service.js";
-import { registerGlassboxRoutes, type GlassboxDeps } from "./traces/routes.js";
+import {
+  registerMiddlewareRoutes,
+  type MiddlewareDeps,
+} from "./middlewares/index.js";
 
 const agentIdParams = z.object({ id: z.string().uuid() });
 const runIdParams = z.object({ id: z.string().uuid() });
@@ -27,7 +30,7 @@ const messageBody = z.object({
 export async function createApp(
   config: AppConfig,
   service: AgentService,
-  glassbox?: GlassboxDeps,
+  middlewares?: MiddlewareDeps,
 ): Promise<FastifyInstance> {
   const app = Fastify({
     logger: {
@@ -81,7 +84,7 @@ export async function createApp(
     const agent = await service.createAgent(body);
     // The record starts life agreeing with the instructions the agent was
     // created with, so an agent is never auditable against an empty spec.
-    glassbox?.intentService?.syncInstructions(agent.id, agent.instructions);
+    middlewares?.intentService?.syncInstructions(agent.id, agent.instructions);
     return reply.code(201).send({ agent });
   });
 
@@ -98,40 +101,15 @@ export async function createApp(
     // agent then follows. Mirroring them here is what stops the auditor
     // enforcing the spec the agent was given before this edit. A no-op when
     // they did not change, so renaming an agent does not touch the timeline.
-    glassbox?.intentService?.syncInstructions(id, agent.instructions);
+    middlewares?.intentService?.syncInstructions(id, agent.instructions);
     return { agent };
-  });
-
-  // Collapses a divergence back to one source of truth. The objective the
-  // conversation arrived at is written into the agent's instructions, which
-  // regenerates AGENTS.md, and the record then agrees with what the agent
-  // reads. Deliberately explicit: a classification must never rewrite
-  // user-authored configuration on its own.
-  app.post("/api/agents/:id/intent/adopt", async (request, reply) => {
-    const { id } = agentIdParams.parse(request.params);
-    if (!glassbox?.intentService) {
-      throw new HttpError(503, "Intent tracking is not enabled");
-    }
-    service.getAgent(id);
-    const objective = glassbox.intentService.pendingAdoption(id);
-    if (objective === null) {
-      throw new HttpError(
-        409,
-        "This agent's objective already matches its instructions",
-      );
-    }
-    // Goes through updateAgent so AGENTS.md is rewritten and the busy-agent
-    // guard applies — adopting mid-run would change the spec underneath it.
-    const agent = await service.updateAgent(id, { instructions: objective });
-    glassbox.intentService.syncInstructions(id, agent.instructions, "adopted");
-    return reply.send({ agent, intent: glassbox.intentService.view(id) });
   });
 
   app.delete("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     const result = await service.deleteAgent(id);
-    glassbox?.intentService?.forget(id);
-    glassbox?.contextService?.forget(id);
+    middlewares?.intentService?.forget(id);
+    middlewares?.contextService?.forget(id);
     return result;
   });
 
@@ -165,8 +143,8 @@ export async function createApp(
     // spec the message had just replaced. Still not awaited: the queue ordering
     // is what matters, and classification must not delay the 202.
     const runId = randomUUID();
-    glassbox?.intentService?.observe(id, agent.instructions, {
-      content: glassbox.traceService.redactText(body.content),
+    middlewares?.intentService?.observe(id, agent.instructions, {
+      content: middlewares.traceService.redactText(body.content),
       traceId: runId,
     });
     const result = await service.sendMessage(id, body.content, runId);
@@ -178,8 +156,8 @@ export async function createApp(
     return { run: service.getRun(id) };
   });
 
-  if (glassbox) {
-    registerGlassboxRoutes(app, glassbox, (agentId) => {
+  if (middlewares) {
+    registerMiddlewareRoutes(app, middlewares, service, (agentId) => {
       try {
         service.getAgent(agentId);
         return true;

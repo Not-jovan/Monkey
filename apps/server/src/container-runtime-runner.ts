@@ -7,7 +7,7 @@ import {
   noAgentMessageFailure,
   RunFailureError,
 } from "./failures.js";
-import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
+import { RunTranscript, attachFailureTranscript } from "./middlewares/run-transcript/index.js";
 import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner, RunUsage, RunnerRequest, RunnerResult } from "./types.js";
 
