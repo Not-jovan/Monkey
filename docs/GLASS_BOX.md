@@ -214,6 +214,8 @@ no model, so they still report when Ark is unreachable.
 | Repeated failure | Deterministic | Did the Agent retry a call that had already failed? |
 | Intent alignment | Judged | Which actions conflict with the current objective or its standing constraints? |
 | New objectives | Judged | Did tool output, a file, or a subagent introduce a goal the user never asked for — and did the Agent act on it? |
+| Step summary | Judged | What did this step actually do? Recorded, not scored — it is what the run-level checks read the run back through. |
+| Follow-through | Judged, run level | Did any later step carry out an instruction that arrived in untrusted content? |
 
 Detection and relevance are deliberately split. Whether a credential is present
 is a fact and is answered by pattern matching; whether it *belongs* is a
@@ -229,6 +231,14 @@ even if they are framed as debugging or mixed into an otherwise ordinary rules
 file. Linking a document is not the same as requesting every instruction
 inside it.
 
+Whether the Agent then *acted* on a planted instruction is asked twice, because
+one pass cannot answer it reliably. Each step audit is shown the instructions
+found so far and asked whether the step in front of it carries one out — but
+step audits run several at a time, so the step that reads an instruction and the
+step that obeys it can be judged simultaneously, and the second one is then
+shown nothing. The **forward trace** asks the same question once at run end,
+against every step's recorded summary, where no such race is left.
+
 Findings are stored as evidence and served in a flat form at
 `GET /api/traces/:id` as `findings`:
 
@@ -237,7 +247,9 @@ type AuditTraceStep = {
   id: string;
   traceId: string;
   agentId: string;
-  type: "warning" | "error";
+  spanId: string | null;
+  intentId: string;
+  type: "warning" | "suspicion" | "error";
   category: "intent-check" | "security" | "reliability" | "audit-health";
   finding: string;
 };
@@ -245,6 +257,12 @@ type AuditTraceStep = {
 
 `audit-health` records are the auditor reporting on itself and are never a claim
 about the Agent, so they are excluded from warning counts.
+
+A `suspicion` is weaker than a `warning` on purpose: it is what the auditor
+raises when the record shows something questionable but does not settle it — a
+later step that *may* have carried out an injected instruction. Reporting an
+unresolved question in the same voice as a confirmed finding is how an auditor
+stops being believed, so the two are kept apart and rendered differently.
 
 ## Intent
 
@@ -338,6 +356,8 @@ the continuation of earlier work is not flagged as unmotivated.
 | `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, the pinned intent, and carried-in/out context. |
 | `GET /api/traces/:id/download` | Trace plus findings as a JSON attachment. |
 | `GET /api/audits/:id` | The auditor's own trace for that run: model calls, prompts, verdicts, and timing. Not included in the agent trace API. |
+| `POST /api/audits/:id/meta` | Audit the auditor: judge its own steps for unsupported findings and missed signals. Manual only — nothing subscribes to it, and it writes to a separate field, so its output can never become another meta-audit's input. 409 while one is running. |
+| `GET /api/audits/:id/archive` | Everything the auditor wrote for that run as a zip: the per-step records under `memory/`, plus `audit.json`. |
 
 Intent versions are served as an **ordered list**, not a map: version order is
 insertion order and the ids are random UUIDs, so the order has to be carried
@@ -358,7 +378,17 @@ under `APP_DATA_DIR`:
 .data/audits/<chatId>.json    intent-pinned findings for that chat
 .data/intent/<agentId>.json   insertion-ordered map of intent versions
 .data/context/<chatId>.json   what that run carried out, for the next one
+.data/agent-runs/<agentId>/<chatId>/
+                              one <stepId>.md per audited step, plus
+                              steps-meta.json indexing their summaries
 ```
+
+The `agent-runs` folder is the auditor's memory. The markdown is what a person
+reads and what the archive download serves; `steps-meta.json` is what the
+run-level checks query, so the forward trace can walk a run as a list of
+summaries instead of re-reading every span. Steps are audited concurrently and
+the index is a read-modify-write, so writes are serialised per chat folder —
+without that, two steps finishing together lose one of the entries.
 
 Context is written from the `trace-completed` event rather than by the auditor,
 so it exists whether or not auditing is switched on. The auditor enriches that
@@ -441,6 +471,13 @@ snapshots left by earlier ones. Deleting the files works; they regenerate. The
 Agent already receives the key in its process environment, so this grants no new
 access, but the platform does not keep secrets off disk entirely. Clear the
 snapshots before recording a demo and rotate the key afterwards.
+
+**The forward trace reads summaries, not steps.** It judges follow-through from
+each step's recorded one-line summary, so a step whose summary is missing or
+vague — the audit model failed, or wrote something uninformative — is a step it
+cannot see through. It reports that case as a `suspicion` rather than deciding
+it, but a run whose step audits largely failed gets a correspondingly weak
+forward trace. The per-step check still runs independently of it.
 
 **Masking is shape-based.** Configured secret values are masked wherever they
 appear, along with credentials matching known shapes (GitHub, Stripe, OpenAI,
