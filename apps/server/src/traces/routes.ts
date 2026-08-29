@@ -62,7 +62,7 @@ export function registerGlassboxRoutes(
 
   app.get("/api/agents/:id/traces", async (request) => {
     const { id } = idParams.parse(request.params);
-    const warningCounts = deps.auditStore.warningCountByTrace();
+    const auditCounts = deps.auditStore.countsByTrace();
     const health = deps.auditStore.healthByTrace();
     const traces = deps.traceStore.listByAgent(id).map((trace) => {
       let errorCount = 0;
@@ -86,7 +86,11 @@ export function registerGlassboxRoutes(
         // A run that succeeded on the fifth attempt is not a clean run.
         recoveredErrorCount: trace.recoveredErrorCount,
         evidenceComplete: trace.evidenceComplete,
-        warningCount: warningCounts.get(trace.id) ?? 0,
+        warningCount: auditCounts.get(trace.id)?.warnings ?? 0,
+        // Apart from warningCount for the same reason auditHealth is: the
+        // auditor saying "I could not settle this" is not the auditor saying
+        // the agent did something wrong.
+        suspicionCount: auditCounts.get(trace.id)?.suspicions ?? 0,
         // Reported apart from warningCount: an auditor outage is not an agent
         // defect, and counting the two together made every outage look like one.
         auditHealth: health.get(trace.id) ?? "ok",

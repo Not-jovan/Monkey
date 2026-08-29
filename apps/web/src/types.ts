@@ -121,6 +121,9 @@ export interface TraceSummary {
   recoveredErrorCount: number;
   evidenceComplete: boolean;
   warningCount: number;
+  // Questions the auditor raised and could not settle. Kept out of
+  // warningCount so the row does not claim more than the auditor concluded.
+  suspicionCount: number;
   auditHealth: AuditHealth;
 }
 

@@ -2291,6 +2291,22 @@ textarea:focus {
   white-space: nowrap;
 }
 
+/* Deliberately quieter than .warning-badge, and dashed like the auditor badge:
+   both say "the middleware is telling you about itself" rather than making a
+   claim about the agent. */
+.suspicion-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px dashed #c9c8c0;
+  background: transparent;
+  font-size: 0.72rem;
+  color: #6f6f78;
+  white-space: nowrap;
+}
+
 .recovered-badge {
   display: inline-flex;
   align-items: center;

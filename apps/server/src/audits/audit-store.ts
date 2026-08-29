@@ -46,6 +46,19 @@ function agentFindingsOf(doc: ChatAudit) {
   );
 }
 
+// A suspicion is a question the auditor could not settle, not a claim that the
+// agent did something wrong. Counting it as a warning would make the summary
+// row state exactly what the severity exists to avoid stating.
+function countsOf(doc: ChatAudit) {
+  let warnings = 0;
+  let suspicions = 0;
+  for (const finding of agentFindingsOf(doc)) {
+    if (finding.type === "suspicion") suspicions += 1;
+    else warnings += 1;
+  }
+  return { warnings, suspicions };
+}
+
 export class AuditStore {
   private readonly docs = new Map<string, ChatAudit>();
   private queue: Promise<void> = Promise.resolve();
@@ -205,11 +218,12 @@ export class AuditStore {
     return Object.keys(this.docs.get(traceId)?.spanAudit ?? {}).length;
   }
 
-  // Findings about the agent only. An auditor outage no longer inflates this.
-  warningCountByTrace() {
-    const counts = new Map<string, number>();
+  // Findings about the agent only, split by whether the auditor actually
+  // concluded something. An auditor outage inflates neither.
+  countsByTrace() {
+    const counts = new Map<string, { warnings: number; suspicions: number }>();
     for (const [chatId, doc] of this.docs) {
-      counts.set(chatId, agentFindingsOf(doc).length);
+      counts.set(chatId, countsOf(doc));
     }
     return counts;
   }

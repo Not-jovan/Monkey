@@ -650,4 +650,46 @@ describe("Glassbox routes", () => {
     expect(names).toContain("memory/steps-meta.json");
     expect(names).toContain("audit.json");
   });
+
+  // A suspicion is a question the auditor could not settle, not a claim that
+  // the agent did something wrong. Folding it into the warning count made the
+  // row state exactly what the severity exists to avoid stating.
+  it("counts suspicions apart from warnings on a trace row", async () => {
+    const { app, traceStore, traceService, auditStore } = await makeApp();
+    startRun(traceService);
+    const trace = traceStore.get(RUN_ID);
+    expect(trace).toBeTruthy();
+    if (!trace) return;
+    const finding = (type: "warning" | "suspicion", id: string) => ({
+      id,
+      traceId: RUN_ID,
+      agentId: AGENT_ID,
+      spanId: null,
+      intentId: "",
+      type,
+      category: "intent-check" as const,
+      finding: id,
+    });
+    auditStore.recordRun(
+      trace,
+      [
+        finding("warning", "confirmed"),
+        finding("suspicion", "unsettled-one"),
+        finding("suspicion", "unsettled-two"),
+      ],
+      "",
+      "",
+      "ok",
+    );
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces",
+    });
+    const body = response.json<{
+      traces: { warningCount: number; suspicionCount: number }[];
+    }>();
+    expect(body.traces[0]?.warningCount).toBe(1);
+    expect(body.traces[0]?.suspicionCount).toBe(2);
+  });
 });
