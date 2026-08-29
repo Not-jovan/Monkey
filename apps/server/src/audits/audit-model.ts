@@ -212,7 +212,7 @@ export function emitPolicyFindings(
     push(
       "warning",
       "security",
-      "Contacted " + url + ", which is not on the configured whitelist.",
+      "Contacted " + url + ", which is outside the configured whitelist.",
     );
   }
   for (const exposure of policies.secretExposures) {

@@ -208,7 +208,7 @@ export interface TraceIntentView extends IntentState {
 
 export interface IntentUpdate {
   logs: string[];
-  kind: "seed" | "classified" | "revert";
+  kind: "seed" | "classified" | "revert" | "human-correction";
   message?: string;
   reason?: string;
   addedConstraints: string[];
@@ -216,6 +216,8 @@ export interface IntentUpdate {
   // The run whose message moved the spec, so the Playground can mark it.
   traceId: string | null;
   revertedFrom: string | null;
+  sourceFindingId?: string | null;
+  sourceSpanId?: string | null;
 }
 
 export interface IntentVersion {

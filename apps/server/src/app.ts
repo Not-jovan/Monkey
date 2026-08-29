@@ -141,7 +141,15 @@ export async function createApp(
   });
 
   if (glassbox) {
-    registerGlassboxRoutes(app, glassbox);
+    registerGlassboxRoutes(app, glassbox, (agentId) => {
+      try {
+        service.getAgent(agentId);
+        return true;
+      } catch (error) {
+        if (error instanceof HttpError && error.statusCode === 404) return false;
+        throw error;
+      }
+    });
   }
 
   if (config.nodeEnv === "production") {

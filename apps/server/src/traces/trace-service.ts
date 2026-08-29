@@ -322,7 +322,7 @@ export class TraceService {
       startedAt,
       endedAt: startedAt,
       durationMs: 0,
-      attributes: { prompt },
+      attributes: { prompt, promptLength: prompt.length },
       error: null,
     });
     this.runs.set(run.id, {
@@ -754,9 +754,13 @@ export class TraceService {
       case "user_prompt": {
         if (!isRootScope) return;
         this.store.updateSpan(runId, state.promptSpanId, (span) => {
-          span.attributes.promptLength = normalized.promptLength;
+          // Runtime telemetry sees the middleware envelope. Preserve the
+          // original human prompt on this user-action span and record only
+          // whether the runtime prompt was wrapped and how long it was.
+          span.attributes.runtimePromptLength = normalized.promptLength;
           if (normalized.prompt) {
-            span.attributes.prompt = this.redactor.redactText(normalized.prompt);
+            span.attributes.runtimePromptWrapped =
+              this.redactor.redactText(normalized.prompt) !== state.prompt;
           }
         });
         return;

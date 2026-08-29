@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -63,10 +63,13 @@ describe("RunTranscript", () => {
 
   // A diagnostic aid must never be able to mask the failure it describes.
   it("never throws when the transcript cannot be written", async () => {
+    const dataDirectory = await scratchDir();
+    const fileInsteadOfDirectory = path.join(dataDirectory, "not-a-directory");
+    await writeFile(fileInsteadOfDirectory, "block directory creation");
     const error = new Error("boom");
     await expect(
       attachFailureTranscript(new RunTranscript(), error, {
-        dataDirectory: "/proc/nonexistent-and-unwritable",
+        dataDirectory: fileInsteadOfDirectory,
         runtimeId: "codex",
         argv: ["codex"],
         runId: "run-3",
