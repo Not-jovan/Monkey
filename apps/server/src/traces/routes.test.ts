@@ -11,6 +11,7 @@ import { ContextStore } from "../context/context-store.js";
 import { IntentService } from "../intent/intent-service.js";
 import { IntentStore } from "../intent/intent-store.js";
 import { createRedactor } from "./redaction.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
 
@@ -58,7 +59,11 @@ async function makeApp(environment: Record<string, string> = {}) {
   cleanups.push(async () => {
     await contextStore.flush();
   });
-  const traceService = new TraceService(traceStore, createRedactor([]));
+  const traceService = new TraceService(
+    traceStore,
+    createRedactor([]),
+    codexRuntime.trace,
+  );
   const contextService = new ContextService({
     traceStore,
     store: contextStore,

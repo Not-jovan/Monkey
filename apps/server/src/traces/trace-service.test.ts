@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRedactor } from "./redaction.js";
+import { codexRuntime } from "../runtimes/codex.js";
 import { TraceService } from "./trace-service.js";
 import { TraceStore } from "./trace-store.js";
 
@@ -53,7 +54,7 @@ async function makeService() {
     await store.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
-  const service = new TraceService(store, createRedactor([SECRET]));
+  const service = new TraceService(store, createRedactor([SECRET]), codexRuntime.trace);
   return { store, service };
 }
 
@@ -88,10 +89,7 @@ describe("TraceService", () => {
   it("assembles the span tree for a real captured run", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "Count the txt files" });
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
     const result = service.ingestLogs(fixture());
     expect(result).toEqual({ accepted: 6, buffered: 0, skipped: 0 });
     service.onRunEnd(RUN_ID, { status: "completed" });
@@ -142,10 +140,7 @@ describe("TraceService", () => {
     expect(early?.buffered).toBe(6);
     expect(store.get(RUN_ID)?.spans).toHaveLength(2);
 
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
     expect(store.get(RUN_ID)?.spans.length).toBeGreaterThan(2);
   });
 
@@ -746,10 +741,7 @@ describe("TraceService", () => {
   it("binds receiver_thread_ids from spawn_agent jsonl onto the parent run", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "delegate" });
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
     service.onRunnerEvent(RUN_ID, {
       type: "item.completed",
       item: {
@@ -903,10 +895,7 @@ describe("TraceService", () => {
   it("marks a command that failed inside a successful tool call", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "probe the sandbox" });
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
 
     service.ingestLogs(
       logs([
@@ -943,10 +932,7 @@ describe("TraceService", () => {
   it("leaves a benign non-zero exit alone", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "search the workspace" });
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
 
     service.ingestLogs(
       logs([
@@ -980,10 +966,7 @@ describe("TraceService", () => {
   it("counts recovered errors from the steps that actually failed", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "probe the sandbox" });
-    service.onRunnerEvent(RUN_ID, {
-      type: "thread.started",
-      thread_id: CONVERSATION_ID,
-    });
+    service.onConversation(RUN_ID, CONVERSATION_ID);
 
     service.ingestLogs(
       logs([

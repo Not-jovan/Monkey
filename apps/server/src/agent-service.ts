@@ -24,6 +24,11 @@ const now = () => new Date().toISOString();
 export class AgentService {
   private readonly activeExecutions = new Map<string, Promise<void>>();
   private readonly cancellationRequests = new Set<string>();
+  // Last model a run actually reported. Held in memory on purpose: it
+  // describes the runtime running right now, and a restart can select a
+  // different AGENT_RUNTIME, so a persisted value could outlive the runtime
+  // it described.
+  private lastRuntimeModel: string | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -255,11 +260,25 @@ export class AgentService {
   }
 
   async systemInfo(): Promise<Record<string, unknown>> {
+    const runtimeLabel =
+      this.config.agentRuntime === "claude-code" ? "Claude Code" : "Codex CLI";
     return {
       arkConfigured: isArkConfigured(this.config),
       arkBaseUrl: this.config.arkBaseUrl,
       arkModel: this.config.arkModel || null,
-      codexAvailable: await this.runner.isAvailable(),
+      agentRuntime: this.config.agentRuntime,
+      // What the Agent itself runs on, which is not always arkModel: Ark
+      // powers the audit models for every runtime, but only Codex's Agent.
+      // Claude Code resolves its model from the account at run time, so this
+      // stays null until a run has reported one.
+      agentModel:
+        this.lastRuntimeModel ??
+        (this.config.agentRuntime === "codex"
+          ? this.config.arkModel || null
+          : null),
+      runtimeAvailable: await this.runner.isAvailable(),
+      // Codex's inner sandbox; meaningless for other runtimes, so the UI
+      // only surfaces it when Codex is the selected runtime.
       codexSandboxMode: this.config.codexSandboxMode,
       runtimeProvider: this.config.runtimeProvider,
       containerEngine:
@@ -268,8 +287,8 @@ export class AgentService {
           : null,
       runtime:
         this.config.runtimeProvider === "container"
-          ? "Codex CLI in " + this.config.containerEngine + " Runtime"
-          : "Codex CLI in application container",
+          ? runtimeLabel + " in " + this.config.containerEngine + " Runtime"
+          : runtimeLabel + " in application container",
     };
   }
 
@@ -285,6 +304,10 @@ export class AgentService {
         storedRun.startedAt = now();
       }
     });
+    // Set by onModel below, which fires before the turn does any work — so a
+    // run that fails still knows what it was running on.
+    let observedModel: string | null = null;
+
     try {
       if (this.cancellationRequests.has(agentAtStart.id)) {
         throw new RunCancelledError();
@@ -294,10 +317,21 @@ export class AgentService {
         workspacePath: agentAtStart.workspacePath,
         prompt: rawPrompt,
         threadId: agentAtStart.codexThreadId,
+        runId: run.id,
+        redact: (text) => this.redact(text),
+        onModel: (model) => {
+          observedModel = model;
+          this.lastRuntimeModel = model;
+        },
+        onThread: (threadId) => this.traces?.onConversation(run.id, threadId),
         onEvent: (event) => this.traces?.onRunnerEvent(run.id, event),
       });
       const completedAt = now();
       const safeOutput = this.redact(result.output);
+      if (result.model) {
+        observedModel = result.model;
+        this.lastRuntimeModel = result.model;
+      }
       await this.store.mutate((database) => {
         const storedRun = database.runs.find((item) => item.id === run.id);
         const agent = database.agents.find(
@@ -324,6 +358,7 @@ export class AgentService {
       this.traces?.onRunEnd(run.id, {
         status: "completed",
         output: safeOutput,
+        model: observedModel,
       });
     } catch (error) {
       const completedAt = now();
@@ -355,6 +390,7 @@ export class AgentService {
         status: cancelled ? "cancelled" : "failed",
         error: message,
         failure,
+        model: observedModel,
       });
     }
   }

@@ -14,7 +14,7 @@ store. It never mutates a trace, and an audit failure never blocks a Run.
 flowchart LR
     User["User"] -->|message| API["Fastify control plane"]
     API --> Intent["Intent classifier"]
-    API --> Runtime["Codex Runtime"]
+    API --> Runtime["Agent Runtime\n(Codex or Claude Code)"]
     Runtime -->|OTLP/HTTP JSON| Collector["/collector/v1/logs"]
     Collector --> Redact["Secret detection + masking"]
     Redact --> Traces[("Traces")]
@@ -27,12 +27,33 @@ flowchart LR
 
 The trust boundary sits at the collector. The Runtime cannot hold the
 operator's bearer token, so it authenticates with a per-boot collector token
-that `writeCodexConfig` embeds in `config.toml`. Detection and masking run
-before anything is written, so the stores never receive a plaintext credential.
+that each runtime's `RuntimeDefinition` embeds into whatever telemetry
+configuration mechanism that runtime uses. Codex's `codexRuntime.bootstrap`
+(`apps/server/src/runtimes/codex.ts`) writes it into `config.toml`; Claude
+Code has no config file, so `claudeCodeRuntime.processEnv`
+(`apps/server/src/runtimes/claude-code.ts`) passes it as an
+`OTEL_EXPORTER_OTLP_LOGS_HEADERS` env var on every process launch instead.
+Detection and masking run before anything is written either way, so the
+stores never receive a plaintext credential.
 
-Telemetry stays on the machine: the generated `[otel]` block pins
-`metrics_exporter` and `trace_exporter` to `none`, overriding Codex 0.111.0's
-default of reporting metrics to its own endpoint.
+Records find their run by conversation id — `conversation.id` for Codex,
+`session.id` for Claude Code, named by each `RuntimeDefinition.trace`. The
+runtime picks that id at run time, so nothing can be correlated until it says
+what it is: the runner announces it through `RunnerRequest.onThread` the
+moment its own stdout parser sees it, and `TraceService.onConversation` binds
+it. Records that arrive before the announcement are held and replayed on
+binding rather than dropped, since telemetry regularly outruns stdout. A run
+whose id is never announced ends with a prompt span and nothing else — which
+is exactly what Claude Code runs used to do, because the binding read Codex's
+`thread.started` event and Claude Code announces itself with `system`/`init`
+instead.
+
+Telemetry stays on the machine: Codex 0.111.0's generated `[otel]` block
+pins `metrics_exporter` and `trace_exporter` to `none`, overriding its
+default of reporting metrics to its own endpoint. Claude Code is configured
+the same way in spirit — `OTEL_METRICS_EXPORTER=none` and
+`OTEL_TRACES_EXPORTER=none` in `processEnv` — just via env vars rather than
+a file.
 
 ## Diagnosing a failure
 
@@ -283,8 +304,10 @@ whatever the verdict returned, so a model outage, a disabled auditor, or an
 unactivated endpoint left the chain empty, and every later run was judged as if
 nothing had happened before it. It is now established on three levels:
 
-1. **Thread lineage** — deterministic and never absent. `buildCodexArgs` issues
-   `resume <threadId>`, so `conversationId` is the Agent's real continuity, and
+1. **Thread lineage** — deterministic and never absent. Each runtime resumes
+   its own session in place (`buildCodexArgs` issues `resume <threadId>`;
+   `buildClaudeCodeArgs` issues `--resume <sessionId>` and deliberately never
+   `--fork-session`), so `conversationId` is the Agent's real continuity, and
    the chain is keyed on it rather than on the Agent id. Resetting a session no
    longer carries context across a boundary the Agent itself does not share.
 2. **Derived digest** — built from the trace alone: prompt, files touched,
@@ -342,6 +365,14 @@ Context is written from the `trace-completed` event rather than by the auditor,
 so it exists whether or not auditing is switched on. The auditor enriches that
 record; it does not own it.
 
+A failed Run also leaves a transcript at `.data/run-logs/<runId>.log`. It is
+not part of the trio above and the auditor never reads it: it is written by
+the runner, only on failure, and holds the Runtime's argv plus its raw stdout
+and stderr — the material you need when a Run dies before emitting any
+telemetry. It goes through the same redactor and the same `0600` mode as
+everything else here, so the shape-based masking caveat under Limitations
+applies to it too.
+
 A Run left open by a crash is closed on the next boot, so the UI never shows a
 Run as live when nothing is running.
 
@@ -398,6 +429,35 @@ snapshots left by earlier ones. Deleting the files works; they regenerate. The
 Agent already receives the key in its process environment, so this grants no new
 access, but the platform does not keep secrets off disk entirely. Clear the
 snapshots before recording a demo and rotate the key afterwards.
+
+**Claude Code's telemetry never carries tool output content.** Confirmed
+against a live run: even with `OTEL_LOG_TOOL_DETAILS=1` set, Claude Code's
+OTLP logs signal only ever delivers tool call *input* (as two JSON strings,
+`tool_parameters` and `tool_input`) and byte sizes — never the output text
+itself, unlike Codex which reports it inline. The secret-detection and
+network-whitelist checks read both call arguments and output off span
+attributes, so for a Claude Code-backed Agent they only ever see the input
+half of a tool call. See
+`apps/server/src/traces/claude-code-events.ts` for the field-level detail.
+
+**Claude Code's model calls are logged after the tool calls they cause.**
+The CLI emits `tool_decision` the moment a tool-use block finishes streaming,
+but only logs `api_request` when the whole call completes — so on the wire a
+tool decision can precede the model call that produced it (measured on a live
+run: decision at `+51.035s`, its own request logged at `+51.123s`). Span
+*times* are still right, because the request's span is backdated by its
+reported duration, but two things derived from arrival order are one step out
+of phase for this runtime: the `Model · after <tool>` labels, and the
+`causedBySpanId` link the UI presents as a likely cause. Codex reports the
+call first and is unaffected.
+
+**A runtime's background model calls are filtered by name, not by nature.**
+Claude Code names its session with a separate haiku call on the same telemetry
+stream; unfiltered it became the run's first model-call span and billed its
+tokens to the agent. It is excluded by `query_source`
+(`BACKGROUND_QUERY_SOURCES` in `apps/server/src/runtimes/claude-code.ts`),
+which is a denylist of the sources observed so far — a new one would surface
+as an extra span rather than being silently swallowed.
 
 **Masking is shape-based.** Configured secret values are masked wherever they
 appear, along with credentials matching known shapes (GitHub, Stripe, OpenAI,

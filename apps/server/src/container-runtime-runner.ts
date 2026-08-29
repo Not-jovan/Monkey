@@ -1,23 +1,15 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import type { AppConfig } from "./config.js";
-import {
-  buildCodexArgs,
-  errorEvidence,
-  parseCodexEventLine,
-} from "./codex-runner.js";
-import { RunCancelledError } from "./errors.js";
+import { RunCancelledError, runFailureDetail } from "./errors.js";
 import {
   classifyRunFailure,
   noAgentMessageFailure,
   RunFailureError,
 } from "./failures.js";
-import type {
-  AgentRunner,
-  RunUsage,
-  RunnerRequest,
-  RunnerResult,
-} from "./types.js";
+import { RunTranscript, attachFailureTranscript } from "./run-transcript.js";
+import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
+import type { AgentRunner, RunUsage, RunnerRequest, RunnerResult } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,25 +23,33 @@ interface ActiveContainer {
   termination: Promise<void> | null;
 }
 
-interface ParsedEvents {
-  messages: string[];
-  threadId: string | null;
-  usage: RunUsage | null;
-  errors: string[];
-}
-
 export function containerName(agentId: string, instanceId = "default"): string {
   const safeInstance = instanceId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 32);
   const safeAgent = agentId.replace(/[^a-zA-Z0-9_.-]/g, "-").slice(0, 48);
   return "launchpad-" + safeInstance + "-" + safeAgent;
 }
 
+// Generic across every Agent runtime: bind mounts, resource limits, and
+// labeling are identical regardless of which runtime is running; only the
+// env vars forwarded, the home-directory mount, the container entrypoint,
+// and its argv come from the RuntimeDefinition.
 export function buildContainerRunArgs(
   request: RunnerRequest,
   config: AppConfig,
+  runtime: RuntimeDefinition,
+  collectorToken: string,
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
   const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
+  const env = runtime.processEnv(config, collectorToken);
+  // The home-dir var gets its own explicit --env below, pointed at the
+  // container-side mount path rather than the host path processEnv
+  // returns; every other var is forwarded by name from the docker/podman
+  // CLI's own environment (which childEnvironment() below populates with
+  // the same processEnv values).
+  const passthroughEnvNames = Object.keys(env).filter(
+    (key) => key !== runtime.homeEnvVar,
+  );
   return [
     "run",
     "--rm",
@@ -81,10 +81,9 @@ export function buildContainerRunArgs(
     String(config.containerPidsLimit),
     "--user",
     config.containerUser,
+    ...passthroughEnvNames.flatMap((envName) => ["--env", envName]),
     "--env",
-    "ARK_API_KEY",
-    "--env",
-    "CODEX_HOME=/codex-home",
+    runtime.homeEnvVar + "=/runtime-home",
     "--env",
     "HOME=/tmp",
     "--env",
@@ -92,19 +91,23 @@ export function buildContainerRunArgs(
     "--mount",
     "type=bind,src=" + request.workspacePath + ",dst=/workspace",
     "--mount",
-    "type=bind,src=" + config.codexHome + ",dst=/codex-home",
+    "type=bind,src=" + runtime.homeDir(config) + ",dst=/runtime-home",
     "--workdir",
     "/workspace",
     config.containerRuntimeImage,
-    "codex",
-    ...buildCodexArgs(request, config.codexSandboxMode, "/workspace"),
+    runtime.bin(config),
+    ...runtime.buildArgs(request, "/workspace", config),
   ];
 }
 
-export class ContainerCodexRunner implements AgentRunner {
+export class ContainerRuntimeRunner implements AgentRunner {
   private readonly active = new Map<string, ActiveContainer>();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly runtime: RuntimeDefinition,
+    private readonly collectorToken: string,
+  ) {}
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -152,18 +155,23 @@ export class ContainerCodexRunner implements AgentRunner {
 
   async run(request: RunnerRequest): Promise<RunnerResult> {
     if (this.active.has(request.agentId)) {
-      throw new Error("Agent already has an active Runtime container");
+      throw new Error(
+        "Agent already has an active " + this.runtime.id + " Runtime container",
+      );
     }
 
-    const child = spawn(
-      this.config.containerEngine,
-      buildContainerRunArgs(request, this.config),
-      {
-        cwd: request.workspacePath,
-        env: this.childEnvironment(),
-        stdio: ["ignore", "pipe", "pipe"],
-      },
+    const argv = buildContainerRunArgs(
+      request,
+      this.config,
+      this.runtime,
+      this.collectorToken,
     );
+    const transcript = new RunTranscript();
+    const child = spawn(this.config.containerEngine, argv, {
+      cwd: request.workspacePath,
+      env: this.childEnvironment(),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const settled = new Promise<void>((resolve) => {
       child.once("close", () => resolve());
       child.once("error", () => resolve());
@@ -182,12 +190,34 @@ export class ContainerCodexRunner implements AgentRunner {
     const parsed: ParsedEvents = {
       messages: [],
       threadId: request.threadId,
-      usage: null,
+      usage: null as RunUsage | null,
       errors: [],
+      model: null,
     };
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
+    let modelReported = false;
+    // Seeded from the resumed id: onRunStart already bound that one, so
+    // re-announcing it would be noise. A runtime that mints a fresh id on
+    // resume still gets announced, because the value differs.
+    let reportedThreadId = request.threadId;
+
+    // Both ids are resolved by the runtime mid-run rather than known up
+    // front, and both have a caller waiting on them — the sidebar for the
+    // model, the trace pipeline for the conversation. Announced from one
+    // place so neither can be missed on a stream that ends without a
+    // trailing newline.
+    const reportRuntimeIds = () => {
+      if (parsed.model && !modelReported) {
+        modelReported = true;
+        request.onModel?.(parsed.model);
+      }
+      if (parsed.threadId && parsed.threadId !== reportedThreadId) {
+        reportedThreadId = parsed.threadId;
+        request.onThread?.(parsed.threadId);
+      }
+    };
 
     const consume = (chunk: Buffer, target: "stdout" | "stderr") => {
       totalBytes += chunk.byteLength;
@@ -197,11 +227,16 @@ export class ContainerCodexRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
+        transcript.recordStdout(chunk.toString("utf8"));
         stdout += chunk.toString("utf8");
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
-        for (const line of lines) parseCodexEventLine(line, parsed, request.onEvent);
+        for (const line of lines) {
+          this.runtime.parseEventLine(line, parsed, request.onEvent);
+          reportRuntimeIds();
+        }
       } else {
+        transcript.recordStderr(chunk.toString("utf8"));
         stderr += chunk.toString("utf8");
         if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
       }
@@ -218,8 +253,6 @@ export class ContainerCodexRunner implements AgentRunner {
 
     try {
       const exitCode = await new Promise<number>((resolve, reject) => {
-        // A spawn failure is the engine or the image missing, not the agent
-        // doing anything wrong, so it is attributed before it is thrown.
         child.once("error", (error: Error) =>
           reject(
             new RunFailureError(
@@ -229,7 +262,10 @@ export class ContainerCodexRunner implements AgentRunner {
         );
         child.once("close", (code) => resolve(code ?? 1));
       });
-      if (stdout.trim()) parseCodexEventLine(stdout.trim(), parsed, request.onEvent);
+      if (stdout.trim()) {
+        this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
+        reportRuntimeIds();
+      }
       if (active.cancelled) throw new RunCancelledError();
       if (active.timedOut) {
         throw new RunFailureError(
@@ -251,19 +287,45 @@ export class ContainerCodexRunner implements AgentRunner {
       }
       if (exitCode !== 0) {
         throw new RunFailureError(
-          classifyRunFailure(errorEvidence(parsed.errors, stderr), {
+          classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
             exitCode,
             source: "process-exit",
           }),
         );
       }
       const output = parsed.messages.at(-1)?.trim();
-      if (!output) throw new RunFailureError(noAgentMessageFailure());
+      if (!output) {
+        // A runtime can report a failure and still exit 0 (Claude Code sets
+        // is_error on the result event). Attribute it from what it reported
+        // rather than falling through to the generic "no message" verdict,
+        // which would blame the agent for a provider or policy failure.
+        if (parsed.errors.length > 0) {
+          throw new RunFailureError(
+            classifyRunFailure(runFailureDetail(parsed.errors, stderr), {
+              exitCode,
+            }),
+          );
+        }
+        throw new RunFailureError(noAgentMessageFailure());
+      }
       return {
         output,
         threadId: parsed.threadId,
         usage: parsed.usage,
+        model: parsed.model,
       };
+    } catch (error) {
+      // A cancellation is a user action, not a fault worth a transcript.
+      if (!(error instanceof RunCancelledError)) {
+        await attachFailureTranscript(transcript, error, {
+          dataDirectory: this.config.dataDirectory,
+          runtimeId: this.runtime.id,
+          argv,
+          runId: request.runId,
+          redact: request.redact,
+        });
+      }
+      throw error;
     } finally {
       clearTimeout(timeout);
       this.active.delete(request.agentId);
@@ -272,8 +334,8 @@ export class ContainerCodexRunner implements AgentRunner {
 
   private childEnvironment(): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
-      ARK_API_KEY: this.config.arkApiKey,
       NO_COLOR: "1",
+      ...this.runtime.processEnv(this.config, this.collectorToken),
     };
     for (const name of [
       "PATH",

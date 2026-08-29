@@ -1,0 +1,1172 @@
+{
+ "resourceLogs": [
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "host.arch",
+      "value": {
+       "stringValue": "arm64"
+      }
+     },
+     {
+      "key": "os.type",
+      "value": {
+       "stringValue": "darwin"
+      }
+     },
+     {
+      "key": "os.version",
+      "value": {
+       "stringValue": "21.6.0"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "claude-code"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "2.1.251"
+      }
+     }
+    ],
+    "droppedAttributesCount": 0
+   },
+   "scopeLogs": [
+    {
+     "scope": {
+      "name": "com.anthropic.claude_code.events",
+      "version": "2.1.251"
+     },
+     "logRecords": [
+      {
+       "timeUnixNano": "1787995968475000000",
+       "observedTimeUnixNano": "1787995968475000000",
+       "body": {
+        "stringValue": "claude_code.user_prompt"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "user_prompt"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:48.474Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 0
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "prompt_length",
+         "value": {
+          "stringValue": "122"
+         }
+        },
+        {
+         "key": "prompt",
+         "value": {
+          "stringValue": "run ls with Bash, then read notes.txt"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995969559000000",
+       "observedTimeUnixNano": "1787995969559000000",
+       "body": {
+        "stringValue": "claude_code.api_request"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "api_request"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:49.559Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 1
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-haiku-4-5-20251001"
+         }
+        },
+        {
+         "key": "input_tokens",
+         "value": {
+          "intValue": 926
+         }
+        },
+        {
+         "key": "output_tokens",
+         "value": {
+          "intValue": 14
+         }
+        },
+        {
+         "key": "cache_read_tokens",
+         "value": {
+          "intValue": 0
+         }
+        },
+        {
+         "key": "cache_creation_tokens",
+         "value": {
+          "intValue": 0
+         }
+        },
+        {
+         "key": "cost_usd",
+         "value": {
+          "doubleValue": 0.000996
+         }
+        },
+        {
+         "key": "cost_usd_micros",
+         "value": {
+          "intValue": 996
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "intValue": 1106
+         }
+        },
+        {
+         "key": "speed",
+         "value": {
+          "stringValue": "normal"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "generate_session_title"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995969560000000",
+       "observedTimeUnixNano": "1787995969560000000",
+       "body": {
+        "stringValue": "claude_code.assistant_response"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "assistant_response"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:49.560Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 2
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "response_length",
+         "value": {
+          "intValue": 38
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-haiku-4-5-20251001"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "generate_session_title"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995971035000000",
+       "observedTimeUnixNano": "1787995971035000000",
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:51.035Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 3
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "config"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_01Xzkqsd3WUXsndBShB3hTnp"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        },
+        {
+         "key": "tool_parameters",
+         "value": {
+          "stringValue": "{\"bash_command\":\"ls\",\"full_command\":\"ls -la\",\"description\":\"List files in current directory\"}"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995971123000000",
+       "observedTimeUnixNano": "1787995971123000000",
+       "body": {
+        "stringValue": "claude_code.api_request"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "api_request"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:51.123Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 4
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-sonnet-5"
+         }
+        },
+        {
+         "key": "input_tokens",
+         "value": {
+          "intValue": 2
+         }
+        },
+        {
+         "key": "output_tokens",
+         "value": {
+          "intValue": 94
+         }
+        },
+        {
+         "key": "cache_read_tokens",
+         "value": {
+          "intValue": 18534
+         }
+        },
+        {
+         "key": "cache_creation_tokens",
+         "value": {
+          "intValue": 9436
+         }
+        },
+        {
+         "key": "cost_usd",
+         "value": {
+          "doubleValue": 0.042394799999999996
+         }
+        },
+        {
+         "key": "cost_usd_micros",
+         "value": {
+          "intValue": 42395
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "intValue": 2614
+         }
+        },
+        {
+         "key": "speed",
+         "value": {
+          "stringValue": "normal"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "sdk"
+         }
+        },
+        {
+         "key": "effort",
+         "value": {
+          "stringValue": "high"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995972080000000",
+       "observedTimeUnixNano": "1787995972080000000",
+       "body": {
+        "stringValue": "claude_code.tool_result"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_result"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:52.080Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 5
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Bash"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_01Xzkqsd3WUXsndBShB3hTnp"
+         }
+        },
+        {
+         "key": "success",
+         "value": {
+          "stringValue": "true"
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "stringValue": "1042"
+         }
+        },
+        {
+         "key": "tool_parameters",
+         "value": {
+          "stringValue": "{\"bash_command\":\"ls\",\"full_command\":\"ls -la\",\"description\":\"List files in current directory\"}"
+         }
+        },
+        {
+         "key": "tool_input",
+         "value": {
+          "stringValue": "{\"command\":\"ls -la\",\"description\":\"List files in current directory\"}"
+         }
+        },
+        {
+         "key": "tool_input_size_bytes",
+         "value": {
+          "stringValue": "68"
+         }
+        },
+        {
+         "key": "tool_result_size_bytes",
+         "value": {
+          "stringValue": "160"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995973432000000",
+       "observedTimeUnixNano": "1787995973432000000",
+       "body": {
+        "stringValue": "claude_code.retention_sweep"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "retention_sweep"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:53.432Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 6
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "result",
+         "value": {
+          "stringValue": "complete"
+         }
+        },
+        {
+         "key": "period_days",
+         "value": {
+          "stringValue": "30"
+         }
+        },
+        {
+         "key": "used_default",
+         "value": {
+          "stringValue": "true"
+         }
+        },
+        {
+         "key": "transcripts_deleted",
+         "value": {
+          "stringValue": "0"
+         }
+        },
+        {
+         "key": "transcripts_exempted_desktop",
+         "value": {
+          "stringValue": "0"
+         }
+        },
+        {
+         "key": "session_files_deleted",
+         "value": {
+          "stringValue": "0"
+         }
+        },
+        {
+         "key": "artifacts_deleted",
+         "value": {
+          "stringValue": "0"
+         }
+        },
+        {
+         "key": "files_retained_fresh",
+         "value": {
+          "stringValue": "3"
+         }
+        },
+        {
+         "key": "files_past_cutoff",
+         "value": {
+          "stringValue": "0"
+         }
+        },
+        {
+         "key": "error_count",
+         "value": {
+          "stringValue": "0"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "resource": {
+    "attributes": [
+     {
+      "key": "host.arch",
+      "value": {
+       "stringValue": "arm64"
+      }
+     },
+     {
+      "key": "os.type",
+      "value": {
+       "stringValue": "darwin"
+      }
+     },
+     {
+      "key": "os.version",
+      "value": {
+       "stringValue": "21.6.0"
+      }
+     },
+     {
+      "key": "service.name",
+      "value": {
+       "stringValue": "claude-code"
+      }
+     },
+     {
+      "key": "service.version",
+      "value": {
+       "stringValue": "2.1.251"
+      }
+     }
+    ],
+    "droppedAttributesCount": 0
+   },
+   "scopeLogs": [
+    {
+     "scope": {
+      "name": "com.anthropic.claude_code.events",
+      "version": "2.1.251"
+     },
+     "logRecords": [
+      {
+       "timeUnixNano": "1787995974179000000",
+       "observedTimeUnixNano": "1787995974179000000",
+       "body": {
+        "stringValue": "claude_code.tool_decision"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_decision"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:54.178Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 7
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "decision",
+         "value": {
+          "stringValue": "accept"
+         }
+        },
+        {
+         "key": "source",
+         "value": {
+          "stringValue": "config"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Read"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_01VA7QcLarftewmS77q8bXXp"
+         }
+        },
+        {
+         "key": "tool_source",
+         "value": {
+          "stringValue": "builtin"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995974185000000",
+       "observedTimeUnixNano": "1787995974185000000",
+       "body": {
+        "stringValue": "claude_code.api_request"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "api_request"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:54.185Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 8
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-sonnet-5"
+         }
+        },
+        {
+         "key": "input_tokens",
+         "value": {
+          "intValue": 2
+         }
+        },
+        {
+         "key": "output_tokens",
+         "value": {
+          "intValue": 90
+         }
+        },
+        {
+         "key": "cache_read_tokens",
+         "value": {
+          "intValue": 27970
+         }
+        },
+        {
+         "key": "cache_creation_tokens",
+         "value": {
+          "intValue": 245
+         }
+        },
+        {
+         "key": "cost_usd",
+         "value": {
+          "doubleValue": 0.007478
+         }
+        },
+        {
+         "key": "cost_usd_micros",
+         "value": {
+          "intValue": 7478
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "intValue": 2093
+         }
+        },
+        {
+         "key": "speed",
+         "value": {
+          "stringValue": "normal"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "sdk"
+         }
+        },
+        {
+         "key": "effort",
+         "value": {
+          "stringValue": "high"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995974193000000",
+       "observedTimeUnixNano": "1787995974193000000",
+       "body": {
+        "stringValue": "claude_code.tool_result"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "tool_result"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:54.193Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 9
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "tool_name",
+         "value": {
+          "stringValue": "Read"
+         }
+        },
+        {
+         "key": "tool_use_id",
+         "value": {
+          "stringValue": "toolu_01VA7QcLarftewmS77q8bXXp"
+         }
+        },
+        {
+         "key": "success",
+         "value": {
+          "stringValue": "true"
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "stringValue": "13"
+         }
+        },
+        {
+         "key": "tool_input",
+         "value": {
+          "stringValue": "{\"file_path\":\"/workspace/notes.txt\"}"
+         }
+        },
+        {
+         "key": "tool_input_size_bytes",
+         "value": {
+          "stringValue": "81"
+         }
+        },
+        {
+         "key": "tool_result_size_bytes",
+         "value": {
+          "stringValue": "48"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995976339000000",
+       "observedTimeUnixNano": "1787995976339000000",
+       "body": {
+        "stringValue": "claude_code.api_request"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "api_request"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:56.339Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 10
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-sonnet-5"
+         }
+        },
+        {
+         "key": "input_tokens",
+         "value": {
+          "intValue": 2
+         }
+        },
+        {
+         "key": "output_tokens",
+         "value": {
+          "intValue": 16
+         }
+        },
+        {
+         "key": "cache_read_tokens",
+         "value": {
+          "intValue": 28215
+         }
+        },
+        {
+         "key": "cache_creation_tokens",
+         "value": {
+          "intValue": 154
+         }
+        },
+        {
+         "key": "cost_usd",
+         "value": {
+          "doubleValue": 0.006423000000000001
+         }
+        },
+        {
+         "key": "cost_usd_micros",
+         "value": {
+          "intValue": 6423
+         }
+        },
+        {
+         "key": "duration_ms",
+         "value": {
+          "intValue": 2134
+         }
+        },
+        {
+         "key": "speed",
+         "value": {
+          "stringValue": "normal"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "sdk"
+         }
+        },
+        {
+         "key": "effort",
+         "value": {
+          "stringValue": "high"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      },
+      {
+       "timeUnixNano": "1787995976339000000",
+       "observedTimeUnixNano": "1787995976339000000",
+       "body": {
+        "stringValue": "claude_code.assistant_response"
+       },
+       "attributes": [
+        {
+         "key": "session.id",
+         "value": {
+          "stringValue": "612d1c5d-7a46-4f81-9142-b9bc63f3e434"
+         }
+        },
+        {
+         "key": "terminal.type",
+         "value": {
+          "stringValue": "xterm-256color"
+         }
+        },
+        {
+         "key": "event.name",
+         "value": {
+          "stringValue": "assistant_response"
+         }
+        },
+        {
+         "key": "event.timestamp",
+         "value": {
+          "stringValue": "2026-08-29T09:32:56.339Z"
+         }
+        },
+        {
+         "key": "event.sequence",
+         "value": {
+          "intValue": 11
+         }
+        },
+        {
+         "key": "prompt.id",
+         "value": {
+          "stringValue": "75e8b54c-8a9f-4246-bae8-a764206b1c6f"
+         }
+        },
+        {
+         "key": "response_length",
+         "value": {
+          "intValue": 46
+         }
+        },
+        {
+         "key": "model",
+         "value": {
+          "stringValue": "claude-sonnet-5"
+         }
+        },
+        {
+         "key": "query_source",
+         "value": {
+          "stringValue": "sdk"
+         }
+        }
+       ],
+       "droppedAttributesCount": 0
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
