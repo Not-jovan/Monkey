@@ -345,3 +345,13 @@ export function buildSecretContext(
     .filter((line) => line.length > 0)
     .join("\n");
 }
+
+// What each check answers, named so the assembly that reads them does not
+// have to restate seven zod inferences.
+export type SummaryVerdict = z.infer<typeof summaryVerdict>;
+export type IntentStepVerdict = z.infer<typeof intentStepVerdict>;
+export type InjectionVerdict = z.infer<typeof injectionVerdict>;
+export type SecretRelevanceVerdict = z.infer<typeof secretRelevanceVerdict>;
+export type NetworkVerdict = z.infer<typeof networkVerdict>;
+export type ToolMisuseVerdict = z.infer<typeof toolMisuseVerdict>;
+export type SinkWriteVerdict = z.infer<typeof sinkWriteVerdict>;

@@ -221,26 +221,30 @@ export function instructionsDriftFinding(
   );
 }
 
+// Everything a step's checks concluded, in the shape the emitter reads. Named
+// so the assembly that builds it and the emitter that consumes it agree by
+// type rather than by inline repetition.
+export interface PolicyFindings {
+  notInAlignment: string[];
+  newObjectives: NewObjectiveFinding[];
+  networkViolations: string[];
+  secretExposures: SecretExposureFinding[];
+  promptInjections?: PromptInjectionFinding[];
+  suspiciousActions?: SuspiciousActionFinding[];
+  actedOnExternalInstructions?: string[];
+  // PLAN_AUDITOR check 5: the specific arguments that would escape the
+  // sandbox or escalate privileges, rather than a bare "misuse" flag.
+  toolMisuseFlags?: string[];
+  // PLAN_AUDITOR check 6: what a sink write turned out to contain.
+  sinkWrites?: { target: string; classification: string; reason: string }[];
+}
 export function emitPolicyFindings(
   push: (
     type: AuditTraceStep["type"],
     category: AuditTraceStep["category"],
     finding: string,
   ) => void,
-  policies: {
-    notInAlignment: string[];
-    newObjectives: NewObjectiveFinding[];
-    networkViolations: string[];
-    secretExposures: SecretExposureFinding[];
-    promptInjections?: PromptInjectionFinding[];
-    suspiciousActions?: SuspiciousActionFinding[];
-    actedOnExternalInstructions?: string[];
-    // PLAN_AUDITOR check 5: the specific arguments that would escape the
-    // sandbox or escalate privileges, rather than a bare "misuse" flag.
-    toolMisuseFlags?: string[];
-    // PLAN_AUDITOR check 6: what a sink write turned out to contain.
-    sinkWrites?: { target: string; classification: string; reason: string }[];
-  },
+  policies: PolicyFindings,
 ) {
   // PLAN_AUDITOR check 3 raises a *suspicion* here, not a warning: a step is
   // judged in isolation, and in isolation "this looks off" is as much as the
