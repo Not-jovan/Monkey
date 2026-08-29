@@ -243,19 +243,37 @@ about the Agent, so they are excluded from warning counts.
 
 ## Intent
 
-The specification an Agent is judged against is not fixed at creation. The
-Agent's instructions seed the objective; every later message is classified as
-`NO_CHANGE` or `INTENT_UPDATE`, and an update appends a standing constraint
-that governs all subsequent audits.
+The specification an Agent is judged against is not fixed at creation.
+
+**Instructions are the source of truth.** `agent.instructions` is written to the
+workspace's `AGENTS.md` and is what the Agent actually reads, so the intent
+record mirrors it rather than keeping a second opinion. Editing the instructions
+in Agent settings appends a version and moves the objective with them; editing
+any other field appends nothing. Before this, an instructions edit changed what
+the Agent followed while the auditor went on enforcing the spec it had replaced.
+
+**The conversation extends the spec without rewriting the instructions.** Every
+message is classified as `NO_CHANGE` or `INTENT_UPDATE`; an update adds standing
+constraints, and can now also *remove* one, because a message that relaxes a rule
+("actually, you can read .env now") previously had nowhere to go but appending
+the opposite of the rule it was lifting.
+
+**A conversational pivot is recorded as a divergence, never written back
+silently.** If the conversation replaces the objective, the instructions are left
+untouched and the two are shown as diverged; the auditor judges against the
+objective and says so. Adopting the divergence writes it into the instructions
+and regenerates `AGENTS.md`, collapsing back to one source of truth. That step is
+always a human action — a classification never edits configuration on its own.
 
 The discriminator is durability, not topic. "Use PostgreSQL instead of SQLite"
 is work; "From now on, use PostgreSQL instead of SQLite" is a rule. Questions
 that seek information ("Should we use PostgreSQL?") are not updates; questions
 that demand a change ("Can you avoid using `any`?") are.
 
-Classification is queued rather than awaited, so a slow model never delays a
-message. A detected change appends a new intent version immediately and governs
-later audits.
+Classification is queued before the Run starts rather than awaited, so a slow
+model never delays the response — but the ordering is what matters: each step
+audit waits for the queue to drain, so a constraint is in force for the very Run
+that stated it rather than taking effect partway through.
 
 Each version records what changed and why: the message that triggered it, the
 classifier's reasoning, the constraints added, and the run the message belonged
@@ -307,7 +325,8 @@ the continuation of earlier work is not flagged as unmotivated.
 | `GET /api/agents/:id/traces` | Trace list rows with failure attribution, warning counts, and audit health. |
 | `GET /api/agents/:id/failures` | The Agent's failures grouped by kind, newest first. |
 | `GET /api/agents/:id/intent` | Current objective, standing constraints, the ordered version list, and current intentId. |
-| `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. |
+| `POST /api/agents/:id/intent/revert` | Append a version restoring an earlier one. Body: `{ "intentId": "..." }`. A revert restores the objective and constraints, never the instructions — it cannot rewrite `AGENTS.md`, so claiming to would make the record lie. |
+| `POST /api/agents/:id/intent/adopt` | Write a diverged objective into the Agent's instructions, regenerating `AGENTS.md`. 409 when nothing has diverged. |
 | `GET /api/traces/:id` | One trace with its audits, derived findings, audit health, and carried-in/out context. |
 | `GET /api/traces/:id/export` | The same payload as a download. |
 
@@ -381,6 +400,27 @@ Against the 56-case dataset from the intent plan, the current prompt scores
 written against these same distinctions, so treat that number as a regression
 signal, not as a generalisation estimate.
 
+That recall is measured on the *label*. The script also reports **effective
+recall**: of the real intent updates, how many actually changed the spec. A
+verdict that says `INTENT_UPDATE` but extracts no constraint, no removal and no
+objective changes nothing — `IntentService.classify` returns early on exactly
+that — so a label counted as caught can still have been caught in name only.
+Scoring the extracted constraint *text* would need expected wording added to the
+fixture, which today carries only the binary label.
+
+The judged half of the **step** audit is measured the same way:
+
+```bash
+npm run eval:audit -w @launchpad/server
+```
+
+It replays the 20-case audit dataset through the shipping prompt and context
+builder, and scores intent misalignment and acted-upon injected objectives
+against the `expected.intent` block those cases have always carried and which
+nothing read. The deterministic half of the same dataset is asserted in
+`deterministic.test.ts` and runs in `npm test`; only the judged half needs a
+model.
+
 ## Limitations
 
 **Codex writes the Ark key to disk.** Codex CLI 0.111.0 persists
@@ -404,13 +444,26 @@ arguments and shell commands in the trace. A request the Agent makes without it
 appearing there is not seen by the whitelist check. This is instrumentation, not
 egress enforcement — it reports, it does not block.
 
-**Intent updates apply after the message.** Classification runs asynchronously,
-so a constraint stated in a message governs audits from shortly after that
-message rather than atomically with it.
+**Intent updates govern the run that stated them.** Classification is queued
+before the Run starts, and each step audit waits for that queue to drain, so a
+constraint stated in a message is in force for the Run it arrived with. If the
+classifier cannot produce a verdict after three attempts the change is *not*
+applied — and that is recorded as an `audit-health` finding on the Run rather
+than being dropped in silence.
 
-**One judged call per step.** Long Runs are capped at 30 step audits per trace
-to bound cost. The Run-level intent audit is always performed and is not counted
-against that budget.
+**Step auditing is capped, and says when it stops.** Long Runs are capped at 30
+step audits per trace to bound cost. Reaching the cap records an `audit-health`
+finding naming it, so a partially-audited Run cannot be mistaken for a clean one.
+The Run-level intent audit is always performed and is not counted against that
+budget. A verdict that comes back unparseable is retried up to three times before
+the step's judged half is given up on.
+
+**The Agent can edit the file it is governed by.** `AGENTS.md` lives in the
+workspace and the default sandbox is `workspace-write`. The platform compares the
+file against the Agent's recorded instructions either side of every Run: an edit
+made *during* a Run is attributed to it and reported as `security`, while a file
+that was already wrong when the Run began names no culprit and is reported as
+`audit-health`. Detection, not prevention — the Run still happens.
 
 **A recovered run is not a clean run.** `recoveredErrorCount` counts the errors
 a Run survived, and is zero on a failed Run — where the last error is the

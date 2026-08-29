@@ -74,6 +74,12 @@ async function main() {
     message: string;
     expected: boolean;
     actual: boolean | null;
+    // Whether the classification produced something the service would act on.
+    // IntentService.classify returns early when a verdict yields no new
+    // constraint, no removal and no objective — so an INTENT_UPDATE that
+    // extracts nothing is silently a NO_CHANGE, and scoring the label alone
+    // counts it as a success.
+    effective: boolean | null;
     reason: string;
     attempts: number;
   }[] = [];
@@ -85,19 +91,37 @@ async function main() {
       cursor += 1;
       const entry = cases[index];
       if (!entry) return;
-      const outcome = await classifyIntent(
-        client,
-        model,
-        { objective: entry.originalIntent, extended: entry.extendedIntent },
-        entry.message,
-      );
+      const state = {
+        instructions: "",
+        objective: entry.originalIntent,
+        extended: entry.extendedIntent,
+      };
+      const outcome = await classifyIntent(client, model, state, entry.message);
+      const verdict = outcome.classification;
+      // Mirrors the service's own rule for "did anything change".
+      const inForce = new Set(state.extended);
+      const effective =
+        verdict === null
+          ? null
+          : verdict.extendedIntent.some(
+              (entry) => entry.trim().length > 0 && !inForce.has(entry.trim()),
+            ) ||
+            verdict.removedIntent.some((candidate) =>
+              state.extended.some(
+                (existing) =>
+                  existing.trim().toLowerCase().replace(/[.\s]+$/, "") ===
+                  candidate.trim().toLowerCase().replace(/[.\s]+$/, ""),
+              ),
+            ) ||
+            (verdict.objective !== null &&
+              verdict.objective.trim().length > 0 &&
+              verdict.objective.trim() !== state.objective);
       results.push({
         index,
         message: entry.message,
         expected: entry.expectNewIntent,
-        actual: outcome.classification
-          ? outcome.classification.classification === "INTENT_UPDATE"
-          : null,
+        actual: verdict ? verdict.classification === "INTENT_UPDATE" : null,
+        effective,
         reason: outcome.classification?.reason ?? (outcome.failure ?? ""),
         attempts: outcome.attempts,
       });
@@ -162,6 +186,38 @@ async function main() {
   );
   const retried = results.filter((result) => result.attempts > 1).length;
   console.log("Schema retries " + retried + "/" + results.length);
+
+  // Recall above is measured on the label. What governs every later audit is
+  // whether the spec actually moved — and a verdict that says INTENT_UPDATE but
+  // extracts no constraint, no removal and no objective changes nothing at all.
+  // The service returns early on exactly that case, so the two numbers diverging
+  // is the measure of how often a "caught" update was caught in name only.
+  const realUpdates = results.filter((result) => result.expected);
+  const effectivelyCaught = realUpdates.filter(
+    (result) => result.effective === true,
+  ).length;
+  console.log(
+    "\nEffective recall " +
+      pct(effectivelyCaught, realUpdates.length) +
+      "  (of the real intent updates, how many actually changed the spec)",
+  );
+  const hollow = results.filter(
+    (result) => result.actual === true && result.effective === false,
+  );
+  if (hollow.length > 0) {
+    console.log(
+      "Called INTENT_UPDATE but extracted nothing actionable (" +
+        hollow.length +
+        "):",
+    );
+    for (const entry of hollow) {
+      console.log("  " + JSON.stringify(entry.message));
+      if (entry.reason) console.log("      reason: " + entry.reason);
+    }
+  }
+  // Scoring the constraint *text* would need expected wording added to the 56
+  // fixture cases; today they carry only the binary label, so the closest
+  // honest measure is whether anything actionable came out at all.
 }
 
 await main();
