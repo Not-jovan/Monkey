@@ -326,6 +326,7 @@ export class AuditService {
       );
     });
     this.resumeUnfinishedRunAudits();
+    this.resumeInterruptedMetaAudits();
   }
 
   // A run interrupted by a restart is rewritten from running to failed by
@@ -358,6 +359,49 @@ export class AuditService {
           "only the newest " +
           MAX_RESUMED_RUN_AUDITS +
           " are retried at boot.",
+      );
+    }
+  }
+
+  // A requested audit of an auditor that stopped partway is the one case where
+  // re-triggering is finishing what was asked rather than deciding to ask.
+  // Someone requested that pass, its verdicts are on disk and were paid for,
+  // and the document says it never ended.
+  //
+  // interruptedPass is the entire guard, and it is why this cannot reuse the
+  // sweep above. That one treats "no run-level answer" as pending, which for
+  // an auditor trace is the normal state: auditing an auditor is always
+  // requested, so nearly every auditor trace ever recorded has no document at
+  // all and would be swept into a full pass nobody asked for. Requiring
+  // answers already on file distinguishes a pass that was interrupted from one
+  // that was never asked for. A pass that died before answering anything is
+  // deliberately not resumed either — there is nothing to carry on from, and
+  // it costs the same as being asked again.
+  private resumeInterruptedMetaAudits() {
+    const pending = this.deps.traceStore
+      .list()
+      .filter(
+        (trace) =>
+          isAuditorTrace(trace) &&
+          trace.status !== "running" &&
+          this.deps.auditStore.interruptedPass(trace.id),
+      );
+    for (const trace of pending.slice(0, MAX_RESUMED_RUN_AUDITS)) {
+      // Through audit() rather than requestedAudit directly, so the
+      // one-at-a-time guard applies to a resumed pass exactly as it does to a
+      // requested one.
+      this.enqueue(async () => {
+        await this.audit(trace.id);
+      });
+    }
+    const skipped = pending.length - MAX_RESUMED_RUN_AUDITS;
+    if (skipped > 0) {
+      this.deps.log?.(
+        skipped +
+          " interrupted audits of auditors were not resumed at boot; only " +
+          "the newest " +
+          MAX_RESUMED_RUN_AUDITS +
+          " are. Re-running one from its trace picks up where it stopped.",
       );
     }
   }

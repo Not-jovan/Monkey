@@ -2666,33 +2666,33 @@ describe("AuditService step evidence caching", () => {
 // survived on disk rather than start the whole pass again â€” and it must not
 // re-ask questions it already has verdicts for, because those are billed model
 // calls.
+// Reopens every store over the same directory, which is what a restart
+// actually is: the in-memory chat state is gone, only the files remain.
+async function reopen(directory: string) {
+  const traceStore = new TraceStore(path.join(directory, "traces"));
+  await traceStore.initialize();
+  const traceService = new TraceService(
+    traceStore,
+    createRedactor([]),
+    codexRuntime.trace,
+  );
+  const auditStore = new AuditStore(path.join(directory, "audits"));
+  await auditStore.initialize();
+  const contextStore = new ContextStore(path.join(directory, "context"));
+  await contextStore.initialize();
+  new ContextService({ traceStore, store: contextStore }).start();
+  const auditMemory = new AuditMemory(path.join(directory, "agent-runs"));
+  return {
+    traceStore,
+    traceService,
+    auditStore,
+    contextStore,
+    auditMemory,
+    directory,
+  };
+}
 
 describe("AuditService crash recovery", () => {
-  // Reopens every store over the same directory, which is what a restart
-  // actually is: the in-memory chat state is gone, only the files remain.
-  async function reopen(directory: string) {
-    const traceStore = new TraceStore(path.join(directory, "traces"));
-    await traceStore.initialize();
-    const traceService = new TraceService(
-      traceStore,
-      createRedactor([]),
-      codexRuntime.trace,
-    );
-    const auditStore = new AuditStore(path.join(directory, "audits"));
-    await auditStore.initialize();
-    const contextStore = new ContextStore(path.join(directory, "context"));
-    await contextStore.initialize();
-    new ContextService({ traceStore, store: contextStore }).start();
-    const auditMemory = new AuditMemory(path.join(directory, "agent-runs"));
-    return {
-      traceStore,
-      traceService,
-      auditStore,
-      contextStore,
-      auditMemory,
-      directory,
-    };
-  }
   const TRACE = "trace-crash";
 
 
@@ -2924,6 +2924,70 @@ describe("resuming an interrupted audit of an auditor", () => {
     ).toBe(true);
   });
 
+  // The same resume, across a real restart rather than within one process.
+  // The verdicts an interrupted pass produced live in the audit document on
+  // disk, so a new AuditStore over the same directory is the only thing the
+  // next attempt needs to know what it already paid for. Nothing is held in
+  // the chat state that survives the crash, which is exactly why this is
+  // worth asserting separately.
+  it("still skips the answered steps after the process restarts", async () => {
+    const { stores, auditTraceId, spans } =
+      await auditorTraceWithSteps("trace-resume-restart");
+    const auditorTrace = stores.traceStore.get(auditTraceId)!;
+    stores.auditStore.replaceSpan(
+      auditorTrace,
+      spans[0]!.id,
+      [
+        {
+          id: "survived-the-crash",
+          traceId: auditTraceId,
+          agentId: auditorTrace.agentId,
+          spanId: spans[0]!.id,
+          intentId: "",
+          type: "warning",
+          category: "security",
+          finding: "answered before the crash",
+        },
+      ],
+      "",
+    );
+    await stores.auditStore.flush();
+    await stores.traceStore.flush();
+    await stores.auditMemory.flush();
+
+    const restarted = await reopen(stores.directory);
+    // Read off disk, not carried over: this is what tells the next pass it is
+    // continuing one rather than starting a new one.
+    expect(restarted.auditStore.interruptedPass(auditTraceId)).toBe(true);
+    expect(restarted.auditStore.hasSpanAudit(auditTraceId, spans[0]!.id)).toBe(
+      true,
+    );
+
+    const after: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
+          ? '{"unsupportedFindings":[],"missedSignals":[],"reason":"r"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(restarted, after);
+    await service.audit(auditTraceId);
+    await service.idle();
+
+    // The step judged before the crash is not bought a second time.
+    expect(metaCalls(after)).toBe(spans.length - 1 + RUN_LEVEL_PASS);
+    expect(
+      restarted.auditStore
+        .listByTrace(auditTraceId)
+        .some((entry) => entry.id === "survived-the-crash"),
+    ).toBe(true);
+    expect(restarted.auditStore.isRunComplete(auditTraceId)).toBe(true);
+
+    await restarted.auditStore.flush();
+    await restarted.traceStore.flush();
+    await restarted.auditMemory.flush();
+    await restarted.contextStore.flush();
+  });
 
   it("asks again for everything when the previous pass finished", async () => {
     const { responder, service, auditTraceId, spans } =
@@ -3082,5 +3146,151 @@ describe("AuditService step index gaps", () => {
         message.includes("missing from the audit step index"),
       ),
     ).toBe(false);
+  });
+});
+
+// A crash during an audit of an auditor leaves verdicts on disk and no
+// run-level answer. Nobody has to press anything for that to be finished: the
+// request still stands, and what it already paid for is still on file.
+describe("resuming an interrupted audit of an auditor at boot", () => {
+  const META_RESPONSE =
+    '{"unsupportedFindings":[],"missedSignals":[],"reason":"r"}';
+
+  async function seedAuditorTrace(traceId: string) {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta" ? META_RESPONSE : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, traceId);
+    stores.traceStore.appendSpan(traceId, promptSpan(traceId, "count files"));
+    await service.idle();
+    const auditTraceId = stores.traceStore.auditorTraceFor(traceId)!;
+    // The auditor's own run has to have ended before it can be audited: the
+    // UI only offers Audit on a finished trace, and a still-running one never
+    // records a completion time for the pass.
+    stores.traceStore.updateTrace(auditTraceId, (record) => {
+      record.status = "completed";
+      record.endedAt = "2026-08-26T12:00:10.000Z";
+    });
+    await service.idle();
+    const spans = (stores.traceStore.get(auditTraceId)?.spans ?? []).filter(
+      (span) => span.kind === "model_call",
+    );
+    return { stores, auditTraceId, spans };
+  }
+
+  function judged(auditTraceId: string, trace: TraceRecord, spanId: string) {
+    return {
+      id: "answered-" + spanId,
+      traceId: auditTraceId,
+      agentId: trace.agentId,
+      spanId,
+      intentId: "",
+      type: "warning" as const,
+      category: "security" as const,
+      finding: "answered before the crash",
+    };
+  }
+
+  async function persist(stores: Awaited<ReturnType<typeof makeStores>>) {
+    await stores.auditStore.flush();
+    await stores.traceStore.flush();
+    await stores.auditMemory.flush();
+  }
+
+  it("finishes the pass on the next boot without anyone asking again", async () => {
+    const { stores, auditTraceId, spans } = await seedAuditorTrace("trace-boot");
+    const auditorTrace = stores.traceStore.get(auditTraceId)!;
+    stores.auditStore.replaceSpan(
+      auditorTrace,
+      spans[0]!.id,
+      [judged(auditTraceId, auditorTrace, spans[0]!.id)],
+      "",
+    );
+    await persist(stores);
+
+    const restarted = await reopen(stores.directory);
+    const after: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta" ? META_RESPONSE : SAFE_VERDICT,
+    };
+    // start() is called by makeAudit, which is where the boot sweep runs.
+    const service = makeAudit(restarted, after);
+    await service.idle();
+
+    // Finished, with nothing requested by hand.
+    expect(restarted.auditStore.isRunComplete(auditTraceId)).toBe(true);
+    // And it carried on: the verdict from before the crash is still the one on
+    // file, so that step was not asked a second time.
+    expect(
+      restarted.auditStore
+        .listByTrace(auditTraceId)
+        .some((entry) => entry.id === "answered-" + spans[0]!.id),
+    ).toBe(true);
+
+    await persist(restarted);
+    await restarted.contextStore.flush();
+  });
+
+  // The reason the run-level sweep excludes auditor traces outright. Auditing
+  // an auditor is always requested, so an auditor trace with no document is
+  // the normal case, not a pending one — resuming on "no run-level answer"
+  // would buy a full pass for every auditor trace ever recorded.
+  it("leaves an auditor nobody ever audited alone", async () => {
+    const { stores, auditTraceId } = await seedAuditorTrace("trace-untouched");
+    expect(stores.auditStore.isRunComplete(auditTraceId)).toBe(false);
+    await persist(stores);
+
+    const restarted = await reopen(stores.directory);
+    const after: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta" ? META_RESPONSE : SAFE_VERDICT,
+    };
+    const service = makeAudit(restarted, after);
+    await service.idle();
+
+    expect(after.calls.filter((call) => call.check === "meta")).toEqual([]);
+    expect(restarted.auditStore.listByTrace(auditTraceId)).toEqual([]);
+
+    await persist(restarted);
+    await restarted.contextStore.flush();
+  });
+
+  // A pass that finished is a question that was answered. Asking it again is a
+  // new request, not a resumption, and boot is not the operator asking.
+  // A pass that finished is a question that was answered. Asking it again is a
+  // new request, not a resumption, and boot is not the operator asking. Run
+  // for real rather than forged, so "completed" means what the service means
+  // by it.
+  it("does not re-run an audit of an auditor that completed", async () => {
+    const { stores, auditTraceId } = await seedAuditorTrace("trace-done");
+    const first = makeAudit(stores, {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta" ? META_RESPONSE : SAFE_VERDICT,
+    });
+    await first.audit(auditTraceId);
+    await first.idle();
+    expect(stores.auditStore.isRunComplete(auditTraceId)).toBe(true);
+    await persist(stores);
+
+    const restarted = await reopen(stores.directory);
+    const after: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta" ? META_RESPONSE : SAFE_VERDICT,
+    };
+    const service = makeAudit(restarted, after);
+    await service.idle();
+
+    expect(after.calls.filter((call) => call.check === "meta")).toEqual([]);
+
+    await persist(restarted);
+    await restarted.contextStore.flush();
   });
 });
