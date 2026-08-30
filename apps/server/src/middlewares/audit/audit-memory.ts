@@ -161,18 +161,34 @@ export class AuditMemory {
     await Promise.all([...this.locks.values()]);
   }
 
+  // An empty index still comes back either way: refusing to audit because the
+  // index is unreadable would be worse than auditing with less of it.
+  //
+  // But a file that exists and cannot be read is not the same as one that was
+  // never written, and only the first is worth anyone's attention. The run-level
+  // pass reads its open questions from here, so an index lost this way takes
+  // the backtrace with it and nothing else would ever say so.
   private async readMetaUnlocked(folder: string): Promise<StepsMeta> {
+    const file = path.join(folder, META_FILE);
+    let raw: string;
     try {
-      const raw = await readFile(path.join(folder, META_FILE), "utf8");
+      raw = await readFile(file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.log?.("could not read the audit step index at " + file, error);
+      }
+      return {};
+    }
+    try {
       const parsed = stepsMetaSchema.safeParse(JSON.parse(raw));
-      return parsed.success ? parsed.data : {};
-    } catch {
-      // No meta yet, or a file we cannot read: an empty index is the honest
-      // answer and lets the next write rebuild it.
+      if (parsed.success) return parsed.data;
+      this.log?.("the audit step index at " + file + " did not parse");
+      return {};
+    } catch (error) {
+      this.log?.("the audit step index at " + file + " is not readable", error);
       return {};
     }
   }
-
   private async atomicWrite(filePath: string, contents: string) {
     const temporary = filePath + ".tmp";
     await writeFile(temporary, contents, { encoding: "utf8", mode: 0o600 });

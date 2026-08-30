@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -194,5 +194,57 @@ describe("workpadExcerpt", () => {
 
   it("falls back to the index summary when the markdown is missing", () => {
     expect(workpadExcerpt(null, "read .env")).toBe("read .env");
+  });
+});
+
+// The run-level pass reads its open questions from this index and has no other
+// source for them, so an index lost here takes the backtrace with it. An empty
+// answer is still the right one — auditing with less beats refusing to audit —
+// but it must not be the same silence as a run that simply had no steps.
+describe("AuditMemory step index failures", () => {
+  async function memoryWithLog() {
+    const root = await mkdtemp(path.join(tmpdir(), "audit-memory-"));
+    const messages: string[] = [];
+    const memory = new AuditMemory(path.join(root, "agent-runs"), (message) =>
+      messages.push(message),
+    );
+    cleanups.push(async () => {
+      await memory.flush();
+      await rm(root, { recursive: true, force: true, maxRetries: 5 });
+    });
+    return { memory, messages };
+  }
+
+  it("says nothing when there is simply no index yet", async () => {
+    const { memory, messages } = await memoryWithLog();
+
+    expect(await memory.readMeta("agent-1", "chat-1")).toEqual({});
+    expect(messages).toEqual([]);
+  });
+
+  it("reports an index that exists and will not parse", async () => {
+    const { memory, messages } = await memoryWithLog();
+    const folder = memory.folderFor("agent-1", "chat-1");
+    await mkdir(folder, { recursive: true });
+    await writeFile(path.join(folder, "steps-meta.json"), "{not json", "utf8");
+
+    expect(await memory.readMeta("agent-1", "chat-1")).toEqual({});
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("steps-meta.json");
+  });
+
+  it("reports an index whose shape is wrong", async () => {
+    const { memory, messages } = await memoryWithLog();
+    const folder = memory.folderFor("agent-1", "chat-1");
+    await mkdir(folder, { recursive: true });
+    await writeFile(
+      path.join(folder, "steps-meta.json"),
+      JSON.stringify({ "span-1": "not an entry" }),
+      "utf8",
+    );
+
+    expect(await memory.readMeta("agent-1", "chat-1")).toEqual({});
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("did not parse");
   });
 });

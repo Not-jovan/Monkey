@@ -604,13 +604,35 @@ export class AuditService {
     );
   }
 
-  // Disk when a memory folder is configured, the in-process draft otherwise.
-  // Same shape either way, so auditAll can commit from one source.
+  // The index the run-level pass reads its open questions from.
+  //
+  // Stored wins wherever both have an entry: it is what survives a restart.
+  // The draft fills only the gaps, because a step this process judged whose
+  // record could not be written to disk is still a step that was judged — and
+  // dropping it here silently starves the backtrace, which has no other source
+  // for the suspicions it exists to settle.
+  //
+  // After a restart the draft is empty and this is the stored index exactly, so
+  // nothing about resuming changes.
   private async metaFor(chat: AgentChatAuditor): Promise<StepsMeta> {
-    if (this.deps.memory) {
-      return this.deps.memory.readMeta(chat.agentId, chat.chatId);
+    const draft = chat.draftMeta();
+    if (!this.deps.memory) return draft;
+    const stored = await this.deps.memory.readMeta(chat.agentId, chat.chatId);
+    // Every step's record is awaited before the run-level pass reads the index,
+    // so a step this process judged that is missing from disk means the write
+    // did not land. The draft covers it either way; saying so is what turns a
+    // silently thinner audit into something anyone can act on.
+    const missing = Object.keys(draft).filter((spanId) => !stored[spanId]);
+    if (missing.length > 0) {
+      this.deps.log?.(
+        missing.length +
+          " step record(s) for run " +
+          chat.chatId +
+          " are missing from the audit step index and were read from memory " +
+          "instead. Their findings survive this process and not a restart.",
+      );
     }
-    return chat.draftMeta();
+    return { ...draft, ...stored };
   }
 
   // PLAN_AUDITOR's auditStep: checks 0-6, concurrently, each with its own

@@ -2666,9 +2666,8 @@ describe("AuditService step evidence caching", () => {
 // survived on disk rather than start the whole pass again — and it must not
 // re-ask questions it already has verdicts for, because those are billed model
 // calls.
-describe("AuditService crash recovery", () => {
-  const TRACE = "trace-crash";
 
+describe("AuditService crash recovery", () => {
   // Reopens every store over the same directory, which is what a restart
   // actually is: the in-memory chat state is gone, only the files remain.
   async function reopen(directory: string) {
@@ -2694,6 +2693,8 @@ describe("AuditService crash recovery", () => {
       directory,
     };
   }
+  const TRACE = "trace-crash";
+
 
   it("resumes the unfinished audit and re-asks only what has no verdict", async () => {
     const stores = await makeStores();
@@ -2923,6 +2924,7 @@ describe("resuming an interrupted audit of an auditor", () => {
     ).toBe(true);
   });
 
+
   it("asks again for everything when the previous pass finished", async () => {
     const { responder, service, auditTraceId, spans } =
       await auditorTraceWithSteps("trace-fresh");
@@ -2938,5 +2940,147 @@ describe("resuming an interrupted audit of an auditor", () => {
 
     // A finished pass is not carried on from: asking again asks everything.
     expect(metaCalls(responder)).toBe(spans.length + RUN_LEVEL_PASS);
+  });
+});
+
+// The run-level pass reads its open questions from the step index, and the
+// index is the only route to them. A step whose record could not be written to
+// disk still has findings in this process, and dropping them here made the
+// backtrace skip in silence — indistinguishable from a run with nothing to
+// settle.
+describe("AuditService step index", () => {
+  // A memory that takes the markdown but cannot keep the index, which is what
+  // a failed or unreadable steps-meta.json looks like from the service.
+  class ForgetfulMemory extends AuditMemory {
+    override async updateMeta(_agentId: string, _chatId: string) {
+      // Swallowed rather than thrown: the point is an index that ends up empty
+      // while the audit itself reports success.
+    }
+    override async readMeta(_agentId: string, _chatId: string) {
+      return {};
+    }
+  }
+
+  it("still sees a step the index lost", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "intent"
+          ? '{"notInAlignment":["wandered off the objective"],"newObjectives":[]}'
+          : SAFE_VERDICT,
+    };
+    const forgetful = new ForgetfulMemory(path.join(stores.directory, "gone"));
+    const service = makeAudit(
+      stores,
+      responder,
+      null,
+      noChangeReducer(),
+      undefined,
+      forgetful,
+    );
+
+    seedTrace(stores.traceStore, "trace-index-lost");
+    stores.traceStore.appendSpan(
+      "trace-index-lost",
+      promptSpan("trace-index-lost", "count the files"),
+    );
+    await settle(service, stores, "trace-index-lost");
+
+    // The index is empty, so before the draft was merged in there was nothing
+    // to trace back and the pass said nothing about it.
+    expect(await forgetful.readMeta("agent-1", "trace-index-lost")).toEqual({});
+    expect(
+      responder.calls.some((call) => call.check === "back-trace"),
+    ).toBe(true);
+  });
+
+  it("uses the stored index after a restart, when there is no draft", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-index-kept");
+    stores.traceStore.appendSpan(
+      "trace-index-kept",
+      toolSpan("trace-index-kept", "ok"),
+    );
+    await settle(service, stores, "trace-index-kept");
+    await stores.auditMemory.flush();
+
+    // A fresh memory over the same folder is what a restart leaves: no draft,
+    // only what reached disk.
+    const reopened = new AuditMemory(stores.auditMemory.root);
+    const stored = await reopened.readMeta("agent-1", "trace-index-kept");
+
+    expect(Object.keys(stored).length).toBeGreaterThan(0);
+  });
+});
+
+// Recovering from the draft keeps the audit whole, but a step record that
+// never reached disk will not survive a restart. Saying so is what separates a
+// quietly thinner audit from one anybody can act on.
+describe("AuditService step index gaps", () => {
+  it("reports the step records that were missing from the index", async () => {
+    const stores = await makeStores();
+    class Forgetful extends AuditMemory {
+      override async updateMeta(_agentId: string, _chatId: string) {}
+      override async readMeta(_agentId: string, _chatId: string) {
+        return {};
+      }
+    }
+    const messages: string[] = [];
+    const service = new AuditService({
+      traceStore: stores.traceStore,
+      auditStore: stores.auditStore,
+      traceService: stores.traceService,
+      context: stores.contextStore,
+      runner: runnerFor(fakeClient({ calls: [], respond: () => SAFE_VERDICT })),
+      securityModel: "sec-model",
+      intentModel: "intent-model",
+      networkWhitelist: null,
+      intentReducer: noChangeReducer(),
+      memory: new Forgetful(path.join(stores.directory, "gone")),
+      enabled: true,
+      log: (message) => messages.push(message),
+    });
+    service.start();
+    seedTrace(stores.traceStore, "trace-gap");
+    stores.traceStore.appendSpan("trace-gap", toolSpan("trace-gap", "ok"));
+    await settle(service, stores, "trace-gap");
+
+    expect(
+      messages.some((message) =>
+        message.includes("missing from the audit step index"),
+      ),
+    ).toBe(true);
+  });
+
+  it("stays quiet when every step record reached the index", async () => {
+    const stores = await makeStores();
+    const messages: string[] = [];
+    const service = new AuditService({
+      traceStore: stores.traceStore,
+      auditStore: stores.auditStore,
+      traceService: stores.traceService,
+      context: stores.contextStore,
+      runner: runnerFor(fakeClient({ calls: [], respond: () => SAFE_VERDICT })),
+      securityModel: "sec-model",
+      intentModel: "intent-model",
+      networkWhitelist: null,
+      intentReducer: noChangeReducer(),
+      memory: stores.auditMemory,
+      enabled: true,
+      log: (message) => messages.push(message),
+    });
+    service.start();
+    seedTrace(stores.traceStore, "trace-nogap");
+    stores.traceStore.appendSpan("trace-nogap", toolSpan("trace-nogap", "ok"));
+    await settle(service, stores, "trace-nogap");
+
+    expect(
+      messages.some((message) =>
+        message.includes("missing from the audit step index"),
+      ),
+    ).toBe(false);
   });
 });
