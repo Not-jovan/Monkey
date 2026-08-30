@@ -24,7 +24,7 @@ function oneLine(text: string, limit: number) {
 
 // Steps worth carrying forward as trajectory: what the agent did, not the
 // bookkeeping spans that wrap them.
-function isTrajectoryStep(span: TraceSpan) {
+export function isTrajectoryStep(span: TraceSpan) {
   return (
     span.kind === "tool_call" ||
     span.kind === "user_action" ||
@@ -39,33 +39,48 @@ function isTrajectoryStep(span: TraceSpan) {
   );
 }
 
+function trajectoryLine(span: TraceSpan): string {
+  const parts = ["[" + span.status + "] " + span.label];
+  const args = span.attributes.arguments;
+  if (typeof args === "string" && args.length > 0) {
+    parts.push(oneLine(args, PRIOR_STEP_CLIP));
+  }
+  // A model call's payload is its output, not its arguments: carrying only
+  // the label would put "Model · plan" in the trajectory and none of the plan.
+  const output = span.attributes.output;
+  if (
+    span.kind === "model_call" &&
+    typeof output === "string" &&
+    output.length > 0
+  ) {
+    parts.push("said: " + oneLine(output, PRIOR_STEP_CLIP));
+  }
+  if (span.error) parts.push("error: " + oneLine(span.error, 120));
+  return parts.join(" | ");
+}
+
+export function summarizeTrajectory(
+  trace: TraceRecord,
+  options: { limit?: number; beforeSpanId?: string } = {},
+): string[] {
+  const limit = options.limit ?? MAX_PRIOR_STEPS;
+  let pool = trace.spans;
+  if (options.beforeSpanId !== undefined) {
+    const index = trace.spans.findIndex(
+      (span) => span.id === options.beforeSpanId,
+    );
+    pool = index === -1 ? trace.spans : trace.spans.slice(0, index);
+  }
+  return pool.filter(isTrajectoryStep).slice(-limit).map(trajectoryLine);
+}
+
 export function summarizePriorSteps(
   trace: TraceRecord,
   currentSpanId: string,
 ): string[] {
-  const index = trace.spans.findIndex((span) => span.id === currentSpanId);
-  const preceding = (index === -1 ? trace.spans : trace.spans.slice(0, index))
-    .filter(isTrajectoryStep)
-    .slice(-MAX_PRIOR_STEPS);
-
-  return preceding.map((span) => {
-    const parts = ["[" + span.status + "] " + span.label];
-    const args = span.attributes.arguments;
-    if (typeof args === "string" && args.length > 0) {
-      parts.push(oneLine(args, PRIOR_STEP_CLIP));
-    }
-    // A model call's payload is its output, not its arguments: carrying only
-    // the label would put "Model · plan" in the trajectory and none of the plan.
-    const output = span.attributes.output;
-    if (
-      span.kind === "model_call" &&
-      typeof output === "string" &&
-      output.length > 0
-    ) {
-      parts.push("said: " + oneLine(output, PRIOR_STEP_CLIP));
-    }
-    if (span.error) parts.push("error: " + oneLine(span.error, 120));
-    return parts.join(" | ");
+  return summarizeTrajectory(trace, {
+    limit: MAX_PRIOR_STEPS,
+    beforeSpanId: currentSpanId,
   });
 }
 

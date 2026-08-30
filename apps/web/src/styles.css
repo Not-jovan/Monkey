@@ -1685,6 +1685,10 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.auditor-health-actions {
+  margin-top: 12px;
+}
+
 .auditor-findings {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -2308,18 +2312,6 @@ textarea:focus {
   margin: 0 0 6px;
   font-size: 0.78rem;
   color: var(--muted);
-}
-
-.audit-health-badge {
-  display: inline-flex;
-  align-items: center;
-  margin-left: 6px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px dashed var(--line);
-  font-size: 0.72rem;
-  color: var(--muted);
-  white-space: nowrap;
 }
 
 .run-error-head {

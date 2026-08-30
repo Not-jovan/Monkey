@@ -8,10 +8,13 @@ import {
   type TraceDetail,
 } from "../api";
 import type { TraceRecord } from "../types";
-import { auditAction } from "./audit-action";
+import {
+  auditAction,
+  auditorTabActions,
+  showDegradedRetry,
+  type TracePane,
+} from "./audit-action";
 import { TraceRunView, type StepView } from "./TraceRunView";
-
-type TracePane = "run" | "auditor";
 
 function download(fileName: string, data: unknown) {
   const blob = new Blob([JSON.stringify(data, null, 2)], {
@@ -210,6 +213,12 @@ export function TraceDetailPage() {
   // tab they did pick.
   const followAudit = () => setPane("run");
 
+  const { showAuditAuditor, showViewAuditAuditor } = auditorTabActions({
+    pane,
+    action,
+  });
+  const degraded = showDegradedRetry({ pane, auditHealth });
+
   if (locked || detailQuery.error) {
     let message = "Could not load the trace.";
     if (isApiErrorWithStatus(detailQuery.error, 404)) {
@@ -241,38 +250,31 @@ export function TraceDetailPage() {
             className="button button-ghost"
             disabled={!trace}
             onClick={async () => {
-              const payload = await api.trace(traceId);
-              openJson("trace-" + traceId + "-api.json", payload);
-            }}
-          >
-            Trace API
-          </button>
-          <button
-            className="button button-ghost"
-            disabled={!trace}
-            onClick={async () => {
               const payload = await api.auditor(traceId);
               openJson("audit-" + traceId + "-api.json", payload);
             }}
           >
-            Auditor API
+            Auditor Trace
           </button>
           <button
             className="button button-ghost"
             disabled={!trace}
             onClick={async () => {
-              const payload = await api.downloadTrace(traceId);
-              download("trace-" + traceId + ".json", payload);
+              const payload = await api.trace(traceId);
+              openJson("trace-" + traceId + "-api.json", payload);
             }}
           >
-            Download
+            Run Trace
           </button>
         </div>
       </header>
 
       {trace && (
         <>
-          <AuditChain chain={detailQuery.data?.auditChain ?? []} current={traceId} />
+          <AuditChain
+            chain={detailQuery.data?.auditChain ?? []}
+            current={traceId}
+          />
           <div className="trace-pane-row">
             <div
               className="pane-toggle view-toggle"
@@ -301,26 +303,48 @@ export function TraceDetailPage() {
                 )}
               </button>
             </div>
-            {action.view && (
-              <Link
-                className="button button-ghost"
-                to={"/traces/" + action.view}
-                onClick={followAudit}
-              >
-                View Audit
-              </Link>
-            )}
-            {action.run && (
+            {showAuditAuditor && (
               <button
                 type="button"
                 className="button button-ghost"
                 disabled={audit.isPending}
                 onClick={() => audit.mutate()}
               >
-                {audit.isPending ? "Auditing…" : "Audit"}
+                {audit.isPending ? "Auditing…" : "Audit Auditor"}
               </button>
             )}
+            {showViewAuditAuditor && action.view && (
+              <Link
+                className="button button-ghost"
+                to={"/traces/" + action.view}
+                onClick={followAudit}
+              >
+                View Audit Auditor
+              </Link>
+            )}
           </div>
+          {degraded && (
+            <div
+              className="auditor-health auditor-health-degraded"
+              role="status"
+            >
+              <p className="auditor-health-title">This audit is degraded</p>
+              <p className="auditor-health-body">
+                The primary audit model failed; a fallback model still produced
+                a verdict.
+              </p>
+              <div className="auditor-health-actions">
+                <button
+                  type="button"
+                  className="button button-ghost"
+                  disabled={audit.isPending}
+                  onClick={() => audit.mutate()}
+                >
+                  {audit.isPending ? "Auditing…" : "Retry Audit"}
+                </button>
+              </div>
+            </div>
+          )}
           {audit.isError && (
             <p className="intent-change-error" role="alert">
               {audit.error instanceof Error

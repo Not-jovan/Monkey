@@ -168,4 +168,150 @@ npm run poc
 The first run installs Node.js dependencies and builds the Runtime image. The
 script automatically selects Docker, Colima, or Podman.
 
+The control plane listens on `PORT` (default `3000`). In development the UI is
+Vite on `5173` and talks to that API. In production the same process serves the
+built SPA at `/`.
 
+## HTTP API
+
+When `APP_AUTH_TOKEN` is set, every `/api/` route except `/api/health` and
+`/api/auth` requires `Authorization: Bearer <token>`. Errors return
+`{ "error": "..." }`. Validation failures add `details`.
+
+The Runtime posts OTLP to `/collector/v1/logs`. That route is not under
+`/api/` and uses `x-collector-token`, not the bearer token. Operators and
+diagnosing agents should not call it.
+
+### Health and system
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/health` | `{ ok, service }`. Always open. |
+| `GET` | `/api/auth` | `{ required }`. Whether the operator token is configured. Always open. |
+| `GET` | `/api/system` | Runtime, model, sandbox, container engine, and whether Ark is configured. |
+
+### Agents and runs
+
+Agent and run ids are UUIDs. Create body: `{ name, description?, instructions? }`
+(`name` 1 to 80 characters). Patch is the same fields, partial, at least one
+required. Message body: `{ content }` (1 to 50,000 characters).
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/agents` | `{ agents }`. |
+| `POST` | `/api/agents` | `201 { agent }`. |
+| `GET` | `/api/agents/:id` | `{ agent }`. |
+| `PATCH` | `/api/agents/:id` | `{ agent }`. `409` if a run is in progress. |
+| `DELETE` | `/api/agents/:id` | `{ archivedWorkspace }`. Forgets that agent's run-context chain. |
+| `POST` | `/api/agents/:id/start` | `{ agent }` with status `ready`. |
+| `POST` | `/api/agents/:id/stop` | `{ agent }`. Cancels an in-flight run. |
+| `GET` | `/api/agents/:id/messages` | `{ messages }`. |
+| `GET` | `/api/agents/:id/runs` | `{ runs }`. |
+| `POST` | `/api/agents/:id/messages` | `202 { run, message }`. Starts a run. Poll `GET /api/runs/:id`. `409` if stopped or already busy. `503` if Ark is not configured. |
+| `GET` | `/api/runs/:id` | `{ run }`. Status, output, `error`, and attributed `failure`. |
+
+`failure` has `layer`, `kind`, `retryability`, `title`, `detail`, `remedy`, and
+`exitCode`. Layer is `platform`, `provider`, `policy`, `agent`, `task`, or
+`user`. Only `agent` and `task` mean the agent is what to change.
+
+### Glass Box traces
+
+These dump the stored record so the UI can render it. Auditor runs share the
+agent's id but are omitted from the agent's run list. Open one via the run it
+judged, then `auditTraceId`.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/agents/:id/traces` | `{ traces }` newest first. Prompt, status, usage, `failure`, `failingSpanId`, `errorCount`, `recoveredErrorCount`, `evidenceComplete`, `warningCount`, `suspicionCount`, `auditHealth`. |
+| `GET` | `/api/agents/:id/failures` | `{ failures }` grouped by `kind`, agent-blame first, then by count. |
+| `GET` | `/api/traces/:id` | Full `trace` (every span), `findings`, `intent`, `context` (carried in/out, thread position), `auditComplete`, `auditHealth`, `auditTraceId`, `auditChain`. `404` if missing. |
+| `GET` | `/api/traces/:id/download` | Same payload plus `exportedAt`, as `trace-<id>.json`. |
+
+`warningCount` is what the auditor concluded about the agent.
+`suspicionCount` is what it could not settle. `auditHealth` is `ok`,
+`degraded`, or `failed`, and is the auditor reporting on itself.
+`evidenceComplete` is false when the output cap truncated the stream.
+
+### Agent traces (`/ai`)
+
+Same stores as Glass Box, compressed for a diagnosing agent. Typical loop:
+list with `?blame=agent`, open the case file, fall back to
+`GET /api/traces/:id` only if you need a span the case file clipped.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/agents/:id/traces/ai` | `{ traces }`. Prompt clipped to 240 characters. `diagnosis` has headline, layer, blame, kind, remedy, and where. No evidence blob. Query `blame` is `agent` or `environment`. Query `status` is `running`, `completed`, `failed`, or `cancelled`. |
+| `GET` | `/api/agents/:id/failures/ai` | `{ failures }` grouped by `kind`, agent-blame first. Includes `blamesAgent`, a `detail` sample, and `traceIds`. Skips auditor traces. |
+| `GET` | `/api/traces/:id/ai` | Case file. No `trace.spans`. Prompt clipped to 2,000 characters. |
+
+The case file carries:
+
+- `diagnosis`, including clipped evidence, `where`, and `causedBy`. Null on a clean run. A completed run that recovered from a classified failure still has one, with `outcome: "recovered"`.
+- `intent` and `context.carriedIn` (summary only)
+- `findings` with step labels, not bare span ids
+- `trajectory`: one-liners for tool, model, and user steps (last 20). No run/turn wrappers. `trajectoryTruncated` is how many were dropped.
+- `failingStep` / `causedByStep`: commands, files, clipped arguments and output
+- `auditComplete`, `auditHealth`, `auditTraceId`, `auditChain`
+
+```json
+{
+  "id": "…",
+  "status": "failed",
+  "diagnosis": {
+    "outcome": "failed",
+    "headline": "A command the agent wrote failed",
+    "layer": "agent",
+    "blame": "agent",
+    "kind": "tool-failed",
+    "retryability": "transient",
+    "remedy": "…",
+    "where": { "spanId": "…", "label": "Tool · npm test", "kind": "tool_call" },
+    "causedBy": { "spanId": "…", "label": "Model · plan", "kind": "model_call" },
+    "evidence": "npm ERR! missing script: test",
+    "evidenceComplete": true
+  },
+  "intent": { "instructions": "…", "objective": "…", "extended": [] },
+  "context": {
+    "position": 2,
+    "chainLength": 2,
+    "previousTraceId": "…",
+    "nextTraceId": null,
+    "carriedIn": "Asked to: …. Outcome: completed"
+  },
+  "findings": [
+    {
+      "type": "warning",
+      "category": "intent-check",
+      "finding": "…",
+      "span": { "spanId": "…", "label": "Tool · npm test", "kind": "tool_call" }
+    }
+  ],
+  "trajectory": ["[error] Tool · npm test | …"],
+  "trajectoryTruncated": 0,
+  "failingStep": { "label": "Tool · npm test", "commands": ["npm test"], "output": "…" },
+  "causedByStep": { "label": "Model · plan", "output": "…" },
+  "auditHealth": "ok",
+  "auditTraceId": "…"
+}
+```
+
+### Audits and intent
+
+Automatic audit fires for agent runs (audit depth 0) only. Deeper audits are
+on demand, so a stack of auditors goes only as far as someone asked.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `GET` | `/api/audits/:id` | What the auditor did while judging this trace: `auditedTraceId`, `auditTraceId`, `auditor`, `health`. `:id` is the judged run, not the auditor's. `404` if missing. |
+| `POST` | `/api/traces/:id/audit` | `{ traceId, auditTraceId }`. Re-audits this trace, at any depth. `409` if one is already running. `503` if auditing is disabled. |
+| `GET` | `/api/audits/:id/archive` | Zip: `memory/{stepId}.md`, `memory/steps-meta.json`, `audit.json`. |
+| `GET` | `/api/agents/:id/intent` | Standing spec: `{ intent, diverged, versions, intentId }`. `diverged` means the conversation's objective has not been adopted into the agent's instructions. |
+
+### Collector
+
+The Runtime posts OTLP logs here. Body limit 16 MiB. Not gated by
+`APP_AUTH_TOKEN`.
+
+| Method | Path | Returns |
+| --- | --- | --- |
+| `POST` | `/collector/v1/logs` | `{ partialSuccess: {} }`. Header `x-collector-token` must match the per-boot collector token. `401` if it does not. `400` if the body is not OTLP logs. |

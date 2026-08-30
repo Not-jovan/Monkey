@@ -8,7 +8,6 @@ import {
 import { Link, useNavigate, useSearchParams } from "react-router";
 import { api, hasAuthToken, isApiErrorWithStatus } from "../api";
 import type { Agent, TraceSummary } from "../types";
-import { LAYER_COPY } from "./failure";
 import { formatDateTime, formatDuration, spanDuration } from "./format";
 
 const columnHelper = createColumnHelper<TraceSummary>();
@@ -33,35 +32,6 @@ const columns = [
       </span>
     ),
   }),
-  // Why it failed, at list level. Scanning for a pattern across runs is what
-  // turns a single incident into something worth fixing, and that was
-  // impossible when every failed row said only "failed".
-  columnHelper.display({
-    id: "failure",
-    header: "Cause",
-    cell: ({ row }) => {
-      const failure = row.original.failure;
-      if (!failure) {
-        return <span className="muted-cell">—</span>;
-      }
-      const copy = LAYER_COPY[failure.layer];
-      // A completed run can still carry attribution: the step broke and the
-      // agent worked around it. Marked, because a clean-looking row that
-      // absorbed a denial is the easiest problem to scroll past.
-      const recovered = row.original.status === "completed";
-      return (
-        <span
-          className={"failure-chip failure-blame-" + copy.blame}
-          title={
-            (recovered ? "Recovered: " : "") + copy.note + " " + failure.title
-          }
-        >
-          {recovered ? "↺ " : ""}
-          {copy.label} · {failure.kind}
-        </span>
-      );
-    },
-  }),
   columnHelper.display({
     id: "duration",
     header: "Duration",
@@ -79,25 +49,10 @@ const columns = [
     header: "Warnings",
     cell: ({ row }) => {
       const count = row.original.warningCount;
-      const health = row.original.auditHealth;
-      return (
-        <>
-          {count > 0 ? (
-            <span className="warning-badge">⚠ {count}</span>
-          ) : (
-            <span className="muted-cell">—</span>
-          )}
-          {/* Kept visibly apart from the count: the auditor failing is a
-              limitation of the middleware, never a claim about the agent. */}
-          {health !== "ok" && (
-            <span
-              className="audit-health-badge"
-              title="Open the trace and switch to View Auditor"
-            >
-              auditor
-            </span>
-          )}
-        </>
+      return count > 0 ? (
+        <span className="warning-badge">⚠ {count}</span>
+      ) : (
+        <span className="muted-cell">—</span>
       );
     },
   }),
