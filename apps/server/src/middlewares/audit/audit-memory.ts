@@ -9,10 +9,10 @@ import { auditTraceStepSchema, type AuditTraceStep } from "./audit-model.js";
 //   agent-runs/{agentId}/{chatId}/{stepId}.md
 //   agent-runs/{agentId}/{chatId}/steps-meta.json
 //
-// The markdown is what a person reads and what auditAll's backtrace re-reads for
-// long-context handling; the meta index is what the analyses query. Both live on
-// disk rather than in memory because a chat's audit outlives the process that
-// produced it, and the archive download serves these files directly.
+// The markdown is the auditor's workpad: durable per-step memory that auditAll
+// re-reads after the step is gone. The meta index says which of those files to
+// open. Both live on disk because a chat's audit outlives the process that
+// produced it. The archive zips them on request; they are not a stored zip.
 
 export const stepMetaEntrySchema = z.object({
   summary: z.string().default(""),
@@ -112,6 +112,33 @@ export class AuditMemory {
     return this.withLock(folder, () => this.readMetaUnlocked(folder));
   }
 
+  async readStep(agentId: string, chatId: string, stepId: string) {
+    const files = await this.readSteps(agentId, chatId, [stepId]);
+    return files.get(stepId) ?? null;
+  }
+
+  // One lock for the whole set so auditAll sees a consistent workpad, not a
+  // mix of files from before and after a concurrent step write.
+  async readSteps(agentId: string, chatId: string, stepIds: string[]) {
+    const folder = this.folderFor(agentId, chatId);
+    return this.withLock(folder, async () => {
+      const files = new Map<string, string>();
+      for (const stepId of stepIds) {
+        try {
+          const markdown = await readFile(
+            path.join(folder, safeSegment(stepId) + ".md"),
+            "utf8",
+          );
+          files.set(stepId, markdown);
+        } catch {
+          // The index can point at a step whose markdown never landed. Callers
+          // fall back to the meta entry rather than dropping the step.
+        }
+      }
+      return files;
+    });
+  }
+
   // Every artifact file for a chat, for the archive download.
   async listArtifacts(agentId: string, chatId: string) {
     const folder = this.folderFor(agentId, chatId);
@@ -149,8 +176,25 @@ export class AuditMemory {
   }
 }
 
-// The per-step markdown record. Written for a reader first: what the step did,
-// then what each check concluded about it.
+// What auditAll actually reads from a workpad file. Starts at the summary so
+// the heading does not eat the clip budget. Falls back to the index summary
+// when the markdown is missing.
+export function workpadExcerpt(
+  markdown: string | null | undefined,
+  fallback: string,
+) {
+  const source = markdown?.trim() || fallback.trim();
+  if (!source) return "";
+  const start = source.indexOf("## Summary");
+  const body = start === -1 ? source : source.slice(start);
+  const flat = body.replace(/\s+/g, " ").trim();
+  const limit = 600;
+  if (flat.length <= limit) return flat;
+  return flat.slice(0, limit) + " …";
+}
+
+// The per-step markdown record. The workpad auditAll re-reads: what the step
+// did, then what each check concluded about it.
 export function renderStepMarkdown(input: {
   stepId: string;
   label: string;

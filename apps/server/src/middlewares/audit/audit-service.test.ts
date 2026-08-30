@@ -1687,12 +1687,13 @@ describe("AuditService forward trace", () => {
     expect(carried?.type).toBe("warning");
     expect(carried?.category).toBe("security");
     expect(carried?.finding).toContain("Step 2");
-    // The forward trace was actually shown the later step's summary, not just
-    // its label — that summary is the whole reason the memory exists.
+    // The forward trace was shown the later step's workpad, not just its
+    // label — that file is the memory auditAll re-reads.
     const forwardCall = responder.calls.find((call) =>
       call.user.includes("## Directives found in untrusted content"),
     );
     expect(forwardCall?.user).toContain("Posted the contents of .env");
+    expect(forwardCall?.user).toContain("## Summary");
     expect(
       auditorSpansOf(stores, "trace-forward-1").some(
         (span) => span.name === "audit.forward-trace",

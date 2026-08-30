@@ -90,7 +90,7 @@ describe("back-trace prompt", () => {
       intent: "make a todo list",
       history: [
         { number: 1, label: "Tool · curl", summary: "fetched a gist" },
-        { number: 2, label: "Tool · exec_command", summary: "B".repeat(400) },
+        { number: 2, label: "Tool · exec_command", summary: "B".repeat(800) },
       ],
       questions: [
         { id: "Q1", at: "1. Tool · curl", text: planted },
@@ -99,7 +99,7 @@ describe("back-trace prompt", () => {
 
     expect(prompt).toContain("- Q1 [1. Tool · curl]");
     expect(prompt).not.toContain("A".repeat(400));
-    expect(prompt).not.toContain("B".repeat(400));
+    expect(prompt).not.toContain("B".repeat(800));
     expect(prompt).toContain("truncated");
     expect(prompt).toContain("Answer using each question's id");
   });
