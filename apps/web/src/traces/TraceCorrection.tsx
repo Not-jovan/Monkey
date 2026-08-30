@@ -1,19 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api";
-import type { AuditTraceStep, IntentCorrection, TraceRecord } from "../types";
+import type { AuditTraceStep, TraceRecord } from "../types";
 import { agentFacingFindingText, findingTypeLabel, visibleFindings } from "./TraceIntent";
-
-// Which findings a correction was made from. Recorded as a list because one
-// correction usually answers several findings that are really one problem.
-export function correctedFindingIds(corrections: IntentCorrection[]) {
-  const ids = new Set<string>();
-  for (const correction of corrections) {
-    if (correction.revertedAt !== null) continue;
-    for (const findingId of correction.findingIds) ids.add(findingId);
-  }
-  return ids;
-}
+import { correctedFindingIds, correctionsForTrace } from "./correction";
 
 // Turning what the auditor found into what the Agent is told.
 //
@@ -43,9 +33,15 @@ export function TraceCorrection({
     queryKey: ["corrections", trace.agentId],
     queryFn: () => api.corrections(trace.agentId),
   });
-  const entries = corrections.data?.corrections ?? [];
+  const allCorrections = corrections.data?.corrections ?? [];
+  const entries = correctionsForTrace(allCorrections, trace.id);
   const alreadyCorrected = correctedFindingIds(entries);
-  const newest = [...entries].reverse().find((entry) => entry.revertedAt === null);
+  // Undo is agent-wide because every correction edits the same instructions.
+  // A correction shown on this run is undoable only when no later correction
+  // from another run would be silently discarded with it.
+  const newest = [...allCorrections]
+    .reverse()
+    .find((entry) => entry.revertedAt === null);
 
   const settle = async () => {
     await Promise.all([
@@ -91,33 +87,46 @@ export function TraceCorrection({
       <h2 className="eyebrow" id="trace-correction-heading">
         Correct the Agent
       </h2>
+      <p className="correction-intro">
+        Select one or more related findings, then write a rule for future runs.
+      </p>
 
       {shown.length > 0 && (
         <ul className="correction-findings">
-          {shown.map((finding) => (
-            <li key={finding.id}>
-              <label className="correction-finding">
-                <input
-                  type="checkbox"
-                  checked={selected.has(finding.id)}
-                  disabled={!correctable || correct.isPending}
-                  onChange={() => toggle(finding.id)}
-                />
-                <span className={"finding-type finding-type-" + finding.type}>
-                  {finding.type}
-                </span>
-                <span className="muted-cell">
-                  {findingTypeLabel(finding.category)}
-                </span>
-                <span className="finding-copy">
-                  {agentFacingFindingText(finding.finding)}
-                </span>
-                {alreadyCorrected.has(finding.id) && (
-                  <span className="correction-mark">already corrected</span>
-                )}
-              </label>
-            </li>
-          ))}
+          {shown.map((finding) => {
+            const isCorrected = alreadyCorrected.has(finding.id);
+            const isSelected = selected.has(finding.id);
+            return (
+              <li key={finding.id}>
+                <label
+                  className={
+                    "correction-finding" +
+                    (isSelected ? " is-selected" : "") +
+                    (isCorrected ? " is-corrected" : "")
+                  }
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    disabled={!correctable || correct.isPending || isCorrected}
+                    onChange={() => toggle(finding.id)}
+                  />
+                  <span className={"finding-type finding-type-" + finding.type}>
+                    {finding.type}
+                  </span>
+                  <span className="muted-cell">
+                    {findingTypeLabel(finding.category)}
+                  </span>
+                  <span className="finding-copy">
+                    {agentFacingFindingText(finding.finding)}
+                  </span>
+                  {isCorrected && (
+                    <span className="correction-mark">already corrected</span>
+                  )}
+                </label>
+              </li>
+            );
+          })}
         </ul>
       )}
 
@@ -132,7 +141,7 @@ export function TraceCorrection({
           />
           <button
             type="button"
-            className="button button-ghost"
+            className="button button-primary"
             disabled={
               !correctable ||
               correct.isPending ||

@@ -2609,11 +2609,18 @@ textarea:focus {
 .trace-correction {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 16px;
+  gap: 14px;
+  padding: 18px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--paper);
+}
+
+.correction-intro {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 .correction-findings,
@@ -2627,25 +2634,45 @@ textarea:focus {
 }
 
 .correction-finding {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: 18px auto auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
   cursor: pointer;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.correction-finding:hover:not(.is-corrected),
+.correction-finding.is-selected {
+  border-color: var(--purple);
+  background: var(--purple-soft);
+}
+
+.correction-finding.is-corrected {
+  cursor: not-allowed;
+  background: #f4f3ef;
+  color: var(--muted);
 }
 
 /* Without this the checkbox takes a flex share and stretches across the row,
    pushing the finding it belongs to off to the right. */
 .correction-finding input[type="checkbox"] {
   flex: none;
-  width: auto;
-  margin: 0;
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--purple);
 }
 
 /* Grow from the text's own width rather than from zero: a zero basis collapses
    the finding to nothing when the row is only as wide as its contents. */
 .correction-finding .finding-copy {
-  flex: 1 1 auto;
   min-width: 0;
+  line-height: 1.45;
 }
 
 .correction-compose {
@@ -2683,4 +2710,48 @@ textarea:focus {
   font-weight: 600;
   letter-spacing: 0.02em;
   color: var(--muted);
+  white-space: nowrap;
+}
+
+.intent-constraints {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+
+.intent-constraints li {
+  padding-left: 2px;
+}
+
+.intent-constraint-source {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--purple-soft);
+  color: var(--purple-dark);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+@media (max-width: 680px) {
+  .correction-finding {
+    grid-template-columns: 18px auto 1fr;
+  }
+
+  .correction-finding .finding-copy,
+  .correction-mark {
+    grid-column: 2 / -1;
+  }
+
+  .correction-compose {
+    flex-direction: column;
+  }
+
+  .correction-compose textarea,
+  .correction-compose .button {
+    width: 100%;
+  }
 }

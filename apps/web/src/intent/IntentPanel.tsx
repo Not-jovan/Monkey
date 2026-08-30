@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import type { IntentState } from "../types";
+import { displayedConstraints } from "../traces/correction";
 import { describeChange, intentChanges, isMeaningful } from "./intent-diff";
 
 // The specification the last audit derived for this agent, and every earlier
@@ -25,6 +26,11 @@ export function IntentPanel({ agentId }: { agentId: string }) {
     queryFn: () => api.intent(agentId),
     refetchInterval: 4_000,
   });
+  const correctionsQuery = useQuery({
+    queryKey: ["corrections", agentId],
+    queryFn: () => api.corrections(agentId),
+    refetchInterval: 4_000,
+  });
 
   const intent: IntentState | undefined = intentQuery.data?.intent;
   const diverged = intentQuery.data?.diverged ?? false;
@@ -34,10 +40,18 @@ export function IntentPanel({ agentId }: { agentId: string }) {
   );
   const changes = useMemo(() => allChanges.filter(isMeaningful), [allChanges]);
   const currentVersion = allChanges.length;
+  const constraints = useMemo(
+    () =>
+      displayedConstraints(
+        intent?.extended ?? [],
+        correctionsQuery.data?.corrections ?? [],
+      ),
+    [intent?.extended, correctionsQuery.data?.corrections],
+  );
 
   const hasSpec =
     intent !== undefined &&
-    (intent.objective.length > 0 || intent.extended.length > 0);
+    (intent.objective.length > 0 || constraints.length > 0);
   if (!hasSpec || !intent) return <div className="intent-panel" />;
 
   const hasHistory = changes.length > 1;
@@ -52,10 +66,10 @@ export function IntentPanel({ agentId }: { agentId: string }) {
         >
           <span className="eyebrow">Current intent</span>
           <span className="muted-cell">
-            {intent.extended.length > 0
-              ? intent.extended.length +
+            {constraints.length > 0
+              ? constraints.length +
                 " constraint" +
-                (intent.extended.length === 1 ? "" : "s")
+                (constraints.length === 1 ? "" : "s")
               : "objective only"}
           </span>
           {hasHistory && (
@@ -82,12 +96,22 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                 </p>
               </div>
             )}
-            {intent.extended.length > 0 && (
-              <ul>
-                {intent.extended.map((entry) => (
-                  <li key={entry}>{entry}</li>
-                ))}
-              </ul>
+            {constraints.length > 0 && (
+              <div className="intent-constraints">
+                <strong>Constraints:</strong>
+                <ul>
+                  {constraints.map((entry) => (
+                    <li key={entry.text}>
+                      <span>{entry.text}</span>
+                      {entry.humanCorrection && (
+                        <span className="intent-constraint-source">
+                          Human correction
+                        </span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
             {hasHistory && (
               <button
