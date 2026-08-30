@@ -33,15 +33,34 @@ class FakeRunner implements AgentRunner {
 }
 
 const temporaryDirectories: string[] = [];
+const traceStores: TraceStore[] = [];
 
+// TraceStore persists fire-and-forget, so a slow disk cannot stall a run — but
+// that leaves writes in flight when a test body returns. Deleting the
+// directory out from under the writer raced it: the recursive sweep met a file
+// that appeared mid-delete and threw ENOTEMPTY, failing whichever test
+// happened to be finishing rather than the one that wrote. Draining first is
+// what makes teardown ordered instead of lucky.
 afterEach(async () => {
   const { rm } = await import("node:fs/promises");
+  await Promise.all(traceStores.splice(0).map((store) => store.flush()));
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) =>
       rm(directory, { recursive: true, force: true }),
     ),
   );
 });
+
+// A trace pipeline writing under `root`, registered so afterEach drains it
+// before the directory goes. Every test that wants traces builds one here, so
+// none can forget to.
+async function makeTraceService(root: string) {
+  const store = new TraceStore(path.join(root, "data", "traces"));
+  traceStores.push(store);
+  await store.initialize();
+  const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+  return { store, traces };
+}
 
 async function makeService(
   runner: AgentRunner = new FakeRunner(),
@@ -198,9 +217,7 @@ describe("Agent lifecycle", () => {
   it("writes a terminate span onto the chat being stopped", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
     temporaryDirectories.push(root);
-    const store = new TraceStore(path.join(root, "data", "traces"));
-    await store.initialize();
-    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const { store, traces } = await makeTraceService(root);
     const service = await makeService(new FakeRunner(), traces);
     const agent = await service.createAgent({ name: "Stoppable" });
     const { run } = await service.sendMessage(agent.id, "write hello");
@@ -263,9 +280,7 @@ describe("trace model handoff", () => {
   it("stamps a claude-code run's model onto its trace", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
     temporaryDirectories.push(root);
-    const store = new TraceStore(path.join(root, "data", "traces"));
-    await store.initialize();
-    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const { store, traces } = await makeTraceService(root);
     const service = await makeService(new FakeRunner("claude-opus-5[1m]"), traces, {
       AGENT_RUNTIME: "claude-code",
       ANTHROPIC_API_KEY: "sk-ant-test",
@@ -280,9 +295,7 @@ describe("trace model handoff", () => {
   it("leaves a model the trace already resolved alone", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
     temporaryDirectories.push(root);
-    const store = new TraceStore(path.join(root, "data", "traces"));
-    await store.initialize();
-    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const { store, traces } = await makeTraceService(root);
     const service = await makeService(new FakeRunner("late-model"), traces);
     const agent = await service.createAgent({ name: "Traced" });
     const { run } = await service.sendMessage(agent.id, "write hello");
@@ -324,9 +337,7 @@ describe("conversation handoff", () => {
   it("binds the trace to the session the runtime announces", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
     temporaryDirectories.push(root);
-    const store = new TraceStore(path.join(root, "data", "traces"));
-    await store.initialize();
-    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const { store, traces } = await makeTraceService(root);
     const service = await makeService(new RunnerThatNamesItsSession(), traces);
     const agent = await service.createAgent({ name: "Traced" });
     const { run } = await service.sendMessage(agent.id, "write hello");
@@ -382,9 +393,7 @@ describe("model reported by a failing run", () => {
   it("keeps the model on the trace and in systemInfo after the run fails", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "launchpad-test-"));
     temporaryDirectories.push(root);
-    const store = new TraceStore(path.join(root, "data", "traces"));
-    await store.initialize();
-    const traces = new TraceService(store, createRedactor([]), codexRuntime.trace);
+    const { store, traces } = await makeTraceService(root);
     const service = await makeService(
       new FailingRunnerThatNamesItsModel(),
       traces,
