@@ -11,9 +11,16 @@ import {
   chatAuditSchema,
   worstHealth,
   type AuditHealth,
+  type AuditPass,
   type AuditTraceStep,
   type ChatAudit,
 } from "./audit-model.js";
+
+// How many superseded passes a trace keeps. The newest answer is the one that
+// counts; the ones before it are there so a re-audit can be second-guessed and
+// so an interrupted one leaves something behind, neither of which needs a long
+// tail.
+const MAX_AUDIT_HISTORY = 5;
 
 function tokensFrom(trace: TraceRecord) {
   return {
@@ -103,6 +110,73 @@ export class AuditStore {
     const doc = this.ensure(trace, intentId);
     const existing = doc.spanAudit[spanId] ?? [];
     doc.spanAudit[spanId] = existing.concat(mergeSteps(doc, steps));
+    doc.health = worstHealth(doc.health, health);
+    this.persist(trace.id);
+  }
+
+  // Files the answers this trace currently holds as a superseded pass, and
+  // starts the next one from empty.
+  //
+  // It clears, but nothing is destroyed: what it clears is kept. That is the
+  // difference from emptying the document outright, which is what this
+  // replaces — a re-audit interrupted partway then left the trace with no
+  // findings and no way back to the ones it had, because nothing resumes a
+  // requested audit.
+  //
+  // Starting empty matters beyond tidiness. mergeSteps decides what to keep by
+  // looking at the whole document, so answers left over from the previous pass
+  // suppress the ones replacing them: a second pass would record less than it
+  // found.
+  //
+  // Oldest passes are dropped rather than kept forever: this file is read on
+  // every trace request, and a trace re-audited fifty times is not fifty times
+  // more informative.
+  beginPass(trace: TraceRecord) {
+    const doc = this.docs.get(trace.id);
+    if (!doc) return;
+    const hasAnswers =
+      doc.runAudit.length > 0 || Object.keys(doc.spanAudit).length > 0;
+    if (!hasAnswers) return;
+    doc.history = [
+      ...doc.history,
+      {
+        recordedAt: new Date().toISOString(),
+        health: doc.health,
+        spanAudit: structuredClone(doc.spanAudit),
+        runAudit: structuredClone(doc.runAudit),
+      },
+    ].slice(-MAX_AUDIT_HISTORY);
+    doc.spanAudit = {};
+    doc.runAudit = [];
+    this.persist(trace.id);
+  }
+
+  // Superseded passes over this trace, oldest first.
+  passesFor(traceId: string): AuditPass[] {
+    return structuredClone(this.docs.get(traceId)?.history ?? []);
+  }
+
+  // This span's answer, replacing whatever it said before rather than adding
+  // to it. Asking an auditor the same question again produces the same shape
+  // of answer, so appending would double every finding.
+  //
+  // Replacing one span at a time is what makes a re-audit survivable. The
+  // alternative — emptying the whole document first and refilling it — leaves
+  // nothing at all if the process dies partway, destroying verdicts that were
+  // never going to be replaced. Here a crash leaves the spans already re-judged
+  // holding new answers and the rest holding their previous ones.
+  replaceSpan(
+    trace: TraceRecord,
+    spanId: string,
+    steps: AuditTraceStep[],
+    intentId: string,
+    health: AuditHealth = "ok",
+  ) {
+    const doc = this.ensure(trace, intentId);
+    // Dropped before merging so this span's own previous health note does not
+    // suppress the one replacing it.
+    delete doc.spanAudit[spanId];
+    doc.spanAudit[spanId] = mergeSteps(doc, steps);
     doc.health = worstHealth(doc.health, health);
     this.persist(trace.id);
   }
@@ -348,6 +422,7 @@ export class AuditStore {
         auditorSpans: [],
         metaAudit: [],
         metaAuditedAt: null,
+        history: [],
       };
       this.docs.set(trace.id, doc);
       return doc;

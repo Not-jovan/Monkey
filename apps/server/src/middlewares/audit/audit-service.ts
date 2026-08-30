@@ -1450,9 +1450,15 @@ export class AuditService {
       return;
     }
     await this.identifyFor(chat, trace);
-    // Asking again answers the same questions again, at both levels.
-    this.deps.auditStore.clearSpanAudits(trace.id);
-    this.deps.auditStore.clearRunAudit(trace.id);
+    // The answers this trace already holds are filed as a superseded pass, and
+    // then left where they are: each is replaced as its new answer arrives.
+    //
+    // Emptying the document up front, which is what this used to do, destroyed
+    // the previous verdicts before their replacements existed. Nothing resumes
+    // a requested audit of an auditor — it is asked for, never automatic — so
+    // a crash partway through left the trace with no findings at all and no
+    // prospect of getting them back.
+    this.deps.auditStore.beginPass(trace);
 
     // A snapshot, taken once. Anything appended while this runs belongs to the
     // next audit of this trace, not to this one.
@@ -1534,7 +1540,7 @@ export class AuditService {
         );
         if (leaked) push("warning", "security", leakedCredentialFinding(span));
       });
-      this.deps.auditStore.recordSpan(trace, span.id, steps, "", "degraded");
+      this.deps.auditStore.replaceSpan(trace, span.id, steps, "", "degraded");
       return;
     }
 
@@ -1556,7 +1562,7 @@ export class AuditService {
       }
       pushAuditorStatus(push, status, failure);
     });
-    this.deps.auditStore.recordSpan(
+    this.deps.auditStore.replaceSpan(
       trace,
       span.id,
       steps,

@@ -99,6 +99,18 @@ export function worstHealth(left: AuditHealth, right: AuditHealth): AuditHealth 
   return HEALTH_RANK[right] > HEALTH_RANK[left] ? right : left;
 }
 
+// One superseded pass over a trace: what it concluded, and when it was put
+// aside. Health travels with it because a verdict and the condition the
+// auditor was in when it gave that verdict are only meaningful together.
+export const auditPassSchema = z.object({
+  recordedAt: z.string(),
+  health: auditHealthSchema.default("ok"),
+  spanAudit: z.record(z.string(), z.array(auditTraceStepSchema)).default({}),
+  runAudit: z.array(auditTraceStepSchema).default([]),
+});
+
+export type AuditPass = z.infer<typeof auditPassSchema>;
+
 export const chatAuditSchema = z.object({
   agentId: z.string(),
   intentId: z.string(),
@@ -138,6 +150,19 @@ export const chatAuditSchema = z.object({
   // When the last meta-audit ran, so the UI can say whether what it is showing
   // predates the auditor spans below it.
   metaAuditedAt: z.string().nullable().default(null),
+  // Answers this trace gave before the ones above, newest last.
+  //
+  // Asking again is asking the same questions of the same evidence, and the
+  // second answer is not automatically the better one — a pass that ran during
+  // a provider outage says less than the one it replaced. Keeping the previous
+  // answer means a re-audit supersedes rather than destroys, and it is what
+  // makes a re-audit interrupted partway recoverable: the pass that was
+  // replaced is still on the record.
+  //
+  // Defaulted, like every field added after the first release. AuditStore
+  // discards a document it cannot parse without saying so, so a field without
+  // a default would silently delete every audit written before it existed.
+  history: z.array(auditPassSchema).default([]),
 });
 
 export type ChatAudit = z.infer<typeof chatAuditSchema>;
