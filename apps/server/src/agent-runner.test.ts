@@ -20,20 +20,18 @@ function workspace() {
   return directory;
 }
 
-// A runtime whose "binary" is node itself, printing lines we control. The
-// point is the runner's own contract — what it announces to its caller and
-// when — which is otherwise only observable by spawning a real agent CLI.
+// A runtime whose "binary" prints lines we control. The point is the runner's
+// own contract — what it announces to its caller and when — which is otherwise
+// only observable by spawning a real agent CLI.
 function stubRuntime(lines: unknown[]): RuntimeDefinition {
   return {
     id: "codex",
-    bin: () => process.execPath,
+    bin: () => "/usr/bin/printf",
     homeDir: () => "/tmp/stub-home",
     homeEnvVar: "STUB_HOME",
     buildArgs: () => [
-      "-e",
-      lines
-        .map((line) => "console.log(JSON.stringify(" + JSON.stringify(line) + "))")
-        .join(";"),
+      "%s",
+      lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
     ],
     parseEventLine: (line: string, parsed: ParsedEvents) => {
       const raw = JSON.parse(line) as unknown;
@@ -114,8 +112,8 @@ describe("ProcessRuntimeRunner", () => {
     const config = loadConfig({ NODE_ENV: "test" });
     const runtime = stubRuntime([]);
     runtime.buildArgs = () => [
-      "-e",
-      'process.stdout.write(JSON.stringify({session:"session-tail",model:"m",message:"done"}))',
+      "%s",
+      JSON.stringify({ session: "session-tail", model: "m", message: "done" }),
     ];
     const runner = new ProcessRuntimeRunner(config, runtime, "token");
     const threads: string[] = [];
