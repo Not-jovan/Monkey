@@ -1,5 +1,11 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  emptyIntent,
+  intentIsEmpty,
+  type IntentDerivation,
+  type IntentState,
+} from "../intent/intent-model.js";
 import type { TraceRecord } from "../trace/trace-model.js";
 import {
   chatAuditSchema,
@@ -233,6 +239,37 @@ export class AuditStore {
     return this.intentIds(traceId)[0] ?? null;
   }
 
+  // The spec this audit judged against. Null when the identifier phase has
+  // not run for this trace (or ran against an empty spec).
+  intentOf(traceId: string): IntentState | null {
+    const doc = this.docs.get(traceId);
+    if (!doc || intentIsEmpty(doc.intent)) return null;
+    return {
+      instructions: doc.intent.instructions,
+      objective: doc.intent.objective,
+      extended: [...doc.intent.extended],
+    };
+  }
+
+  derivationOf(traceId: string): IntentDerivation | null {
+    const doc = this.docs.get(traceId);
+    return doc?.intentDerivation ?? null;
+  }
+
+  // Identifier phase: write the derived spec once. Later findings inherit it
+  // rather than re-reading a standing store.
+  recordIntent(trace: TraceRecord, derivation: IntentDerivation) {
+    const doc = this.ensure(trace, "");
+    if (!intentIsEmpty(doc.intent)) return;
+    doc.intent = {
+      instructions: derivation.state.instructions,
+      objective: derivation.state.objective,
+      extended: [...derivation.state.extended],
+    };
+    doc.intentDerivation = derivation;
+    this.persist(trace.id);
+  }
+
   countStepsForTrace(traceId: string) {
     return Object.keys(this.docs.get(traceId)?.spanAudit ?? {}).length;
   }
@@ -268,6 +305,7 @@ export class AuditStore {
         agentId: trace.agentId,
         intentId,
         health: "ok",
+        intent: emptyIntent(),
         contextSummary: "",
         summary: {
           tokenSummary: tokensFrom(trace),

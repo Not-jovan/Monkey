@@ -252,6 +252,35 @@ describe("reportForStep", () => {
     expect(report.tags).toEqual(["dangerous-action", "restriction-bypass"]);
   });
 
+  it("does not put an auditor outage into the agent's finding reason", () => {
+    const outage =
+      "Primary audit model unavailable: ModelNotOpen: Your account has not activated the model";
+    const report = reportForStep(
+      nothingFound(),
+      checks({
+        injection: {
+          verdict: {
+            dangerous: true,
+            promptInjection: false,
+            actedOnExternalInstructions: [],
+            restrictionBypass: false,
+            reason:
+              "Agent planned to embed environment variables in HTML and POST them",
+          },
+          status: "degraded",
+          failure: outage,
+          label: "Injection",
+        },
+      }),
+    );
+
+    expect(report.failure).toContain(outage);
+    expect(report.tags).toContain("dangerous-action");
+    expect(report.reason).toContain("embed environment variables");
+    expect(report.reason).not.toContain("Primary audit model");
+    expect(report.reason).not.toContain("ModelNotOpen");
+  });
+
   // An injected objective the agent ignored is recorded, not warned about.
   it("tags an injected objective only when the agent acted on it", () => {
     const ignored = reportForStep(

@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { describeIntent, type IntentState } from "../intent/intent-model.js";
-import type { IntentService } from "../intent/intent-service.js";
+import {
+  AUDITOR_OBJECTIVE,
+  describeIntent,
+  type IntentDerivation,
+  type IntentState,
+} from "../intent/intent-model.js";
+import { IntentReducer } from "../intent/intent-reducer.js";
+import {
+  buildIntentScopeUserMessage,
+  intentClassification,
+  INTENT_SCOPE_SYSTEM_PROMPT,
+} from "../intent/intent-classifier.js";
 import {
   hasJudgeableEvidence,
   isAuditorTrace,
@@ -16,6 +26,7 @@ import type { AgentRunner } from "../../types.js";
 import type { TraceService } from "../trace/trace-service.js";
 import {
   auditorCallSpan,
+  auditorSubagentType,
   AuditorModel,
   type AuditorCallAttempt,
 } from "./auditor-model.js";
@@ -120,8 +131,9 @@ interface AuditServiceDeps {
   intentModel: string;
   // null disables the network policy check; [] denies every destination.
   networkWhitelist: string[] | null;
-  // Supplies the specification each step is judged against.
-  intent?: IntentService;
+  // Identifies the spec each step is judged against. Optional so a test can
+  // stub the classifier; production wires it through the auditor's runner.
+  intentReducer?: IntentReducer;
   // Prior-run context. Always populated, model or no model — the auditor reads
   // from it and enriches it, but never owns it.
   context?: ContextStore;
@@ -200,27 +212,27 @@ function quotedDirective(finding: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-// A fresh copy of the chat's pinned spec. Copied because callers fall back to
-// the run's own prompt when the objective is empty, and that must not write
-// itself into the pin every other audit then reads.
-function pinnedState(
+function judgedIntent(
   chat: AgentChatAuditor,
   trace: TraceRecord,
-  capture: () => { intentId: string; state: IntentState },
 ): IntentState {
-  const { state } = chat.pinIntent(capture);
-  const copy = { ...state, extended: [...state.extended] };
-  // Agents created before intent tracking existed have no objective, so a step
-  // is never judged against an empty spec.
+  const state = chat.intentState;
+  const copy = state
+    ? { ...state, extended: [...state.extended] }
+    : { instructions: "", objective: "", extended: [] };
   if (copy.objective.length === 0) copy.objective = trace.prompt;
   return copy;
 }
 
+function instructionsOf(trace: TraceRecord) {
+  const run = trace.spans.find((span) => span.kind === "run");
+  return run ? readAttribute(run, "instructions") : "";
+}
+
 export class AuditService {
-  // PLAN_AUDITOR's BatchCaller, replacing the single serial chain. Safe to run
-  // audits concurrently because each captures the intent version it judges
-  // against before its model call, so out-of-order completion still reports the
-  // spec the step was actually judged under.
+  // PLAN_AUDITOR's BatchCaller. Safe to run audits concurrently because the
+  // identifier phase pins the spec on the chat audit before any step is scored,
+  // so out-of-order completion still reports the spec the step was judged under.
   private readonly batch: BatchCaller;
   private warnedAboutDepth = false;
   // Asking the audit model, and living with what comes back. Holds the memo of
@@ -249,20 +261,19 @@ export class AuditService {
       if (isAuditorTrace(trace)) return;
       if (!this.shouldAuditStep(span, trace)) return;
       const chat = this.auditorFor(trace);
-      // Pinned here, synchronously, rather than when the audit runs: a
-      // correction applied while this run's audits are still queued must not
-      // change the specification they are judged against.
-      chat.pinIntent(() => this.captureIntent(trace));
       chat.openStep();
       this.enqueue(() =>
-        chat.auditStep(span.id).finally(() => chat.closeStep()),
+        this.identifyFor(chat, trace)
+          .then(() => chat.auditStep(span.id))
+          .finally(() => chat.closeStep()),
       );
     });
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
       if (isAuditorTrace(trace)) return;
       const chat = this.auditorFor(trace);
-      chat.pinIntent(() => this.captureIntent(trace));
-      this.enqueue(() => chat.auditAll());
+      this.enqueue(() =>
+        this.identifyFor(chat, trace).then(() => chat.auditAll()),
+      );
     });
     this.resumeUnfinishedRunAudits();
   }
@@ -285,7 +296,9 @@ export class AuditService {
       );
     for (const trace of pending.slice(0, MAX_RESUMED_RUN_AUDITS)) {
       const chat = this.auditorFor(trace);
-      this.enqueue(() => chat.auditAll());
+      this.enqueue(() =>
+        this.identifyFor(chat, trace).then(() => chat.auditAll()),
+      );
     }
     const skipped = pending.length - MAX_RESUMED_RUN_AUDITS;
     if (skipped > 0) {
@@ -376,35 +389,103 @@ export class AuditService {
     return hasJudgeableEvidence(span) || trace.status !== "running";
   }
 
-  // Waits for queued intent classification to drain. Failures there are the
-  // intent service's to report, so they are swallowed rather than allowed to
-  // abort the audit that was about to run.
-  private async settledIntent() {
-    try {
-      await this.deps.intent?.idle();
-    } catch {
-      // The classifier logs and reports its own failures.
+  // Identifier phase: derive the spec this chat will be judged against, and
+  // the spec the auditor itself is working under, before any step is scored.
+  private async identifyFor(chat: AgentChatAuditor, trace: TraceRecord) {
+    await chat.identifyIntent(() => this.deriveBoth(trace));
+  }
+
+  private async deriveBoth(trace: TraceRecord): Promise<IntentDerivation> {
+    // Open the auditor's own run before reducing, so identifier calls for
+    // the subject land on that run rather than on the subject itself.
+    const auditTraceId = this.openAuditTrace(trace);
+    const target = await this.deriveFor(trace);
+    this.deps.auditStore.recordIntent(trace, target);
+
+    const auditTrace =
+      auditTraceId && auditTraceId !== trace.id
+        ? this.deps.traceStore.get(auditTraceId)
+        : null;
+    if (auditTrace) {
+      const auditor = await this.deriveFor(auditTrace);
+      this.deps.auditStore.recordIntent(auditTrace, auditor);
     }
+    return target;
   }
 
-  // The spec, captured once per chat. Main's human corrections can append a
-  // version after a run has been judged, and re-reading here would make an old
-  // trace look as though it had been judged against a rule that did not exist
-  // when it ran.
-  private captureIntent(trace: TraceRecord) {
-    return {
-      intentId: this.deps.intent?.currentId(trace.agentId) ?? "",
-      state: this.intentState(trace.agentId),
-    };
+  // Same reducer for both agents. The target rebases current instructions onto
+  // prior audit derivations and this run's message. The auditor rebases its
+  // own spec — "Audit the target agent." — the same way.
+  private async deriveFor(trace: TraceRecord): Promise<IntentDerivation> {
+    const auditor = isAuditorTrace(trace);
+    return this.reducerFor(trace).reduce({
+      instructions: auditor
+        ? AUDITOR_OBJECTIVE
+        : instructionsOf(trace) || trace.prompt,
+      prior: this.priorIntent(trace),
+      message: auditor ? AUDITOR_OBJECTIVE : trace.prompt,
+    });
   }
 
-  private intentState(agentId: string): IntentState {
-    const state = this.deps.intent?.state(agentId);
-    return state ? { ...state, extended: [...state.extended] } : {
-      instructions: "",
-      objective: "",
-      extended: [],
-    };
+  private reducerFor(trace: TraceRecord): IntentReducer {
+    return (
+      this.deps.intentReducer ??
+      new IntentReducer((state, message) =>
+        this.classifyScope(trace, state, message),
+      )
+    );
+  }
+
+  private priorIntent(trace: TraceRecord): IntentState | null {
+    for (const candidate of this.deps.traceStore.listByAgent(trace.agentId)) {
+      if (candidate.id === trace.id) continue;
+      if (isAuditorTrace(candidate) !== isAuditorTrace(trace)) continue;
+      if (candidate.startedAt >= trace.startedAt) continue;
+      const intent = this.deps.auditStore.intentOf(candidate.id);
+      if (intent) return intent;
+    }
+    return null;
+  }
+
+  private async classifyScope(
+    trace: TraceRecord,
+    state: IntentState,
+    message: string,
+  ) {
+    const user = buildIntentScopeUserMessage(state, message);
+    const { verdict, attempts, status, failure } = await this.model.complete(
+      this.auditorRun(trace),
+      this.deps.intentModel,
+      this.deps.securityModel !== this.deps.intentModel
+        ? this.deps.securityModel
+        : null,
+      INTENT_SCOPE_SYSTEM_PROMPT,
+      user,
+      intentClassification,
+    );
+    this.recordAuditorAttempts(trace, {
+      name: "audit.identify",
+      label: "Identify intent",
+      targetSpanId: null,
+      prompt: user,
+      attempts,
+      usedFallback: status === "degraded",
+    });
+    if (!verdict) {
+      this.deps.log?.(
+        "intent identifier failed" + (failure ? ": " + failure : ""),
+      );
+      return null;
+    }
+    if (verdict.classification === "NO_CHANGE") {
+      return {
+        ...verdict,
+        extendedIntent: [],
+        removedIntent: [],
+        objective: null,
+      };
+    }
+    return verdict;
   }
 
   private priorPromptInjectionQuotes(traceId: string): string[] {
@@ -472,11 +553,9 @@ export class AuditService {
   // asking before any of them is paid for.
   private async stepAudit(chat: AgentChatAuditor, spanId: string) {
     const traceId = chat.chatId;
-    // The classification of the message that opened this run is queued before
-    // the run starts, so draining that queue here is what guarantees a step is
-    // judged against the spec as the user last stated it rather than the one it
-    // replaced. Costs nothing on the request path: audits are already off it.
-    await this.settledIntent();
+    const opened = this.deps.traceStore.get(traceId);
+    if (!opened) return;
+    await this.identifyFor(chat, opened);
     const trace = this.deps.traceStore.get(traceId);
     const span = trace?.spans.find((item) => item.id === spanId);
     if (!trace || !span) return;
@@ -488,14 +567,7 @@ export class AuditService {
     const deterministic = runDeterministicChecks(activity, {
       whitelist: this.deps.networkWhitelist,
     });
-    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
-    // Read with the spec, not after the model call below. Stamping the version
-    // afterwards labelled the finding with whatever the spec had become in the
-    // meantime, so a finding could cite a version it was never judged against.
-    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
-    // Falls back to the run's own prompt for agents created before intent
-    // tracking existed, so a step is never judged against an empty spec.
-    if (intent.objective.length === 0) intent.objective = trace.prompt;
+    const intent = judgedIntent(chat, trace);
 
     const stepPrompt = buildStepContext({
       trace,
@@ -602,7 +674,7 @@ export class AuditService {
     });
 
     const steps = auditSteps(
-      { id: randomUUID(), traceId, agentId: trace.agentId, spanId, intentId },
+      { id: randomUUID(), traceId, agentId: trace.agentId, spanId },
       (push) => {
         emitPolicyFindings(push, report.policies);
         for (const tag of report.tags) {
@@ -619,7 +691,7 @@ export class AuditService {
       trace,
       spanId,
       steps,
-      intentId,
+      "",
       healthOf(report.status),
     );
     await this.rememberStep(trace, span, steps, {
@@ -715,7 +787,6 @@ export class AuditService {
   // needs the steps that came before.
   private async forwardTrace(
     trace: TraceRecord,
-    intentId: string,
   ): Promise<AuditTraceStep[]> {
     const memory = this.deps.memory;
     if (!memory) return [];
@@ -796,7 +867,6 @@ export class AuditService {
         traceId: trace.id,
         agentId: trace.agentId,
         spanId: null,
-        intentId,
       },
       (push) => {
         for (const entry of verdict?.carriedOut ?? []) {
@@ -831,7 +901,6 @@ export class AuditService {
   private async backTrace(
     chat: AgentChatAuditor,
     trace: TraceRecord,
-    intentId: string,
     open: OpenQuestion[],
   ) {
     const identity = {
@@ -839,7 +908,6 @@ export class AuditService {
       traceId: trace.id,
       agentId: trace.agentId,
       spanId: null,
-      intentId,
     };
     const memory = this.deps.memory;
     // Without the step summaries there is nothing to walk back through. The
@@ -856,7 +924,7 @@ export class AuditService {
     }
 
     const meta = await memory.readMeta(trace.agentId, trace.id);
-    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
+    const intent = judgedIntent(chat, trace);
     const history = trace.spans
       .map((span, index) => ({ span, number: index + 1 }))
       .filter(({ span }) => meta[span.id])
@@ -956,10 +1024,11 @@ export class AuditService {
   // together once the chat has finished.
   private async auditAll(chat: AgentChatAuditor) {
     const traceId = chat.chatId;
-    await this.settledIntent();
+    const opened = this.deps.traceStore.get(traceId);
+    if (!opened) return;
+    await this.identifyFor(chat, opened);
     const trace = this.deps.traceStore.get(traceId);
     if (!trace) return;
-    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
 
     let followThrough: AuditTraceStep[] = [];
     try {
@@ -978,10 +1047,10 @@ export class AuditService {
         ...this.injectionSuspicions(traceId),
       ];
       const [forward, back] = await Promise.all([
-        this.forwardTrace(settled, intentId),
+        this.forwardTrace(settled),
         open.length === 0
           ? Promise.resolve<AuditTraceStep[]>([])
-          : this.backTrace(chat, settled, intentId, open),
+          : this.backTrace(chat, settled, open),
       ]);
       followThrough = forward.concat(withoutDuplicatesOf(forward, back));
     } catch (error) {
@@ -996,7 +1065,6 @@ export class AuditService {
           traceId,
           agentId: trace.agentId,
           spanId: null,
-          intentId,
         },
         (push) => {
           // Needs no model, so it still reports when Ark is unreachable.
@@ -1015,7 +1083,7 @@ export class AuditService {
         },
       ).concat(followThrough),
       "",
-      intentId,
+      "",
       "ok",
     );
     // The run-level pass is the last thing an auditor does for a chat, so this
@@ -1043,14 +1111,15 @@ export class AuditService {
   ) {
     const traceService = this.deps.traceService;
     if (!traceService) return;
-    const auditTraceId = this.openAuditTrace(trace);
-    if (auditTraceId === null) return;
+    const dest = this.destinationForAttempts(trace);
+    if (dest === null) return;
+    const subagentType = auditorSubagentType(input.name);
     input.attempts.forEach((attempt, index) => {
       const fallback = input.usedFallback && index === input.attempts.length - 1;
       traceService.recordModelCall(
-        auditTraceId,
+        dest,
         auditorCallSpan({
-          traceId: auditTraceId,
+          traceId: dest,
           name: input.name,
           label: fallback ? input.label + " (fallback)" : input.label,
           // Still the span on the *audited* trace, not on this one. It is the
@@ -1061,8 +1130,20 @@ export class AuditService {
           attempt,
           fallback,
         }),
+        subagentType ? { subagentType } : undefined,
       );
     });
+  }
+
+  // Where this auditor's model calls are recorded. A chat that is already
+  // judging a subject writes to its own run. Identifying the auditor's spec
+  // during the parent's pass writes onto that auditor run — it is not a
+  // nested audit of the auditor.
+  private destinationForAttempts(subject: TraceRecord): string | null {
+    const judging = this.auditors.get(subject.id);
+    if (judging?.auditTraceId) return judging.auditTraceId;
+    if (isAuditorTrace(subject)) return subject.id;
+    return this.openAuditTrace(subject);
   }
 
   // The auditor's own trace for this chat, opened on first use. One per audited
@@ -1076,15 +1157,13 @@ export class AuditService {
       const auditTraceId = randomUUID();
       traceService.onRunStart(
         {
-          // The audited agent's own id. An auditor is not a separate agent —
-          // it has no workspace and no instructions of its own — and sharing
-          // the id keeps its findings, its memory folder and its archive
-          // filed with the run they are about. What separates the two is
-          // auditOf, which is also what the depth-0 gate reads.
+          // Filed under the audited agent's id so findings, memory and the
+          // archive sit with the run they are about. The auditor is still a
+          // separate agent: its spec is AUDITOR_OBJECTIVE, and auditOf is
+          // what the depth-0 gate reads.
           id: trace.agentId,
           name: "Auditor",
-          instructions:
-            "Judges trace " + trace.id + " against the specification it was run under.",
+          instructions: AUDITOR_OBJECTIVE,
           codexThreadId: null,
         },
         {
@@ -1143,10 +1222,11 @@ export class AuditService {
       // once per run and appends; this one can be repeated, so the previous
       // answer goes first rather than being doubled.
       this.deps.auditStore.clearRunAudit(trace.id);
+      await this.identifyFor(chat, trace);
       await this.auditAll(chat);
       return;
     }
-    const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
+    await this.identifyFor(chat, trace);
     // Asking again answers the same questions again, at both levels.
     this.deps.auditStore.clearSpanAudits(trace.id);
     this.deps.auditStore.clearRunAudit(trace.id);
@@ -1172,7 +1252,7 @@ export class AuditService {
     for (const span of budget) {
       chat.openStep();
       this.enqueue(() =>
-        this.auditorStepAudit(chat, trace, span, intentId).finally(() =>
+        this.auditorStepAudit(chat, trace, span).finally(() =>
           chat.closeStep(),
         ),
       );
@@ -1186,13 +1266,12 @@ export class AuditService {
       const { steps, status } = await this.auditorFindings(
         trace,
         auditorSpans,
-        intentId,
         unjudged,
       );
       this.deps.auditStore.recordRequestedAudit(
         trace,
         steps,
-        intentId,
+        "",
         healthOf(status),
       );
       this.closeAuditTrace(chat);
@@ -1206,14 +1285,12 @@ export class AuditService {
     chat: AgentChatAuditor,
     trace: TraceRecord,
     span: TraceSpan,
-    intentId: string,
   ) {
     const identity = {
       id: randomUUID(),
       traceId: trace.id,
       agentId: trace.agentId,
       spanId: span.id,
-      intentId,
     };
     // The auditor's prompt embeds step content. Redaction runs before a span is
     // stored, so a credential surfacing here means masking missed it on the way
@@ -1234,7 +1311,7 @@ export class AuditService {
         );
         if (leaked) push("warning", "security", leakedCredentialFinding(span));
       });
-      this.deps.auditStore.recordSpan(trace, span.id, steps, intentId, "degraded");
+      this.deps.auditStore.recordSpan(trace, span.id, steps, "", "degraded");
       return;
     }
 
@@ -1260,7 +1337,7 @@ export class AuditService {
       trace,
       span.id,
       steps,
-      intentId,
+      "",
       healthOf(status),
     );
   }
@@ -1268,7 +1345,6 @@ export class AuditService {
   private async auditorFindings(
     trace: TraceRecord,
     auditorSpans: TraceSpan[],
-    intentId: string,
     // Steps the requested-audit budget stopped this pass from judging.
     // Reported here so a repeated audit cannot drop the notice and read as
     // though it had looked at everything.
@@ -1279,7 +1355,6 @@ export class AuditService {
       traceId: trace.id,
       agentId: trace.agentId,
       spanId: null,
-      intentId,
     };
     if (auditorSpans.length === 0) {
       const steps = auditSteps(identity, (push) =>

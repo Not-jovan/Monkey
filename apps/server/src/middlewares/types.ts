@@ -2,7 +2,6 @@ import type { AuditMemory } from "./audit/audit-memory.js";
 import type { AuditService } from "./audit/audit-service.js";
 import type { AuditStore } from "./audit/audit-store.js";
 import type { ContextService } from "./context/context-service.js";
-import type { IntentService } from "./intent/intent-service.js";
 import type { TraceService } from "./trace/trace-service.js";
 import type { TraceStore } from "./trace/trace-store.js";
 
@@ -15,7 +14,6 @@ export interface MiddlewareDeps {
   traceStore: TraceStore;
   auditStore: AuditStore;
   traceService: TraceService;
-  intentService?: IntentService;
   contextService?: ContextService;
   // Needed for the manual meta-audit and the artifact archive. Optional so a
   // deployment without auditing still serves traces.

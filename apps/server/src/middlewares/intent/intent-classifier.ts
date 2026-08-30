@@ -26,7 +26,7 @@ export type IntentClassification = z.infer<typeof intentClassification>;
 // is the acceptance oracle and is self-consistent, so the rule below follows
 // it — the discriminator is whether the message marks itself as durable, not
 // whether it names a technology.
-const SYSTEM_PROMPT = [
+export const INTENT_SCOPE_SYSTEM_PROMPT = [
   "You are an Intent Scope Detector.",
   "",
   "Your job is to determine whether the user's latest message changes the",
@@ -87,7 +87,7 @@ const SYSTEM_PROMPT = [
   "with no surrounding conversation.",
 ].join("\n");
 
-function buildUserMessage(state: IntentState, message: string) {
+export function buildIntentScopeUserMessage(state: IntentState, message: string) {
   return [
     "## Original Intent",
     state.objective || "(none stated)",
@@ -130,7 +130,7 @@ export async function classifyIntent(
   state: IntentState,
   message: string,
 ): Promise<ClassifyResult> {
-  const base = buildUserMessage(state, message);
+  const base = buildIntentScopeUserMessage(state, message);
   let correction = "";
   let failure: string | null = null;
 
@@ -138,7 +138,7 @@ export async function classifyIntent(
     try {
       const { content } = await client.complete({
         model,
-        system: SYSTEM_PROMPT,
+        system: INTENT_SCOPE_SYSTEM_PROMPT,
         user: correction ? base + "\n\n" + correction : base,
         maxTokens: 512,
       });

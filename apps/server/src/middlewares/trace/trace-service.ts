@@ -103,6 +103,15 @@ function preview(text: string, limit = 80) {
   return flat.slice(0, limit - 1) + "…";
 }
 
+// "Summarize · Model · plan" → the step the auditor asked about.
+function auditorCallSubject(label: string) {
+  const sep = " · ";
+  const index = label.indexOf(sep);
+  if (index <= 0) return undefined;
+  const subject = label.slice(index + sep.length).trim();
+  return subject.length > 0 ? subject : undefined;
+}
+
 function isSubagentTool(toolName: string) {
   const normalized = toolName.toLowerCase();
   if (normalized === "task") return true;
@@ -1145,15 +1154,34 @@ export class TraceService {
   // under the run rather than under a turn, because an auditor does not take
   // turns — it asks a fixed set of questions about one trace and stops.
   //
+  // A spawned call is recorded the way Codex records spawn_agent: a tool span
+  // on the caller's lane, then the model call parented under it with laneId
+  // equal to the spawn. The graph reads those fields and nothing else.
+  //
   // Usage is rolled up here so an auditor's run accounts for its tokens the
   // way a runtime's run does, where the same numbers arrive over OTLP.
-  recordModelCall(runId: string, span: TraceSpan) {
+  recordModelCall(
+    runId: string,
+    span: TraceSpan,
+    options?: { subagentType?: string },
+  ) {
     const state = this.runs.get(runId);
     if (!state) return null;
+    const trace = this.store.get(runId);
+    const callerLane =
+      trace && isAuditorTrace(trace) ? "auditor" : "root";
+    const subagentType = options?.subagentType;
+    const parentId = subagentType
+      ? this.createSubagentSpawn(runId, state, callerLane, subagentType, span)
+      : state.rootSpanId;
     const appended = this.store.appendSpan(runId, {
       ...span,
       traceId: runId,
-      parentId: state.rootSpanId,
+      parentId,
+      attributes: {
+        ...span.attributes,
+        laneId: subagentType ? parentId : callerLane,
+      },
     });
     if (!appended) return null;
     const input = span.attributes.inputTokens;
@@ -1165,6 +1193,52 @@ export class TraceService {
       });
     }
     return appended;
+  }
+
+  // Same shape Codex writes for spawn_agent, so layout, indent and delegate
+  // edges cannot tell an auditor check from a runner subagent. One spawn per
+  // call: collapsing by check kind made every summarize share a lane, so the
+  // graph could not say which step the auditor had asked about.
+  private createSubagentSpawn(
+    runId: string,
+    state: RunState,
+    callerLane: string,
+    subagentType: string,
+    call: TraceSpan,
+  ) {
+    const spanId = randomUUID();
+    const callId = "spawn:" + spanId;
+    state.toolSpans.set(callId, spanId);
+    const targetSpanId = call.attributes.targetSpanId;
+    const targetLabel = auditorCallSubject(call.label);
+    const completed = call.status !== "running";
+    this.store.appendSpan(runId, {
+      id: spanId,
+      traceId: runId,
+      parentId: state.rootSpanId,
+      name: "tool.spawn_agent",
+      label: "Subagent · " + subagentType,
+      kind: "tool_call",
+      actor: "agent",
+      status: completed ? call.status : "running",
+      startedAt: call.startedAt,
+      endedAt: completed ? call.endedAt : null,
+      durationMs: completed ? call.durationMs : null,
+      attributes: {
+        toolName: "spawn_agent",
+        callId,
+        subagent: true,
+        subagentType,
+        laneId: callerLane,
+        arguments: JSON.stringify({ subagent_type: subagentType }),
+        ...(typeof targetSpanId === "string" && targetSpanId.length > 0
+          ? { targetSpanId }
+          : {}),
+        ...(targetLabel ? { targetLabel } : {}),
+      },
+      error: completed && call.status === "error" ? call.error : null,
+    });
+    return spanId;
   }
 
   private ensureTurn(runId: string, state: RunState, timestamp: string) {

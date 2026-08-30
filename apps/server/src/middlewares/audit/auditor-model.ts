@@ -83,6 +83,8 @@ export function summarizeError(error: unknown) {
 
 // One attempt, as a span in the agent's own shape. That compatibility is what
 // makes the auditor's own trace auditable by the machinery that judges an agent.
+// Lane and parent are filled by TraceService.recordModelCall — the same fields
+// Codex stamps — so the graph never has to guess from this span's name.
 export function auditorCallSpan(input: {
   traceId: string;
   name: string;
@@ -111,7 +113,6 @@ export function auditorCallSpan(input: {
       // Whether this call judged one step or the whole run. The forward-trace
       // and backtrace read every step at once, so they belong with the run.
       phase: input.name.startsWith("audit.step") ? "step" : "run",
-      laneId: "auditor",
       ...(input.attempt.usage?.inputTokens !== undefined
         ? { inputTokens: input.attempt.usage.inputTokens }
         : {}),
@@ -123,6 +124,32 @@ export function auditorCallSpan(input: {
     },
     error: input.attempt.error,
   };
+}
+
+// The Codex spawn_agent argument the tracer already knows. Step checks are
+// subagents; run-level calls (forward-trace, back-trace) are the auditor itself.
+export function auditorSubagentType(name: string): string | undefined {
+  if (name === "audit.identify") return "identify";
+  if (!name.startsWith("audit.step.")) return undefined;
+  const key = name.slice("audit.step.".length);
+  switch (key) {
+    case "summary":
+      return "summarize";
+    case "intent":
+      return "intent";
+    case "injection":
+      return "injection";
+    case "secrets":
+      return "secrets";
+    case "network":
+      return "network";
+    case "tool":
+      return "tool misuse";
+    case "sinks":
+      return "sink writes";
+    default:
+      return key.replace(/-/g, " ");
+  }
 }
 
 export class AuditorModel {

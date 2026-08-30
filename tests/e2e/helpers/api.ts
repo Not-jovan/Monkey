@@ -89,27 +89,23 @@ export interface TraceDetail {
   findings: AuditTraceStep[];
   auditComplete: boolean;
   auditHealth: "ok" | "degraded" | "failed";
-  intentId: string | null;
   intent: {
-    id: string;
+    instructions: string;
     objective: string;
     extended: string[];
-    stale: boolean;
   } | null;
   context: ContextView | null;
 }
 
 export interface IntentUpdate {
   logs: string[];
-  kind: "seed" | "classified" | "revert" | "human-correction";
+  kind: "seed" | "classified";
   message?: string;
   reason?: string;
   addedConstraints: string[];
   previousObjective: string | null;
   traceId: string | null;
   revertedFrom: string | null;
-  sourceFindingId?: string | null;
-  sourceSpanId?: string | null;
 }
 
 export interface IntentVersionEntry {
@@ -199,18 +195,6 @@ export async function waitForTrace(
     )
     .toMatch(/^(completed|failed|cancelled)$/);
   return latest!;
-}
-
-export async function revertIntent(
-  request: APIRequestContext,
-  agentId: string,
-  intentId: string,
-): Promise<IntentResponse> {
-  return json<IntentResponse>(
-    await request.post(`/api/agents/${agentId}/intent/revert`, {
-      data: { intentId },
-    }),
-  );
 }
 
 export async function getIntent(

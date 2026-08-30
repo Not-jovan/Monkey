@@ -183,14 +183,14 @@ export interface ContextView {
 }
 
 export interface AuditorTrace {
-  traceId: string;
+  // The run that was judged. The auditor's work is `auditor`, whose id is
+  // `auditTraceId` — not this one.
+  auditedTraceId: string;
   agentId: string;
   health: AuditHealth;
-  spans: TraceSpan[];
-  // The auditor's own run. Present once this trace has been audited, and what
-  // "open this auditor's trace" navigates to — the level above reads it exactly
-  // as this level reads the Agent's run.
   auditTraceId: string | null;
+  auditor: TraceRecord | null;
+  legacyAuditorSpans: TraceSpan[];
   // An audit of the auditor recorded before that run had a trace of its own.
   // Read-only: nothing writes here any more, but a finding already recorded
   // should not vanish because the shape around it changed.
@@ -224,22 +224,11 @@ export interface IntentState {
   extended: string[];
 }
 
-// The kinds of edit a version can record. "instructions" is an edit made in
-// agent settings; "adopted" is a diverged objective written back into them.
-export type IntentUpdateKind =
-  | "seed"
-  | "classified"
-  | "revert"
-  | "instructions"
-  | "adopted"
-  // A person corrected the spec after the run, against the evidence.
-  | "human-correction";
-// The spec a trace was judged against, resolved onto the response so a
-// download does not have to go looking it up by id.
-export interface TraceIntentView extends IntentState {
-  id: string;
-  stale: boolean;
-}
+// The kinds of edit a derivation can record. History is the sequence of
+// per-audit identifier passes, not a standing store someone can rewind.
+export type IntentUpdateKind = "seed" | "classified";
+// The spec a trace was judged against, stored on that chat audit.
+export type TraceIntentView = IntentState;
 
 export interface IntentUpdate {
   logs: string[];

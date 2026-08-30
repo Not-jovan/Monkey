@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
 import { emptyUsage } from "../trace/trace-model.js";
 import { TraceStore } from "../trace/trace-store.js";
-import { ArkApiError, type ArkClient } from "../../ark-client.js";
+import { ArkApiError } from "../../ark-client.js";
 import type { AgentRunner } from "../../types.js";
 import { TraceService } from "../trace/trace-service.js";
 import { createRedactor } from "../trace/redaction.js";
@@ -13,8 +13,8 @@ import { codexRuntime } from "../../runtimes/codex.js";
 import { AuditMemory } from "./audit-memory.js";
 import { AuditService } from "./audit-service.js";
 import { AuditStore } from "./audit-store.js";
-import { IntentService } from "../intent/intent-service.js";
-import { IntentStore } from "../intent/intent-store.js";
+import { IntentReducer } from "../intent/intent-reducer.js";
+import { AUDITOR_OBJECTIVE } from "../intent/intent-model.js";
 import { ContextService } from "../context/context-service.js";
 import { ContextStore } from "../context/context-store.js";
 
@@ -34,6 +34,7 @@ interface FakeResponder {
 // auditStep's checks 0, 3 and 4 are all given the same step context, so the
 // only thing that says which one is asking is its system prompt.
 function checkOf(system: string): string {
+  if (system.includes("You are an Intent Scope Detector")) return "identify";
   if (system.includes("You are summarising one step")) return "summary";
   if (system.includes("against the user's stated intent")) return "intent";
   if (system.includes("for security signals")) return "injection";
@@ -56,18 +57,6 @@ interface FakeClient {
     system: string;
     user: string;
   }) => Promise<{ content: string }>;
-}
-
-// IntentService still talks to the provider directly, so its fake answers as
-// one. Only the auditor moved onto a runner.
-function arkClientFor(client: FakeClient): ArkClient {
-  return {
-    complete: async (input) => ({
-      ...(await client.complete(input)),
-      usage: null,
-      model: null,
-    }),
-  };
 }
 
 function runnerFor(client: FakeClient): AgentRunner {
@@ -208,11 +197,21 @@ function toolSpan(traceId: string, status: TraceSpan["status"]): TraceSpan {
 const SAFE_VERDICT =
   '{"dangerous":false,"promptInjection":false,"toolMisuse":false,"restrictionBypass":false,"reason":"routine"}';
 
+function noChangeReducer() {
+  return new IntentReducer(async () => ({
+    classification: "NO_CHANGE",
+    reason: "test",
+    extendedIntent: [],
+    removedIntent: [],
+    objective: null,
+  }));
+}
+
 function makeAudit(
   stores: Awaited<ReturnType<typeof makeStores>>,
   responder: FakeResponder,
   networkWhitelist: string[] | null = null,
-  intent?: IntentService,
+  intentReducer: IntentReducer = noChangeReducer(),
   requestedStepBudget?: number,
 ) {
   const service = new AuditService({
@@ -224,7 +223,7 @@ function makeAudit(
     securityModel: "sec-model",
     intentModel: "intent-model",
     networkWhitelist,
-    ...(intent ? { intent } : {}),
+    intentReducer,
     ...(requestedStepBudget === undefined ? {} : { requestedStepBudget }),
     memory: stores.auditMemory,
     enabled: true,
@@ -278,6 +277,22 @@ describe("AuditService", () => {
       "audit.step.summary",
     ]);
     expect(auditorSpans.every((span) => span.kind === "model_call")).toBe(true);
+    const auditTrace = stores.traceStore.get(
+      stores.traceStore.auditorTraceFor("trace-1")!,
+    )!;
+    const spawns = auditTrace.spans.filter(
+      (span) => span.name === "tool.spawn_agent",
+    );
+    expect(spawns.map((span) => span.attributes.subagentType).sort()).toEqual([
+      "injection",
+      "intent",
+      "summarize",
+    ]);
+    expect(
+      auditorSpans.every((span) =>
+        spawns.some((spawn) => span.parentId === spawn.id),
+      ),
+    ).toBe(true);
     const injectionSpan = auditorSpans.find(
       (span) => span.name === "audit.step.injection",
     );
@@ -611,31 +626,26 @@ describe("AuditService", () => {
   // version per run rather than per step: a correction applied afterwards must
   // not rewrite what an older run appears to have been judged against, and the
   // auditor cannot tell a mid-run reclassification from a later correction.
-  it("pins every finding in a run to one spec version", async () => {
+  it("identifies intent once per chat and judges every step against it", async () => {
     const stores = await makeStores();
-    const directory = await mkdtemp(path.join(tmpdir(), "audit-pin-"));
-    const intentStore = new IntentStore(path.join(directory, "intent"));
-    await intentStore.initialize();
-    cleanups.push(async () => {
-      await intentStore.flush();
-      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    let classified = 0;
+    const reducer = new IntentReducer(async () => {
+      classified += 1;
+      return {
+        classification: "INTENT_UPDATE",
+        reason: classified === 1 ? "first" : "later",
+        extendedIntent:
+          classified === 1 ? ["Do not read .env files."] : ["Use HTML."],
+        removedIntent: [],
+        objective: null,
+      };
     });
-    const intent = new IntentService({
-      store: intentStore,
-      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
-      model: "intent-model",
-      enabled: false,
-    });
-    intent.seed("agent-1", "Build a TypeScript todo application");
-    const firstVersion = intent.currentId("agent-1");
-
-    // Flags every step, so each audited span leaves a finding to inspect.
     const responder: FakeResponder = {
       calls: [],
       respond: () =>
         '{"dangerous":true,"promptInjection":false,"toolMisuse":false,"restrictionBypass":false,"reason":"flagged"}',
     };
-    const service = makeAudit(stores, responder, null, intent);
+    const service = makeAudit(stores, responder, null, reducer);
 
     seedTrace(stores.traceStore, "trace-pin");
     stores.traceStore.appendSpan(
@@ -643,30 +653,13 @@ describe("AuditService", () => {
       promptSpan("trace-pin", "Build the list view"),
     );
     await service.idle();
-
-    // The spec moves partway through the same run.
-    intentStore.append("agent-1", {
-      instructions: "",
-      objective: "Build a TypeScript todo application",
-      extended: ["Do not read .env files."],
-    });
-    const secondVersion = intent.currentId("agent-1");
-    expect(secondVersion).not.toBe(firstVersion);
-
     stores.traceStore.appendSpan("trace-pin", toolSpan("trace-pin", "ok"));
     await service.idle();
 
-    const findings = stores.auditStore.listByTrace("trace-pin");
-    const promptFinding = findings.find(
-      (step) => step.spanId === "span-prompt-trace-pin",
-    );
-    const toolFinding = findings.find(
-      (step) => step.spanId === "span-tool-trace-pin-ok",
-    );
-    expect(promptFinding?.intentId).toBe(firstVersion);
-    expect(toolFinding?.intentId).toBe(firstVersion);
-    // Not the version that appeared partway through.
-    expect(toolFinding?.intentId).not.toBe(secondVersion);
+    expect(classified).toBe(2);
+    expect(stores.auditStore.intentOf("trace-pin")?.extended).toEqual([
+      "Do not read .env files.",
+    ]);
   });
 
   it("flags a camouflaged gist that dumps env vars and obeys an external reply", async () => {
@@ -827,37 +820,15 @@ describe("AuditService", () => {
     ).toBe(true);
   });
 
-  it("judges a step against the constraints the user added mid-thread", async () => {
+  it("judges a step against the constraints the identifier derived", async () => {
     const stores = await makeStores();
-    const directory = await mkdtemp(path.join(tmpdir(), "audit-intent-"));
-    const intentStore = new IntentStore(path.join(directory, "intent"));
-    await intentStore.initialize();
-    cleanups.push(async () => {
-      await intentStore.flush();
-      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
-    });
-    const intent = new IntentService({
-      store: intentStore,
-      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
-      model: "intent-model",
-      enabled: false,
-    });
-    intent.seed("agent-1", "Build a TypeScript todo application");
-    intentStore.append("agent-1", {
-      instructions: "",
+    const reducer = new IntentReducer(async () => ({
+      classification: "INTENT_UPDATE",
+      reason: "prohibition",
+      extendedIntent: ["Do not read .env files."],
+      removedIntent: [],
       objective: "Build a TypeScript todo application",
-      extended: ["Do not read .env files."],
-      update: {
-        kind: "classified",
-        logs: ["Do not read .env files.", "prohibition"],
-        addedConstraints: ["Do not read .env files."],
-        removedConstraints: [],
-        previousObjective: null,
-        traceId: null,
-        revertedFrom: null,
-      },
-    });
-
+    }));
     const responder: FakeResponder = {
       calls: [],
       respond: () =>
@@ -874,12 +845,11 @@ describe("AuditService", () => {
           reason: "read a prohibited file",
         }),
     };
-    const service = makeAudit(stores, responder, null, intent);
+    const service = makeAudit(stores, responder, null, reducer);
     const trace = seedTrace(stores.traceStore, "trace-constraint");
     stores.traceStore.appendSpan(trace.id, toolSpan(trace.id, "ok"));
     await service.idle();
 
-    // The constraint has to reach the model, or it cannot judge against it.
     expect(responder.calls[0]?.user).toContain("Do not read .env files.");
     expect(responder.calls[0]?.user).toContain(
       "Build a TypeScript todo application",
@@ -894,67 +864,71 @@ describe("AuditService", () => {
     ).toBe(true);
   });
 
-  it("pins queued audits to the intent active when the trace began", async () => {
+  it("keeps the identified spec even if a later reduce would differ", async () => {
     const stores = await makeStores();
-    const directory = await mkdtemp(path.join(tmpdir(), "audit-pinned-intent-"));
-    const intentStore = new IntentStore(path.join(directory, "intent"));
-    await intentStore.initialize();
-    cleanups.push(async () => {
-      await intentStore.flush();
-      await rm(directory, { recursive: true, force: true, maxRetries: 5 });
+    let classified = 0;
+    const reducer = new IntentReducer(async () => {
+      classified += 1;
+      return {
+        classification: "INTENT_UPDATE",
+        reason: "rule",
+        extendedIntent:
+          classified === 1
+            ? ["Use Markdown for all documentation."]
+            : ["Use HTML for all documentation."],
+        removedIntent: [],
+        objective: null,
+      };
     });
-    const intent = new IntentService({
-      store: intentStore,
-      client: arkClientFor(fakeClient({ calls: [], respond: () => "" })),
-      model: "intent-model",
-      enabled: false,
-    });
-    intent.seed("agent-1", "Write installation documentation");
-    intent.applyHumanCorrection("agent-1", {
-      correction: "Use Markdown for all documentation.",
-      traceId: "source-trace",
-      findingId: "source-finding",
-      spanId: null,
-    });
-    const pinnedIntentId = intent.currentId("agent-1");
-
     const responder: FakeResponder = {
       calls: [],
       respond: () => SAFE_VERDICT,
     };
-    const service = makeAudit(stores, responder, null, intent);
+    const service = makeAudit(stores, responder, null, reducer);
     const trace = seedTrace(stores.traceStore, "trace-pinned");
     stores.traceStore.appendSpan(
       trace.id,
       promptSpan(trace.id, "Add an installation example"),
     );
-
-    // Change the active intent while the trace's audits are still queued.
-    // Step audits must retain the earlier snapshot.
-    intent.applyHumanCorrection("agent-1", {
-      correction: "Use HTML for all documentation.",
-      traceId: "later-trace",
-      findingId: "later-finding",
-      spanId: null,
-    });
     stores.traceStore.updateTrace(trace.id, (record) => {
       record.status = "completed";
       record.endedAt = "2026-08-26T12:00:10.000Z";
     });
     await service.idle();
 
-    expect(stores.auditStore.intentId(trace.id)).toBe(pinnedIntentId);
-    // Asserted on every call rather than on a count: auditStep now asks its
-    // checks concurrently, so the number of calls is a property of the split
-    // rather than of the pinning this test is about.
+    expect(stores.auditStore.intentOf(trace.id)?.extended).toEqual([
+      "Use Markdown for all documentation.",
+    ]);
     expect(responder.calls.length).toBeGreaterThan(0);
     for (const call of responder.calls) {
       expect(call.user).toContain("Use Markdown for all documentation.");
       expect(call.user).not.toContain("Use HTML for all documentation.");
     }
-    // Step audits ran under the pin. auditAll's traces only fire when there
-    // are suspicions to settle, so they are not asserted here.
     expect(responder.calls.some((call) => call.check === "intent")).toBe(true);
+  });
+
+  it("stores the auditor's own spec on the auditor chat audit", async () => {
+    const stores = await makeStores();
+    const service = makeAudit(stores, {
+      calls: [],
+      respond: () => SAFE_VERDICT,
+    });
+    const trace = seedTrace(stores.traceStore, "trace-auditor-spec");
+    stores.traceStore.appendSpan(trace.id, toolSpan(trace.id, "ok"));
+    stores.traceStore.updateTrace(trace.id, (record) => {
+      record.status = "completed";
+      record.endedAt = "2026-08-26T12:00:10.000Z";
+    });
+    await service.idle();
+
+    const auditTraceId = stores.traceStore.auditorTraceFor(trace.id);
+    expect(auditTraceId).toBeTruthy();
+    expect(stores.auditStore.intentOf(auditTraceId!)?.objective).toBe(
+      AUDITOR_OBJECTIVE,
+    );
+    expect(stores.auditStore.intentOf(trace.id)?.objective).not.toBe(
+      AUDITOR_OBJECTIVE,
+    );
   });
 
   it("audits a subagent reply, and only warns once the agent acts on it", async () => {

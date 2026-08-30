@@ -115,20 +115,6 @@ export function isMeaningful(change: IntentChange): boolean {
 }
 
 export function describeChange(change: IntentChange): string {
-  if (change.kind === "revert") {
-    return change.revertedFromVersion !== null
-      ? "Restored version " + change.revertedFromVersion
-      : "Restored an earlier version";
-  }
-  if (change.kind === "adopted") {
-    return "Objective adopted into the agent's instructions";
-  }
-  if (change.kind === "instructions") {
-    return change.objectiveBefore !== null
-      ? "Agent instructions edited; objective followed"
-      : "Agent instructions edited";
-  }
-  if (change.kind === "human-correction") return "Human correction applied";
   if (change.version === 1) return "Spec set from the agent's instructions";
   const parts: string[] = [];
   if (change.objectiveBefore !== null) parts.push("objective replaced");
@@ -163,11 +149,7 @@ export function versionByTrace(
     // Human corrections point at the evidence trace, not at a user message
     // that changed the spec. Marking that original message as the trigger
     // would misstate who made the correction and when.
-    if (
-      change.kind !== "human-correction" &&
-      change.traceId &&
-      hasVisibleChange(change)
-    ) {
+    if (change.traceId && hasVisibleChange(change)) {
       byTrace.set(change.traceId, change);
     }
   }

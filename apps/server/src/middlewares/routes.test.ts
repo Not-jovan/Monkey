@@ -8,9 +8,11 @@ import { loadConfig } from "../config.js";
 import { HttpError } from "../errors.js";
 import { codexRuntime } from "../runtimes/codex.js";
 import { createAuditMiddleware } from "./audit/index.js";
+import type { AuditStore } from "./audit/audit-store.js";
 import { createContextMiddleware } from "./context/index.js";
-import { createIntentMiddleware } from "./intent/index.js";
 import { createTraceMiddleware, type TraceService } from "./trace/index.js";
+import type { TraceStore } from "./trace/trace-store.js";
+import { emptyUsage } from "./trace/trace-model.js";
 
 const fixture = JSON.parse(
   await readFile(
@@ -33,7 +35,10 @@ async function makeApp(environment: Record<string, string> = {}) {
     listAgents: () => [],
     getAgent: (id: string) => {
       if (!agents.has(id)) throw new HttpError(404, "Agent not found");
-      return { id };
+      return {
+        id,
+        instructions: "Build a todo list web application",
+      };
     },
     systemInfo: async () => ({}),
   } as unknown as AgentService;
@@ -61,13 +66,6 @@ async function makeApp(environment: Record<string, string> = {}) {
     traceStore: trace.traceStore,
     onStoreError,
   });
-  const intent = await createIntentMiddleware({
-    config,
-    client,
-    enabled: false,
-    onStoreError,
-    log,
-  });
   const audit = await createAuditMiddleware({
     config,
     client,
@@ -75,7 +73,6 @@ async function makeApp(environment: Record<string, string> = {}) {
     traceStore: trace.traceStore,
     traceService: trace.traceService,
     contextStore: context.contextStore,
-    intent,
     onStoreError,
     log,
     warn: () => {},
@@ -83,7 +80,6 @@ async function makeApp(environment: Record<string, string> = {}) {
   cleanups.push(async () => {
     await trace.flush();
     await context.flush();
-    await intent.flush();
     await audit.flush();
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
@@ -93,7 +89,6 @@ async function makeApp(environment: Record<string, string> = {}) {
     traceService: trace.traceService,
     auditStore: audit.auditStore,
     auditMemory: audit.auditMemory,
-    intentService: intent.intentService,
     contextService: context.contextService,
     collectorToken: "collector-token-1",
   });
@@ -103,15 +98,13 @@ async function makeApp(environment: Record<string, string> = {}) {
     traceService: trace.traceService,
     auditStore: audit.auditStore,
     auditMemory: audit.auditMemory,
-    intentStore: intent.intentStore,
-    intentService: intent.intentService,
     contextStore: context.contextStore,
-    agents,
   };
 }
 
 const AGENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const RUN_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+const EARLIER_RUN_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 
 function startRun(traceService: TraceService) {
   traceService.onRunStart(
@@ -123,6 +116,51 @@ function startRun(traceService: TraceService) {
     },
     { id: RUN_ID, prompt: "count files" },
   );
+}
+
+function createCompletedTrace(
+  traceStore: TraceStore,
+  id: string,
+  startedAt: string,
+) {
+  traceStore.create({
+    version: 1,
+    id,
+    agentId: AGENT_ID,
+    conversationId: null,
+    status: "completed",
+    startedAt,
+    endedAt: startedAt,
+    prompt: "count files",
+    model: null,
+    usage: emptyUsage(),
+    failingSpanId: null,
+    failure: null,
+    recoveredErrorCount: 0,
+    evidenceComplete: true,
+    unrecognizedEvents: 0,
+    auditOf: null,
+    auditDepth: 0,
+    spans: [],
+  });
+  return traceStore.get(id)!;
+}
+
+function pinDerivedIntent(
+  auditStore: AuditStore,
+  trace: NonNullable<ReturnType<TraceStore["get"]>>,
+  objective: string,
+  extended: string[] = [],
+) {
+  auditStore.recordIntent(trace, {
+    state: { instructions: objective, objective, extended },
+    addedConstraints: extended,
+    removedConstraints: [],
+    previousObjective: null,
+    reason: "test",
+    message: null,
+    kind: extended.length > 0 ? "classified" : "seed",
+  });
 }
 
 describe("Glassbox routes", () => {
@@ -249,11 +287,16 @@ describe("Glassbox routes", () => {
     });
     expect(audit.statusCode).toBe(200);
     const auditBody = audit.json<{
-      traceId: string;
-      spans: unknown[];
+      auditedTraceId: string;
+      auditTraceId: string | null;
+      auditor: null;
+      spans?: unknown;
     }>();
-    expect(auditBody.traceId).toBe(RUN_ID);
-    expect(auditBody.spans).toEqual([]);
+    expect(auditBody.auditedTraceId).toBe(RUN_ID);
+    expect(auditBody.auditTraceId).toBeNull();
+    expect(auditBody.auditor).toBeNull();
+    expect(auditBody).not.toHaveProperty("spans");
+    expect(auditBody).not.toHaveProperty("traceId");
     expect(detail.json()).not.toHaveProperty("auditorSpans");
     await app.close();
   });
@@ -349,6 +392,7 @@ describe("Glassbox routes", () => {
     expect(agentBody).not.toHaveProperty("auditorSpans");
     expect(agentBody).not.toHaveProperty("spans");
     expect(JSON.stringify(agentBody)).not.toContain("Step audit · Prompt");
+    expect(agentBody.auditTraceId).toBe(AUDIT_TRACE_ID);
 
     const auditor = await app.inject({
       method: "GET",
@@ -356,15 +400,20 @@ describe("Glassbox routes", () => {
     });
     expect(auditor.statusCode).toBe(200);
     const auditorBody = auditor.json<{
-      traceId: string;
-      agentId: string;
-      spans: { label: string; attributes: { context?: string } }[];
+      auditedTraceId: string;
+      auditTraceId: string;
+      auditor: { id: string; auditOf: string | null; spans: { label: string; traceId: string; attributes: { context?: string } }[] };
+      spans?: unknown;
     }>();
-    expect(auditorBody.traceId).toBe(RUN_ID);
-    expect(auditorBody.agentId).toBe(AGENT_ID);
-    expect(auditorBody.spans).toHaveLength(1);
-    expect(auditorBody.spans[0]?.label).toBe("Step audit · Prompt");
-    expect(auditorBody.spans[0]?.attributes.context).toContain("cat .env");
+    expect(auditorBody.auditedTraceId).toBe(RUN_ID);
+    expect(auditorBody.auditTraceId).toBe(AUDIT_TRACE_ID);
+    expect(auditorBody).not.toHaveProperty("spans");
+    expect(auditorBody.auditor.id).toBe(AUDIT_TRACE_ID);
+    expect(auditorBody.auditor.auditOf).toBe(RUN_ID);
+    expect(auditorBody.auditor.spans).toHaveLength(1);
+    expect(auditorBody.auditor.spans[0]?.label).toBe("Step audit · Prompt");
+    expect(auditorBody.auditor.spans[0]?.traceId).toBe(AUDIT_TRACE_ID);
+    expect(auditorBody.auditor.spans[0]?.attributes.context).toContain("cat .env");
 
     // The auditor's run shares the agent's id, because it is about that agent —
     // but it is not a run of the Agent, so it is not in the Agent's run list.
@@ -383,26 +432,24 @@ describe("Glassbox routes", () => {
     });
     expect(missing.statusCode).toBe(404);
   });
-  it("serves the current intent versions map", async () => {
-    const { app, intentStore } = await makeApp();
+  it("serves intent history from per-audit derivations", async () => {
+    const { app, auditStore, traceStore } = await makeApp();
     cleanups.push(async () => {
       await app.close();
     });
-    intentStore.seed(AGENT_ID, "Build a todo list web application");
-    const intentId = intentStore.append(AGENT_ID, {
-      instructions: "",
-      objective: "Build a todo list web application",
-      extended: ["Do not read .env files."],
-      update: {
-        kind: "classified",
-        logs: ["Do not read .env files.", "prohibition"],
-        addedConstraints: ["Do not read .env files."],
-        removedConstraints: [],
-        previousObjective: null,
-        traceId: null,
-        revertedFrom: null,
-      },
-    });
+    const objective = "Build a todo list web application";
+    const earlier = createCompletedTrace(
+      traceStore,
+      EARLIER_RUN_ID,
+      "2026-08-28T00:00:00.000Z",
+    );
+    const latest = createCompletedTrace(
+      traceStore,
+      RUN_ID,
+      "2026-08-28T01:00:00.000Z",
+    );
+    pinDerivedIntent(auditStore, earlier, objective);
+    pinDerivedIntent(auditStore, latest, objective, ["Do not read .env files."]);
 
     const response = await app.inject({
       method: "GET",
@@ -414,66 +461,38 @@ describe("Glassbox routes", () => {
       versions: { id: string; objective: string; extended: string[] }[];
       intentId: string | null;
     }>();
-    expect(body.intent.objective).toBe("Build a todo list web application");
+    expect(body.intent.objective).toBe(objective);
     expect(body.intent.extended).toEqual(["Do not read .env files."]);
-    expect(body.intentId).toBe(intentId);
-    // Ordered, so position in the list is the version number a reader sees.
-    expect(body.versions.map((entry) => entry.id).at(-1)).toBe(intentId);
+    expect(body.intentId).toBe(RUN_ID);
+    expect(body.versions.map((entry) => entry.id)).toEqual([
+      EARLIER_RUN_ID,
+      RUN_ID,
+    ]);
     expect(body.versions.at(-1)?.extended).toEqual(["Do not read .env files."]);
     expect(body).not.toHaveProperty("pending");
     expect(body).not.toHaveProperty("requiresConfirmation");
 
     const gone = await app.inject({
       method: "POST",
-      url: "/api/agents/" + AGENT_ID + "/intent/" + intentId,
-      payload: { decision: "confirm" },
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { intentId: RUN_ID },
     });
     expect(gone.statusCode).toBe(404);
   });
 
-  it("includes the pinned intent on a trace", async () => {
-    const { app, auditStore, intentStore, traceStore } = await makeApp();
+  it("includes the derived intent on a trace", async () => {
+    const { app, auditStore, traceStore } = await makeApp();
     cleanups.push(async () => {
       await app.close();
     });
-    intentStore.seed(AGENT_ID, "Build a todo list web application");
-    const firstId = intentStore.latest(AGENT_ID)?.intentId ?? "";
-    intentStore.append(AGENT_ID, {
-      instructions: "",
-      objective: "Build a todo list web application",
-      extended: ["Do not read .env files."],
-    });
-
-    traceStore.create({
-      version: 1,
-      id: RUN_ID,
-      agentId: AGENT_ID,
-      conversationId: null,
-      status: "completed",
-      startedAt: "2026-08-28T00:00:00.000Z",
-      endedAt: "2026-08-28T00:00:01.000Z",
-      prompt: "count files",
-      model: null,
-      usage: {
-        inputTokens: 0,
-        cachedTokens: 0,
-        outputTokens: 0,
-        reasoningTokens: 0,
-        toolTokens: 0,
-      },
-      failingSpanId: null,
-      failure: null,
-      recoveredErrorCount: 0,
-      evidenceComplete: true,
-      unrecognizedEvents: 0,
-      auditOf: null,
-      auditDepth: 0,
-      spans: [],
-    });
-    const trace = traceStore.get(RUN_ID);
-    expect(trace).toBeTruthy();
-    if (!trace) return;
-    auditStore.recordRun(trace, [], "", firstId, "ok");
+    const trace = createCompletedTrace(
+      traceStore,
+      RUN_ID,
+      "2026-08-28T00:00:00.000Z",
+    );
+    pinDerivedIntent(auditStore, trace, "Build a todo list web application", [
+      "Do not read .env files.",
+    ]);
 
     const response = await app.inject({
       method: "GET",
@@ -481,280 +500,16 @@ describe("Glassbox routes", () => {
     });
     expect(response.statusCode).toBe(200);
     const body = response.json<{
-      intentId: string | null;
       intent: {
-        id: string;
+        instructions: string;
         objective: string;
         extended: string[];
-        stale: boolean;
       } | null;
     }>();
-    expect(body.intentId).toBe(firstId);
-    expect(body.intent?.id).toBe(firstId);
+    expect(body).not.toHaveProperty("intentId");
     expect(body.intent?.objective).toBe("Build a todo list web application");
-    expect(body.intent?.extended).toEqual([]);
-    expect(body.intent?.stale).toBe(true);
-  });
-
-  // Reverting appends; it must never rewind, or an audit that pinned the
-  // reverted-away-from version would resolve to nothing.
-  it("restores an earlier intent version without erasing history", async () => {
-    const { app, intentStore } = await makeApp();
-    cleanups.push(async () => {
-      await app.close();
-    });
-    intentStore.seed(AGENT_ID, "Build a todo list web application");
-    const seedId = intentStore.latest(AGENT_ID)?.intentId ?? "";
-    const updatedId = intentStore.append(AGENT_ID, {
-      instructions: "",
-      objective: "Build a todo list web application",
-      extended: ["Do not read .env files."],
-    });
-
-    const response = await app.inject({
-      method: "POST",
-      url: "/api/agents/" + AGENT_ID + "/intent/revert",
-      payload: { intentId: seedId },
-    });
-    expect(response.statusCode).toBe(201);
-    const body = response.json<{
-      intent: { extended: string[] };
-      versions: { id: string; update?: { revertedFrom: string | null } }[];
-      intentId: string | null;
-    }>();
-    expect(body.intent.extended).toEqual([]);
-    expect(body.versions).toHaveLength(3);
-    expect(body.versions.at(-1)?.update?.revertedFrom).toBe(seedId);
-    expect(body.versions.map((entry) => entry.id)).toContain(updatedId);
-
-    const conflict = await app.inject({
-      method: "POST",
-      url: "/api/agents/" + AGENT_ID + "/intent/revert",
-      payload: { intentId: "not-a-version" },
-    });
-    expect(conflict.statusCode).toBe(409);
-  });
-
-  it("turns an audited finding into a human-authored intent constraint", async () => {
-    const { app, traceService, traceStore, auditStore, intentStore, agents } =
-      await makeApp();
-    cleanups.push(async () => {
-      await app.close();
-    });
-    intentStore.seed(AGENT_ID, "Write installation documentation");
-    startRun(traceService);
-    traceService.onRunEnd(RUN_ID, { status: "completed" });
-    const trace = traceStore.get(RUN_ID)!;
-
-    const beforeAudit = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-network-1",
-        correction: "Do not contact hosts outside the configured whitelist.",
-      },
-    });
-    expect(beforeAudit.statusCode).toBe(409);
-    expect(beforeAudit.json<{ error: string }>().error).toContain(
-      "audit to finish",
-    );
-
-    auditStore.recordRun(
-      trace,
-      [
-        {
-          id: "finding-network-1",
-          traceId: RUN_ID,
-          agentId: AGENT_ID,
-          spanId: null,
-      intentId: "",
-          type: "warning",
-          category: "security",
-          finding:
-            "Contacted github.com, which is outside the configured whitelist.",
-        },
-      ],
-      "",
-      intentStore.latest(AGENT_ID)?.intentId ?? "",
-    );
-
-    const activeRunId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-    traceService.onRunStart(
-      {
-        id: AGENT_ID,
-        name: "Builder",
-        instructions: "",
-        codexThreadId: null,
-      },
-      { id: activeRunId, prompt: "A newer task" },
-    );
-    const duringActiveRun = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-network-1",
-        correction: "Do not contact hosts outside the configured whitelist.",
-      },
-    });
-    expect(duringActiveRun.statusCode).toBe(409);
-    expect(duringActiveRun.json<{ error: string }>().error).toContain(
-      "active run",
-    );
-    traceService.onRunEnd(activeRunId, { status: "completed" });
-
-    const applied = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-network-1",
-        correction: "Do not contact hosts outside the configured whitelist.",
-      },
-    });
-    expect(applied.statusCode).toBe(201);
-    const body = applied.json<{
-      intent: { extended: string[] };
-      versions: {
-        update?: {
-          kind: string;
-          sourceFindingId?: string | null;
-          traceId: string | null;
-        };
-      }[];
-    }>();
-    expect(body.intent.extended).toContain(
-      "Do not contact hosts outside the configured whitelist.",
-    );
-    expect(body.versions.at(-1)?.update).toMatchObject({
-      kind: "human-correction",
-      sourceFindingId: "finding-network-1",
-      traceId: RUN_ID,
-    });
-
-    const duplicate = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-network-1",
-        correction: "Try to apply it twice.",
-      },
-    });
-    expect(duplicate.statusCode).toBe(409);
-
-    const invented = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "not-real",
-        correction: "Do not accept findings invented by the browser.",
-      },
-    });
-    expect(invented.statusCode).toBe(404);
-
-    auditStore.recordRun(
-      trace,
-      [
-        {
-          id: "finding-secret-2",
-          traceId: RUN_ID,
-          agentId: AGENT_ID,
-          spanId: null,
-      intentId: "",
-          type: "warning",
-          category: "security",
-          finding: "A credential was sent to an unrelated service.",
-        },
-      ],
-      "",
-      intentStore.latest(AGENT_ID)?.intentId ?? "",
-    );
-    const secret = "ghp_example_secret";
-    const masked = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-secret-2",
-        correction: "Never send " + secret + " to unrelated services.",
-      },
-    });
-    expect(masked.statusCode).toBe(201);
-    expect(masked.body).not.toContain(secret);
-    expect(masked.body).toContain("ghp");
-
-    auditStore.recordRun(
-      trace,
-      [
-        {
-          id: "finding-auditor-health",
-          traceId: RUN_ID,
-          agentId: AGENT_ID,
-          spanId: null,
-      intentId: "",
-          type: "error",
-          category: "audit-health",
-          finding: "The auditor could not complete.",
-        },
-        {
-          id: "finding-missing-span",
-          traceId: RUN_ID,
-          agentId: AGENT_ID,
-          spanId: "span-that-does-not-exist",
-          intentId: "",
-          type: "warning",
-          category: "reliability",
-          finding: "The agent repeated a failed command.",
-        },
-      ],
-      "",
-      intentStore.latest(AGENT_ID)?.intentId ?? "",
-    );
-    const auditorHealth = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-auditor-health",
-        correction: "Change the Agent because its auditor was unavailable.",
-      },
-    });
-    expect(auditorHealth.statusCode).toBe(400);
-
-    const missingSpan = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-missing-span",
-        correction: "Change approach before retrying a failed command.",
-      },
-    });
-    expect(missingSpan.statusCode).toBe(404);
-
-    auditStore.recordRun(
-      trace,
-      [
-        {
-          id: "finding-after-delete",
-          traceId: RUN_ID,
-          agentId: AGENT_ID,
-          spanId: null,
-      intentId: "",
-          type: "warning",
-          category: "reliability",
-          finding: "The agent repeated a failed command.",
-        },
-      ],
-      "",
-      intentStore.latest(AGENT_ID)?.intentId ?? "",
-    );
-    agents.delete(AGENT_ID);
-    const deletedAgent = await app.inject({
-      method: "POST",
-      url: "/api/traces/" + RUN_ID + "/intent/correct",
-      payload: {
-        findingId: "finding-after-delete",
-        correction: "Change approach before retrying a failed command.",
-      },
-    });
-    expect(deletedAgent.statusCode).toBe(404);
-    expect(deletedAgent.json<{ error: string }>().error).toBe("Agent not found");
+    expect(body.intent?.extended).toEqual(["Do not read .env files."]);
+    expect(body.intent).not.toHaveProperty("stale");
   });
 
   it("serves prior context and the thread position with a trace", async () => {

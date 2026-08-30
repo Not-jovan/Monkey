@@ -76,6 +76,22 @@ export function isSubagentTask(span: TraceSpan) {
   return normalizedName.endsWith(".spawn_agent");
 }
 
+export function subagentCallLabel(span: TraceSpan) {
+  const type = span.attributes.subagentType;
+  if (typeof type !== "string" || type.length === 0) return null;
+  const target = span.attributes.targetLabel;
+  if (typeof target === "string" && target.length > 0) {
+    return type + " · " + target;
+  }
+  return type;
+}
+
+export function isAuditorStepCheck(span: TraceSpan) {
+  if (span.kind !== "model_call") return false;
+  if (span.name === "audit.identify") return true;
+  return span.name.startsWith("audit.step.");
+}
+
 export function stepHeadline(span: TraceSpan) {
   if (span.name === "subagent.result") {
     return subagentResultHeadline(span) ?? span.label;

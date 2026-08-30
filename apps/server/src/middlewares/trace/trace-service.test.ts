@@ -1091,7 +1091,7 @@ describe("TraceService", () => {
       startedAt: "2026-08-30T00:00:00.000Z",
       endedAt: "2026-08-30T00:00:01.000Z",
       durationMs: 1_000,
-      attributes: { laneId: "auditor", inputTokens: 30, outputTokens: 12 },
+      attributes: { inputTokens: 30, outputTokens: 12 },
       error: null,
     });
 
@@ -1102,9 +1102,110 @@ describe("TraceService", () => {
     expect(appended?.traceId).toBe(RUN_ID);
     const root = trace.spans.find((span) => span.kind === "run");
     expect(appended?.parentId).toBe(root?.id);
+    expect(appended?.attributes.laneId).toBe("auditor");
     // Tokens roll up, so an auditor's run accounts for its cost like any other.
     expect(trace.usage.inputTokens).toBe(30);
     expect(trace.usage.outputTokens).toBe(12);
+  });
+
+  it("records a spawned auditor check the way Codex records spawn_agent", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+
+    const first = service.recordModelCall(
+      RUN_ID,
+      {
+        id: "call-1",
+        traceId: RUN_ID,
+        parentId: null,
+        name: "audit.step.summary",
+        label: "Summarize · Model · plan",
+        kind: "model_call",
+        actor: "system",
+        status: "ok",
+        startedAt: "2026-08-30T00:00:00.000Z",
+        endedAt: "2026-08-30T00:00:01.000Z",
+        durationMs: 1_000,
+        attributes: { targetSpanId: "span-plan" },
+        error: null,
+      },
+      { subagentType: "summarize" },
+    );
+    const second = service.recordModelCall(
+      RUN_ID,
+      {
+        id: "call-2",
+        traceId: RUN_ID,
+        parentId: null,
+        name: "audit.step.summary",
+        label: "Summarize · Tool · exec_command",
+        kind: "model_call",
+        actor: "system",
+        status: "ok",
+        startedAt: "2026-08-30T00:00:02.000Z",
+        endedAt: "2026-08-30T00:00:03.000Z",
+        durationMs: 1_000,
+        attributes: { targetSpanId: "span-exec" },
+        error: null,
+      },
+      { subagentType: "summarize" },
+    );
+    const intent = service.recordModelCall(
+      RUN_ID,
+      {
+        id: "call-3",
+        traceId: RUN_ID,
+        parentId: null,
+        name: "audit.step.intent",
+        label: "Intent · Model · plan",
+        kind: "model_call",
+        actor: "system",
+        status: "ok",
+        startedAt: "2026-08-30T00:00:00.500Z",
+        endedAt: "2026-08-30T00:00:01.500Z",
+        durationMs: 1_000,
+        attributes: {},
+        error: null,
+      },
+      { subagentType: "intent" },
+    );
+
+    const trace = store.get(RUN_ID)!;
+    const spawns = trace.spans.filter(
+      (span) => span.name === "tool.spawn_agent",
+    );
+    expect(spawns).toHaveLength(3);
+    const summarizeSpawns = spawns.filter(
+      (span) => span.attributes.subagentType === "summarize",
+    );
+    const intentSpawn = spawns.find(
+      (span) => span.attributes.subagentType === "intent",
+    );
+    expect(summarizeSpawns).toHaveLength(2);
+    expect(summarizeSpawns[0]?.id).not.toBe(summarizeSpawns[1]?.id);
+    expect(summarizeSpawns[0]?.status).toBe("ok");
+    expect(summarizeSpawns[0]?.endedAt).toBe("2026-08-30T00:00:01.000Z");
+    expect(summarizeSpawns[0]?.durationMs).toBe(1_000);
+    expect(summarizeSpawns[0]?.attributes.targetLabel).toBe("Model · plan");
+    expect(summarizeSpawns[0]?.attributes.targetSpanId).toBe("span-plan");
+    expect(summarizeSpawns[1]?.attributes.targetLabel).toBe(
+      "Tool · exec_command",
+    );
+    expect(summarizeSpawns[1]?.attributes.targetSpanId).toBe("span-exec");
+    expect(summarizeSpawns[0]?.attributes.laneId).toBe("auditor");
+    expect(summarizeSpawns[0]?.attributes.toolName).toBe("spawn_agent");
+    expect(first?.parentId).toBe(summarizeSpawns[0]?.id);
+    expect(second?.parentId).toBe(summarizeSpawns[1]?.id);
+    expect(first?.parentId).not.toBe(second?.parentId);
+    expect(intent?.parentId).toBe(intentSpawn?.id);
+    expect(first?.attributes.laneId).toBe(summarizeSpawns[0]?.id);
+    expect(second?.attributes.laneId).toBe(summarizeSpawns[1]?.id);
+    expect(intent?.attributes.laneId).toBe(intentSpawn?.id);
   });
 
   it("carries no audit target for an ordinary agent run", async () => {

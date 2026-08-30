@@ -2,7 +2,6 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   getAgent,
   getIntent,
-  revertIntent,
   waitForAuditedTrace,
   waitForRun,
   waitForTrace,
@@ -196,36 +195,6 @@ test("Trace 4 should warn about the non-whitelisted GitHub domain", async () => 
   expect(securityText).toMatch(/github\.com/i);
 });
 
-test("A human can turn Trace 4 evidence into a reversible correction", async () => {
-  const detail = traces[3]!;
-  const finding = detail.findings.find(
-    (entry) =>
-      entry.category === "security" && /github\.com/i.test(entry.finding),
-  );
-  expect(finding, "the network finding is the evidence for this correction").toBeTruthy();
-
-  const correction =
-    "Do not contact hosts outside the configured network whitelist.";
-  await page.goto(
-    `/traces/${detail.trace.id}?pane=run&finding=${encodeURIComponent(finding!.id)}`,
-  );
-  const findingRow = page.locator(
-    `.findings-table tbody tr[data-finding-id="${finding!.id}"]`,
-  );
-  await findingRow.getByRole("button", { name: "Correct this" }).click();
-  await findingRow.getByLabel("Correction for future runs").fill(correction);
-  await findingRow.getByRole("button", { name: "Apply correction" }).click();
-  await expect(findingRow.getByText(/Applied as intent v\d+/i)).toBeVisible();
-
-  const intent = await getIntent(page.request, agent.id);
-  expect(intent.intent.extended).toContain(correction);
-  expect(intent.versions.at(-1)?.update).toMatchObject({
-    kind: "human-correction",
-    sourceFindingId: finding!.id,
-    traceId: detail.trace.id,
-  });
-});
-
 test("Trace 5 should apply the HTML intent update", async () => {
   const detail = traces[4]!;
   const intent = await getIntent(page.request, agent.id);
@@ -252,8 +221,8 @@ test("Trace 5 should apply the HTML intent update", async () => {
   await expect(page.locator(".intent-detail")).toContainText(/HTML/i);
 });
 
-// Applying the correction is only half the loop. The other half is seeing that
-// it happened, and being able to take it back.
+// The HTML rule is a classified derivation on that run's audit, visible in
+// the spec history built from those audits.
 test("Trace 5 should show the intent update in the spec history", async () => {
   await page.goto("/");
   await page.getByRole("button", { name: "Documentation Agent" }).click();
@@ -266,28 +235,6 @@ test("Trace 5 should show the intent update in the spec history", async () => {
   // The message that caused the change is named, not merely its effect.
   await expect(history).toContainText(/From your message/i);
   await expect(page.locator(".message-spec-change").first()).toBeVisible();
-});
-
-test("An intent version can be restored without losing history", async () => {
-  const before = await getIntent(page.request, agent.id);
-  expect(before.versions.length).toBeGreaterThan(1);
-  const seed = before.versions[0]!;
-
-  const after = await revertIntent(page.request, agent.id, seed.id);
-  expect(after.versions).toHaveLength(before.versions.length + 1);
-  expect(after.versions.at(-1)?.update?.revertedFrom).toBe(seed.id);
-  expect(after.intent.extended).toEqual(seed.extended);
-  // Every superseded version stays readable, so an older trace's pinned spec
-  // still resolves.
-  for (const version of before.versions) {
-    expect(after.versions.some((entry) => entry.id === version.id)).toBe(true);
-  }
-
-  // Put the latest rules (including the human correction) back, so the Agent
-  // is left as this suite found it.
-  const latestVersion = before.versions.at(-1)!;
-  const restored = await revertIntent(page.request, agent.id, latestVersion.id);
-  expect(restored.intent.extended).toEqual(latestVersion.extended);
 });
 
 test.describe("A denied action is diagnosable", () => {

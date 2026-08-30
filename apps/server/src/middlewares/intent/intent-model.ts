@@ -11,6 +11,28 @@ export const intentStateSchema = z.object({
 
 export type IntentState = z.infer<typeof intentStateSchema>;
 
+export const emptyIntent = (): IntentState => ({
+  instructions: "",
+  objective: "",
+  extended: [],
+});
+
+export function intentIsEmpty(state: IntentState) {
+  return state.objective.length === 0 && state.extended.length === 0;
+}
+
+// The auditor is a separate agent with its own spec. When it is the one being
+// judged, that spec is the job it was given — not the target agent's.
+export const AUDITOR_OBJECTIVE = "Audit the target agent.";
+
+// Constraint text is round-tripped through a model, so an exact-string match
+// would let a stray capital or full stop keep a lifted rule in force.
+export function sameConstraint(left: string, right: string) {
+  const normalize = (value: string) =>
+    value.trim().toLowerCase().replace(/[.\s]+$/, "");
+  return normalize(left) === normalize(right) && normalize(left).length > 0;
+}
+
 // Whether the working objective has moved away from the instructions the agent
 // is following. Derived, never stored: a persisted flag would be a third thing
 // that can fall out of step with the two it describes, which is the whole bug.
@@ -34,21 +56,7 @@ export function hasDivergedObjective(state: {
 // before the timeline existed still parse.
 export const intentUpdateSchema = z.object({
   logs: z.array(z.string()),
-  kind: z
-    .enum([
-      "seed",
-      "classified",
-      "revert",
-      // The agent's instructions were edited through agent settings. Recorded
-      // so the timeline shows the edit that used to change the agent's spec
-      // without the audit record ever hearing about it.
-      "instructions",
-      // A diverged objective was written back into the instructions.
-      "adopted",
-      // A person corrected the spec after the run, against the evidence.
-      "human-correction",
-    ])
-    .default("classified"),
+  kind: z.enum(["seed", "classified"]).default("classified"),
   // The user message that changed the spec.
   message: z.string().optional(),
   // The classifier's own justification.
@@ -92,6 +100,20 @@ export interface IntentVersionEntry extends IntentVersion {
 }
 
 export const intentFileSchema = z.record(z.string(), intentVersionSchema);
+
+// What one audit's identifier phase produced. Stored on the chat audit, not in
+// a standing store: the next audit rebases from this plus current instructions.
+export const intentDerivationSchema = z.object({
+  state: intentStateSchema,
+  addedConstraints: z.array(z.string()).default([]),
+  removedConstraints: z.array(z.string()).default([]),
+  previousObjective: z.string().nullable().default(null),
+  reason: z.string().default(""),
+  message: z.string().nullable().default(null),
+  kind: z.enum(["seed", "classified"]).default("classified"),
+});
+
+export type IntentDerivation = z.infer<typeof intentDerivationSchema>;
 
 export function describeIntent(state: IntentState) {
   const lines: string[] = [];

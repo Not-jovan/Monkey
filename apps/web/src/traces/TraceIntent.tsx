@@ -1,10 +1,5 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { Link } from "react-router";
-import { api, type IntentView } from "../api";
 import type {
   AuditTraceStep,
-  IntentVersionEntry,
   TraceIntentView,
   TraceRecord,
 } from "../types";
@@ -20,13 +15,6 @@ export function TraceIntent({ intent }: { intent: TraceIntentView | null }) {
         <h2 className="eyebrow" id="trace-intent-heading">
           Intent
         </h2>
-        {/* Classification runs after the message is sent, so a run can be
-            judged against the version that preceded its own correction. */}
-        {intent.stale && (
-          <span className="muted-cell">
-            This run used an earlier intent; it has changed since
-          </span>
-        )}
       </div>
       <p className="trace-intent-objective">
         {intent.objective || "(no objective stated)"}
@@ -70,124 +58,29 @@ export function visibleFindings(
   return findings.filter((finding) => finding.category !== "audit-health");
 }
 
-function HumanCorrection({
-  trace,
-  finding,
-}: {
-  trace: TraceRecord;
-  finding: AuditTraceStep;
-}) {
-  const [editing, setEditing] = useState(false);
-  const [correction, setCorrection] = useState("");
-  const queryClient = useQueryClient();
-  const intentQuery = useQuery<IntentView>({
-    queryKey: ["intent", trace.agentId],
-    queryFn: () => api.intent(trace.agentId),
-  });
-  const versions: IntentVersionEntry[] = intentQuery.data?.versions ?? [];
-  const appliedIndex = versions.findIndex(
-    (entry) => entry.update?.sourceFindingId === finding.id,
-  );
-  const appliedVersion =
-    appliedIndex >= 0 ? versions[appliedIndex] : undefined;
-  const appliedConstraints: string[] =
-    appliedVersion?.update?.addedConstraints ?? [];
-  const isActive =
-    appliedConstraints.length > 0 &&
-    appliedConstraints.every((entry) =>
-      (intentQuery.data?.intent.extended ?? []).includes(entry),
-    );
-  const apply = useMutation({
-    mutationFn: () => api.correctIntent(trace.id, finding.id, correction),
-    onSuccess: (view) => {
-      queryClient.setQueryData(["intent", trace.agentId], view);
-      setEditing(false);
-    },
-  });
+// Older records concatenated the auditor's outage onto the agent's finding.
+// Sometimes that is ` · Primary audit model unavailable: …`; sometimes the
+// check labels ride along (` · Summarize · Model · …: Primary audit model…`).
+const AUDITOR_HEALTH =
+  /Primary audit model unavailable:|The primary audit model failed|The auditor could not complete|ModelNotOpen:/;
 
-  if (appliedIndex >= 0) {
-    return (
-      <div className="finding-correction finding-correction-applied">
-        <span
-          className={
-            "intent-status intent-status-" + (isActive ? "applied" : "rejected")
-          }
-        >
-          {isActive
-            ? "Applied as intent v" + (appliedIndex + 1)
-            : "Reverted (intent v" + (appliedIndex + 1) + ")"}
-        </span>
-        <Link to={"/?agent=" + encodeURIComponent(trace.agentId)}>
-          Open Playground
-        </Link>
-      </div>
-    );
+export function agentFacingFindingText(text: string) {
+  if (!AUDITOR_HEALTH.test(text)) return text.trim();
+  const sep = " · ";
+  const first = text.indexOf(sep);
+  if (first >= 0 && AUDITOR_HEALTH.test(text.slice(first))) {
+    return text.slice(0, first).trim();
   }
-
-  if (!editing) {
-    return (
-      <button
-        type="button"
-        className="button button-ghost"
-        onClick={() => setEditing(true)}
-      >
-        Correct this
-      </button>
-    );
+  const colon = text.indexOf(": ");
+  if (colon >= 0 && AUDITOR_HEALTH.test(text.slice(colon))) {
+    return text.slice(0, colon).trim();
   }
-
-  return (
-    <div className="finding-correction">
-      <label htmlFor={"correction-" + finding.id}>
-        Correction for future runs
-      </label>
-      <textarea
-        id={"correction-" + finding.id}
-        value={correction}
-        maxLength={1_000}
-        placeholder="Example: Do not contact hosts outside the configured network whitelist."
-        onChange={(event) => setCorrection(event.target.value)}
-      />
-      <p className="muted-cell">
-        Applying this adds a reversible constraint to the Agent's intent.
-      </p>
-      <div className="finding-correction-actions">
-        <button
-          type="button"
-          className="button button-primary"
-          disabled={apply.isPending || correction.trim().length === 0}
-          onClick={() => apply.mutate()}
-        >
-          Apply correction
-        </button>
-        <button
-          type="button"
-          className="button button-ghost"
-          disabled={apply.isPending}
-          onClick={() => {
-            setEditing(false);
-            setCorrection("");
-            apply.reset();
-          }}
-        >
-          Cancel
-        </button>
-      </div>
-      {apply.isError && (
-        <p className="intent-change-error" role="alert">
-          {apply.error instanceof Error
-            ? apply.error.message
-            : "The correction could not be applied."}
-        </p>
-      )}
-    </div>
-  );
+  return text.trim();
 }
 
 export function SpanFindings({
   findings,
   includeAuditHealth = false,
-  trace,
   focusedFindingId,
 }: {
   findings: AuditTraceStep[];
@@ -226,10 +119,11 @@ export function SpanFindings({
               </td>
               <td>{findingTypeLabel(finding.category)}</td>
               <td>
-                <div className="finding-copy">{finding.finding}</div>
-                {trace && finding.category !== "audit-health" && (
-                  <HumanCorrection trace={trace} finding={finding} />
-                )}
+                <div className="finding-copy">
+                  {includeAuditHealth
+                    ? finding.finding
+                    : agentFacingFindingText(finding.finding)}
+                </div>
               </td>
             </tr>
           ))}

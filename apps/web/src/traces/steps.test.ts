@@ -6,6 +6,7 @@ import {
   orderedSteps,
   stepHeadline,
   stepRole,
+  subagentCallLabel,
 } from "./steps";
 
 function span(overrides: Partial<TraceSpan> & Pick<TraceSpan, "id" | "name">) {
@@ -62,6 +63,22 @@ describe("subagent detection", () => {
     expect(isSubagentTask(exec)).toBe(false);
     expect(stepRole(exec)).toBe("Tool");
     expect(stepHeadline(exec)).toBe("Tool · exec_command");
+  });
+
+  it("names an auditor spawn by the check and the step it asked about", () => {
+    expect(
+      subagentCallLabel(
+        span({
+          id: "spawn",
+          name: "tool.spawn_agent",
+          attributes: {
+            toolName: "spawn_agent",
+            subagentType: "summarize",
+            targetLabel: "Model · plan",
+          },
+        }),
+      ),
+    ).toBe("summarize · Model · plan");
   });
 
   it("hides synthesized subagent results inferred from a command", () => {

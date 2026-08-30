@@ -7,7 +7,6 @@ import { isArkConfigured, loadConfig } from "./config.js";
 import {
   createAuditMiddleware,
   createContextMiddleware,
-  createIntentMiddleware,
   createTraceMiddleware,
 } from "./middlewares/index.js";
 import { createRunner } from "./runner-factory.js";
@@ -33,20 +32,13 @@ const log = (message: string, error?: unknown) => console.error(message, error);
 const arkClient = createArkClient(config);
 const auditingAvailable = config.auditEnabled && isArkConfigured(config);
 
-// Built in dependency order: context and intent read the trace store, and the
-// auditor reads all three.
+// Built in dependency order: context reads the trace store, and the auditor
+// reads both. Intent is derived on the auditor, not as its own store.
 const trace = await createTraceMiddleware({ config, runtime, onStoreError });
 const context = await createContextMiddleware({
   config,
   traceStore: trace.traceStore,
   onStoreError,
-});
-const intent = await createIntentMiddleware({
-  config,
-  client: arkClient,
-  enabled: auditingAvailable,
-  onStoreError,
-  log,
 });
 const audit = await createAuditMiddleware({
   config,
@@ -55,7 +47,6 @@ const audit = await createAuditMiddleware({
   traceStore: trace.traceStore,
   traceService: trace.traceService,
   contextStore: context.contextStore,
-  intent,
   onStoreError,
   log,
   warn: (message) => console.warn(message),
@@ -67,7 +58,7 @@ const service = new AgentService(
   workspaces,
   runner,
   trace.traceService,
-  intent.describeFor,
+  audit.describeFor,
   audit.onInstructionsDrift,
 );
 await service.initialize();
@@ -76,10 +67,8 @@ const app = await createApp(config, service, {
   traceStore: trace.traceStore,
   traceService: trace.traceService,
   auditStore: audit.auditStore,
-  // Reached only by the manual meta-audit route; nothing subscribes to it.
   auditService: audit.auditService,
   auditMemory: audit.auditMemory,
-  intentService: intent.intentService,
   contextService: context.contextService,
   collectorToken,
 });
@@ -89,7 +78,6 @@ const shutdown = async (signal: string) => {
   await app.close();
   await trace.flush();
   await context.flush();
-  await intent.flush();
   await audit.flush();
   process.exit(0);
 };

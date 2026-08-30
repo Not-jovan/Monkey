@@ -263,11 +263,10 @@ export function reportForStep(
       sinkWrites,
     },
     tags: signals.filter((signal) => !HAS_ITS_OWN_EMITTER.has(signal)),
-    reason: [
-      deterministicReason,
-      checks.injection.verdict?.reason ?? "",
-      failure ?? "",
-    ]
+    // Agent-facing only. The auditor's own outage is `failure` and is filed
+    // as audit-health; stuffing it into `reason` made View Run read as if the
+    // agent had caused a ModelNotOpen.
+    reason: [deterministicReason, checks.injection.verdict?.reason ?? ""]
       .filter((part) => part.length > 0)
       .join(" · "),
   };

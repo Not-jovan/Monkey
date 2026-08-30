@@ -271,8 +271,8 @@ export class AgentService {
       return snapshot;
     });
     // Capture once for both Runtime execution and the synchronous trace-start
-    // event. A classifier finishing while the run is starting must not make
-    // the Runtime and auditor use two different standing specifications.
+    // event. The spec comes from the last audit's derivation, so the Runtime
+    // and this run's auditor start from the same standing context.
     const intentAtStart = this.activeIntent?.(agentAtStart.id).trim() ?? "";
     this.traces?.onRunStart(agentAtStart, { id: runId, prompt });
     const execution = this.executeRun(agentAtStart, run, prompt, intentAtStart);

@@ -580,8 +580,9 @@ export default function App() {
                   </div>
                 ) : (
                   messages.map((message) => {
-                    // Classification is asynchronous, so a message that changes
-                    // the rules used to do so with no acknowledgement anywhere.
+                    // The identifier runs when the auditor starts, so a
+                    // message that changed the spec is marked once that
+                    // derivation has been stored on the chat audit.
                     const change =
                       message.role === "user"
                         ? specChangeByRun.get(message.runId)

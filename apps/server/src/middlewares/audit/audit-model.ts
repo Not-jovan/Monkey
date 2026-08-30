@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  intentDerivationSchema,
+  intentStateSchema,
+} from "../intent/intent-model.js";
 import { traceSpanSchema } from "../trace/trace-model.js";
 
 export interface SecretExposureFinding {
@@ -100,6 +104,14 @@ export const chatAuditSchema = z.object({
   intentId: z.string(),
   // Defaulted so audit files written before health was tracked still parse.
   health: auditHealthSchema.default("ok"),
+  // Spec this audit judged against, derived at the start of the pass. Defaulted
+  // so audit files written before the identifier phase still parse.
+  intent: intentStateSchema.default({
+    instructions: "",
+    objective: "",
+    extended: [],
+  }),
+  intentDerivation: intentDerivationSchema.optional(),
   contextSummary: z.string(),
   summary: z.object({
     tokenSummary: z.object({

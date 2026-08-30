@@ -20,7 +20,6 @@ export interface TraceDetail {
   findings: AuditTraceStep[];
   auditComplete: boolean;
   auditHealth: AuditHealth;
-  intentId: string | null;
   intent: TraceIntentView | null;
   context: ContextView | null;
   // The auditor that judged this trace, if it has been judged.
@@ -155,24 +154,6 @@ export const api = {
   agentFailures: (id: string) =>
     request<{ failures: FailureGroup[] }>("/api/agents/" + id + "/failures"),
   intent: (id: string) => request<IntentView>("/api/agents/" + id + "/intent"),
-  // Appends a version restoring an earlier one; it never rewinds history, so a
-  // trace that pinned the reverted version still resolves.
-  revertIntent: (id: string, intentId: string) =>
-    request<IntentView>("/api/agents/" + id + "/intent/revert", {
-      method: "POST",
-      body: JSON.stringify({ intentId }),
-    }),
-  // Writes the diverged objective into the agent's instructions, regenerating
-  // the AGENTS.md the agent reads so both sides describe the same spec again.
-  adoptIntent: (id: string) =>
-    request<{ intent: IntentView }>("/api/agents/" + id + "/intent/adopt", {
-      method: "POST",
-    }),
-  correctIntent: (traceId: string, findingId: string, correction: string) =>
-    request<IntentView>("/api/traces/" + traceId + "/intent/correct", {
-      method: "POST",
-      body: JSON.stringify({ findingId, correction }),
-    }),
   downloadTrace: (id: string) =>
     request<TraceDetail & { exportedAt: string }>(
       "/api/traces/" + id + "/download",

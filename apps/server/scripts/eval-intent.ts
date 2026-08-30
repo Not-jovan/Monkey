@@ -74,9 +74,9 @@ async function main() {
     message: string;
     expected: boolean;
     actual: boolean | null;
-    // Whether the classification produced something the service would act on.
-    // IntentService.classify returns early when a verdict yields no new
-    // constraint, no removal and no objective — so an INTENT_UPDATE that
+    // Whether the classification produced something the reducer would act on.
+    // IntentReducer.applyUpdate returns the base spec when a verdict yields no
+    // new constraint, no removal and no objective — so an INTENT_UPDATE that
     // extracts nothing is silently a NO_CHANGE, and scoring the label alone
     // counts it as a success.
     effective: boolean | null;

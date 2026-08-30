@@ -82,9 +82,6 @@ export async function createApp(
   app.post("/api/agents", async (request, reply) => {
     const body = createAgentBody.parse(request.body);
     const agent = await service.createAgent(body);
-    // The record starts life agreeing with the instructions the agent was
-    // created with, so an agent is never auditable against an empty spec.
-    middlewares?.intentService?.syncInstructions(agent.id, agent.instructions);
     return reply.code(201).send({ agent });
   });
 
@@ -97,18 +94,12 @@ export async function createApp(
     const { id } = agentIdParams.parse(request.params);
     const body = updateAgentBody.parse(request.body);
     const agent = await service.updateAgent(id, body);
-    // Instructions are written to the workspace's AGENTS.md and are what the
-    // agent then follows. Mirroring them here is what stops the auditor
-    // enforcing the spec the agent was given before this edit. A no-op when
-    // they did not change, so renaming an agent does not touch the timeline.
-    middlewares?.intentService?.syncInstructions(id, agent.instructions);
     return { agent };
   });
 
   app.delete("/api/agents/:id", async (request) => {
     const { id } = agentIdParams.parse(request.params);
     const result = await service.deleteAgent(id);
-    middlewares?.intentService?.forget(id);
     middlewares?.contextService?.forget(id);
     return result;
   });
@@ -136,17 +127,7 @@ export async function createApp(
   app.post("/api/agents/:id/messages", async (request, reply) => {
     const { id } = agentIdParams.parse(request.params);
     const body = messageBody.parse(request.body);
-    const agent = service.getAgent(id);
-    // The run id is minted here, before the run exists, so the classification
-    // of this message is queued ahead of the run that has to obey it. Observing
-    // afterwards left the first steps of a run being judged against the very
-    // spec the message had just replaced. Still not awaited: the queue ordering
-    // is what matters, and classification must not delay the 202.
     const runId = randomUUID();
-    middlewares?.intentService?.observe(id, agent.instructions, {
-      content: middlewares.traceService.redactText(body.content),
-      traceId: runId,
-    });
     const result = await service.sendMessage(id, body.content, runId);
     return reply.code(202).send(result);
   });

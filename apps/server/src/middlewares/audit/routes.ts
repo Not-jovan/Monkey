@@ -66,17 +66,20 @@ export function registerAuditRoutes(
     // The audit document itself is not in the memory folder, and it is the part
     // that carries the findings the UI shows.
     const auditTraceId = deps.traceStore.auditorTraceFor(id);
+    const auditor =
+      auditTraceId !== null ? (deps.traceStore.get(auditTraceId) ?? null) : null;
     archive.append(
       JSON.stringify(
         {
-          traceId: id,
+          auditedTraceId: id,
           agentId: trace.agentId,
           findings: deps.auditStore.listByTrace(id),
           auditTraceId,
-          auditorSpans: auditorSpans(id),
+          auditor,
+          legacyAuditorSpans: auditor
+            ? []
+            : deps.auditStore.listAuditorSpans(id),
           health: deps.auditStore.health(id),
-          // Written by an earlier version, which kept an audit of the auditor
-          // on the audited trace's document instead of giving it one of its own.
           legacyMetaAudit: deps.auditStore.metaAudit(id),
         },
         null,
@@ -88,28 +91,27 @@ export function registerAuditRoutes(
     return reply;
   });
 
-  // What the auditor did while judging this trace. Its own trace's spans, or —
-  // for a run audited before auditors had traces — the array those spans used
-  // to be stashed in on this document.
-  function auditorSpans(traceId: string) {
-    const auditTraceId = deps.traceStore.auditorTraceFor(traceId);
-    if (auditTraceId === null) return deps.auditStore.listAuditorSpans(traceId);
-    return deps.traceStore.get(auditTraceId)?.spans ?? [];
-  }
-
+  // What the auditor did while judging this trace: its own trace, or — for a
+  // run audited before auditors had traces — the spans that used to be stashed
+  // on this document. Never presented as belonging to the run.
   function auditorTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
     const legacy = deps.auditStore.metaAudit(id);
+    const auditTraceId = deps.traceStore.auditorTraceFor(id);
+    const auditor =
+      auditTraceId !== null ? (deps.traceStore.get(auditTraceId) ?? null) : null;
     return {
-      traceId: id,
+      // The run that was judged. The auditor's work is `auditor`, whose id is
+      // `auditTraceId` — not this one.
+      auditedTraceId: id,
       agentId: trace.agentId,
       health: deps.auditStore.health(id),
-      spans: auditorSpans(id),
-      // The auditor's own run. Present once this trace has been audited, and
-      // the thing "audit this auditor" navigates to — the next level up reads
-      // it exactly as this level reads the Agent's run.
-      auditTraceId: deps.traceStore.auditorTraceFor(id),
+      auditTraceId,
+      auditor,
+      // Pre-trace auditors stored their model calls on the run's audit
+      // document. Kept only when there is no auditor trace to read instead.
+      legacyAuditorSpans: auditor ? [] : deps.auditStore.listAuditorSpans(id),
       // An audit of the auditor recorded before that run had a trace of its
       // own. Read-only: nothing writes here any more, but a finding already
       // recorded should not vanish because the shape around it changed.

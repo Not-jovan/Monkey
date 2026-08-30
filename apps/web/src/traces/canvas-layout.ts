@@ -1,10 +1,12 @@
 import type { TraceSpan } from "../types";
 import {
+  isAuditorStepCheck,
   isSubagentBoundary,
   isSubagentTask,
   isVisibleStep,
   previewLabel,
   sortTime,
+  subagentCallLabel,
 } from "./steps";
 
 export const SLOT_WIDTH = 168;
@@ -86,7 +88,15 @@ export function laneIdForSpan(
   if (span.actor === "user") return "user";
 
   const stamped = span.attributes.laneId;
-  if (typeof stamped === "string" && stamped.length > 0) return stamped;
+  if (typeof stamped === "string" && stamped.length > 0) {
+    if (isAuditorStepCheck(span)) {
+      const parent = spanById.get(span.parentId ?? "");
+      if (parent && isSubagentTask(parent) && siblingCheckCount(parent, spanById) > 1) {
+        return auditorCheckLaneId(span, parent);
+      }
+    }
+    return stamped;
+  }
 
   if (span.name === "subagent.result") {
     const index = parseSubagentIndex(span);
@@ -102,11 +112,45 @@ export function laneIdForSpan(
   return "root";
 }
 
-function spawnLaneLabel(span: TraceSpan) {
-  const type = span.attributes.subagentType;
-  if (typeof type === "string" && type.length > 0) {
-    return "sub · " + previewLabel(type, 22);
+function siblingCheckCount(
+  spawn: TraceSpan,
+  spanById: Map<string, TraceSpan>,
+) {
+  let count = 0;
+  for (const other of spanById.values()) {
+    if (other.parentId === spawn.id && isAuditorStepCheck(other)) count += 1;
   }
+  return count;
+}
+
+function auditorCheckLaneId(span: TraceSpan, spawn: TraceSpan) {
+  const target = span.attributes.targetSpanId;
+  const type = spawn.attributes.subagentType;
+  if (
+    typeof target === "string" &&
+    target.length > 0 &&
+    typeof type === "string" &&
+    type.length > 0
+  ) {
+    return "audit:" + target + ":" + type;
+  }
+  return span.id;
+}
+
+function childLaneLabel(child: TraceSpan, spawn: TraceSpan) {
+  const fromSpawn = subagentCallLabel(spawn);
+  if (fromSpawn && typeof spawn.attributes.targetLabel === "string") {
+    return "sub · " + previewLabel(fromSpawn, 40);
+  }
+  if (child.label.length > 0 && !child.label.startsWith("audit.")) {
+    return "sub · " + previewLabel(child.label, 40);
+  }
+  return spawnLaneLabel(spawn);
+}
+
+function spawnLaneLabel(span: TraceSpan) {
+  const call = subagentCallLabel(span);
+  if (call) return "sub · " + previewLabel(call, 40);
   if (span.name === "subagent.result") {
     const index = parseSubagentIndex(span);
     if (index !== null) return "sub · " + index;
@@ -149,6 +193,17 @@ export function orderedLaneIds(
 
   const visit = (spawn: TraceSpan) => {
     push(spawn.id, spawnLaneLabel(spawn));
+    const ownLaneChildren = steps
+      .filter((step) => {
+        if (step.parentId !== spawn.id) return false;
+        return laneIdForSpan(step, spanById) !== spawn.id;
+      })
+      .sort((left, right) =>
+        sortTime(left).localeCompare(sortTime(right)),
+      );
+    for (const child of ownLaneChildren) {
+      push(laneIdForSpan(child, spanById), childLaneLabel(child, spawn));
+    }
     for (const laneId of used) {
       if (laneId.startsWith("result:" + spawn.id + ":")) {
         push(laneId, resultLaneLabel(laneId));
@@ -161,7 +216,8 @@ export function orderedLaneIds(
 
   for (const spawn of spawns) {
     const caller = laneIdForSpan(spawn, spanById);
-    if (caller === "root" || caller === "user") visit(spawn);
+    const callerSpan = spanById.get(caller);
+    if (!callerSpan || !isSubagentTask(callerSpan)) visit(spawn);
   }
 
   for (const laneId of used) {

@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { IntentState } from "../intent/intent-model.js";
+import type { IntentDerivation, IntentState } from "../intent/intent-model.js";
 
 // PLAN_AUDITOR's AgentChatAuditor: one auditor per (agentId, chatId). It owns
 // the identity every finding for that chat is stamped with, the folder its
@@ -19,8 +19,7 @@ import type { IntentState } from "../intent/intent-model.js";
 // not exist for this chat does not exist for the next one either. Those stay on
 // the service, and the chat auditor calls into it for them.
 export interface PinnedIntent {
-  intentId: string;
-  state: IntentState;
+  derivation: IntentDerivation;
 }
 
 export interface ChatAuditorWork {
@@ -33,21 +32,31 @@ export class AgentChatAuditor {
   // agent-runs/{agentId}/{chatId}/, the folder this chat's step records and
   // meta index live in and the archive download serves.
   readonly memoryFolderPath: string;
-  // The spec this chat is judged against, pinned the first time an audit asks
-  // for it. Pinned rather than re-read because a correction applied later must
-  // not rewrite the specification an older run appears to have been judged
-  // against — every finding for this chat cites one version. Captured on first
-  // use rather than at construction, so the classification of the message that
-  // opened the run is already in it.
+  // The spec this chat is judged against, derived once at the start of the
+  // audit pass. Identified rather than read from a standing store, so a later
+  // run's derivation cannot rewrite what this one was judged against.
   private pinned: PinnedIntent | null = null;
+  private identifying: Promise<PinnedIntent> | null = null;
 
-  get intentId() {
-    return this.pinned?.intentId ?? "";
+  get derivation() {
+    return this.pinned?.derivation ?? null;
   }
 
-  pinIntent(capture: () => PinnedIntent): PinnedIntent {
-    if (this.pinned === null) this.pinned = capture();
-    return this.pinned;
+  get intentState(): IntentState | null {
+    return this.pinned?.derivation.state ?? null;
+  }
+
+  async identifyIntent(
+    identify: () => Promise<IntentDerivation>,
+  ): Promise<PinnedIntent> {
+    if (this.pinned) return this.pinned;
+    if (!this.identifying) {
+      this.identifying = identify().then((derivation) => {
+        this.pinned = { derivation };
+        return this.pinned;
+      });
+    }
+    return this.identifying;
   }
 
   // Step audits queued or running for this chat. Counted at enqueue rather than

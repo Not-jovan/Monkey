@@ -13,6 +13,8 @@ import {
 import {
   isErrorStep,
   isSubagentTask,
+  previewLabel,
+  subagentCallLabel,
   subagentResultHeadline,
 } from "./steps";
 import { formatDuration, spanDuration } from "./format";
@@ -58,10 +60,8 @@ function stepLabel(span: TraceSpan) {
         ? span.attributes.toolName
         : span.name.replace(/^tool\./, "");
     if (isSubagentTask(span)) {
-      const type = span.attributes.subagentType;
-      if (typeof type === "string" && type.length > 0) {
-        return "Subagent · " + type;
-      }
+      const call = subagentCallLabel(span);
+      if (call) return "Subagent · " + call;
       if (span.label.startsWith("Subagent")) return span.label;
       return "Subagent · task";
     }
@@ -93,10 +93,8 @@ function edgeLabel(
     return 'User "Prompt"';
   }
   if (kind === "delegate" && toRow > fromRow && isSubagentTask(from)) {
-    const subagentType = from.attributes.subagentType;
-    if (typeof subagentType === "string" && subagentType.length > 0) {
-      return subagentType;
-    }
+    const call = subagentCallLabel(from);
+    if (call) return previewLabel(call, 28);
     return "delegate";
   }
   return formatDuration(Math.max(gapMs, 0));
@@ -632,6 +630,7 @@ export function TraceCanvas({
             key={"label-" + lane.row}
             className="trace-canvas-gutter-label"
             style={{ top: lane.y + 18 }}
+            title={lane.label}
           >
             {lane.label}
           </div>

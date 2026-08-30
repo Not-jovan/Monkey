@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ArkApiError } from "../../ark-client.js";
 import type { AgentRunner } from "../../types.js";
-import { AuditorModel, describeError, summarizeError } from "./auditor-model.js";
+import { AuditorModel, auditorCallSpan, auditorSubagentType, describeError, summarizeError } from "./auditor-model.js";
 
 const verdict = z.object({ ok: z.boolean() });
 const ANSWER = JSON.stringify({ ok: true });
@@ -130,5 +130,55 @@ describe("AuditorModel.complete", () => {
     expect(
       answer.attempts.some((attempt) => attempt.error?.includes("Request id:")),
     ).toBe(true);
+  });
+});
+
+describe("auditorCallSpan", () => {
+  const attempt = {
+    model: "ep-audit",
+    startedAt: "2026-08-30T00:00:00.000Z",
+    endedAt: "2026-08-30T00:00:01.000Z",
+    durationMs: 1_000,
+    content: "{}",
+    error: null,
+    usage: null,
+  };
+
+  it("leaves lane and parent unset so the tracer stamps them", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.step.intent",
+      label: "Intent · Model · plan",
+      targetSpanId: "span-1",
+      prompt: "judge this",
+      attempt,
+      fallback: false,
+    });
+    expect(span.parentId).toBeNull();
+    expect(span.attributes.laneId).toBeUndefined();
+    expect(span.attributes.phase).toBe("step");
+  });
+
+  it("marks run-level calls as the auditor's own work", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.forward-trace",
+      label: "Forward trace · 2 directive(s)",
+      targetSpanId: null,
+      prompt: "judge the run",
+      attempt,
+      fallback: false,
+    });
+    expect(span.attributes.phase).toBe("run");
+    expect(auditorSubagentType(span.name)).toBeUndefined();
+  });
+});
+
+describe("auditorSubagentType", () => {
+  it("maps step checks to the spawn_agent type Codex would record", () => {
+    expect(auditorSubagentType("audit.step.summary")).toBe("summarize");
+    expect(auditorSubagentType("audit.step.tool")).toBe("tool misuse");
+    expect(auditorSubagentType("audit.identify")).toBe("identify");
+    expect(auditorSubagentType("audit.forward-trace")).toBeUndefined();
   });
 });

@@ -1,18 +1,12 @@
 import { useMemo, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 import type { IntentState } from "../types";
 import { describeChange, intentChanges, isMeaningful } from "./intent-diff";
 
-// The specification the auditor judges this agent against, and every change it
-// has been through.
-//
-// The current spec was already shown; the history was not, even though each
-// version already recorded the message that caused it and the classifier's
-// reasoning. That gap is the one the whole "improvement loop" framing turns on:
-// a user who cannot see that their message rewrote the rules cannot tell
-// whether their correction landed, and cannot undo it if it landed wrongly.
+// The specification the last audit derived for this agent, and every earlier
+// derivation. History is the sequence of audits, not a standing store a person
+// can rewind from here.
 
 function formatWhen(value: string | null) {
   if (!value) return null;
@@ -25,31 +19,11 @@ function formatWhen(value: string | null) {
 export function IntentPanel({ agentId }: { agentId: string }) {
   const [expanded, setExpanded] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const queryClient = useQueryClient();
 
   const intentQuery = useQuery({
     queryKey: ["intent", agentId],
     queryFn: () => api.intent(agentId),
     refetchInterval: 4_000,
-  });
-
-  const revert = useMutation({
-    mutationFn: (intentId: string) => api.revertIntent(agentId, intentId),
-    onSuccess: (view) => {
-      // Seed rather than invalidate: the response is the new view, and the
-      // 4s poll would otherwise show the old spec for up to a full interval.
-      queryClient.setQueryData(["intent", agentId], view);
-    },
-  });
-
-  const adopt = useMutation({
-    mutationFn: () => api.adoptIntent(agentId),
-    onSuccess: (result) => {
-      queryClient.setQueryData(["intent", agentId], result.intent);
-      // The agent's own record changed too — its instructions are what this
-      // just rewrote — so anything showing them has to re-read.
-      void queryClient.invalidateQueries({ queryKey: ["agents"] });
-    },
   });
 
   const intent: IntentState | undefined = intentQuery.data?.intent;
@@ -59,9 +33,6 @@ export function IntentPanel({ agentId }: { agentId: string }) {
     [intentQuery.data?.versions],
   );
   const changes = useMemo(() => allChanges.filter(isMeaningful), [allChanges]);
-  // The real version number, not the count of rows shown. Versions that changed
-  // nothing are hidden from the timeline but still occupy a version number, so
-  // counting rows would quietly report the wrong one.
   const currentVersion = allChanges.length;
 
   const hasSpec =
@@ -69,7 +40,6 @@ export function IntentPanel({ agentId }: { agentId: string }) {
     (intent.objective.length > 0 || intent.extended.length > 0);
   if (!hasSpec || !intent) return <div className="intent-panel" />;
 
-  // One entry is just the starting spec; there is no history to tell yet.
   const hasHistory = changes.length > 1;
 
   return (
@@ -110,23 +80,6 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                   agent's instructions say. The auditor judges against the
                   objective; the agent still reads its instructions.
                 </p>
-                <button
-                  type="button"
-                  className="intent-adopt"
-                  disabled={adopt.isPending}
-                  onClick={() => adopt.mutate()}
-                >
-                  {adopt.isPending
-                    ? "Adopting…"
-                    : "Adopt into the agent's instructions"}
-                </button>
-                {adopt.isError && (
-                  <p className="intent-change-error" role="alert">
-                    {adopt.error instanceof Error
-                      ? adopt.error.message
-                      : "Could not adopt the objective."}
-                  </p>
-                )}
               </div>
             )}
             {intent.extended.length > 0 && (
@@ -168,53 +121,18 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                     {formatWhen(change.createdAt)}
                   </span>
                 )}
-                {change.isCurrent ? (
+                {change.isCurrent && (
                   <span className="intent-current-flag">in force</span>
-                ) : (
-                  <button
-                    type="button"
-                    className="button button-ghost"
-                    disabled={revert.isPending}
-                    onClick={() => revert.mutate(change.id)}
-                  >
-                    Revert to this
-                  </button>
                 )}
               </div>
 
-              {change.trigger && change.kind !== "human-correction" && (
+              {change.trigger && (
                 <p className="intent-change-trigger">
                   From your message: &ldquo;{change.trigger}&rdquo;
                 </p>
               )}
-              {change.kind === "human-correction" && change.trigger && (
-                <p className="intent-change-trigger">
-                  Human correction: &ldquo;{change.trigger}&rdquo;
-                  {change.traceId && (
-                    <>
-                      {" "}
-                      <Link
-                        to={
-                          "/traces/" +
-                          change.traceId +
-                          "?pane=run" +
-                          (change.sourceFindingId
-                            ? "&finding=" +
-                              encodeURIComponent(change.sourceFindingId)
-                            : "")
-                        }
-                      >
-                        View source finding
-                      </Link>
-                    </>
-                  )}
-                </p>
-              )}
               {change.reason && (
-                <p className="muted-cell">
-                  {change.kind === "human-correction" ? "Decision: " : "Classifier: "}
-                  {change.reason}
-                </p>
+                <p className="muted-cell">Classifier: {change.reason}</p>
               )}
               {change.objectiveBefore !== null && (
                 <p className="intent-change-objective">
@@ -242,12 +160,6 @@ export function IntentPanel({ agentId }: { agentId: string }) {
             </li>
           ))}
         </ol>
-      )}
-
-      {revert.isError && (
-        <p className="intent-change-error" role="alert">
-          That version could not be restored.
-        </p>
       )}
     </div>
   );

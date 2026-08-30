@@ -251,4 +251,244 @@ describe("canvas swimlanes", () => {
     expect(layout.lanes.map((lane) => lane.label)).toEqual(["user", "agent"]);
     expect(layout.edges.filter((edge) => edge.kind === "delegate")).toEqual([]);
   });
+
+  // Names are labels, not lanes. A check with no spawn_agent parent sits on
+  // the auditor row the tracer stamped, the same way a Codex model call with
+  // no spawn sits on the agent row.
+  it("does not invent lanes from auditor check names", () => {
+    const summarize = span({
+      id: "sum",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      label: "Summarize · Model · plan",
+      attributes: { laneId: "auditor", targetSpanId: "agent-plan" },
+    });
+    const runAudit = span({
+      id: "run",
+      name: "audit.forward-trace",
+      kind: "model_call",
+      actor: "system",
+      label: "Forward trace · 2 directive(s)",
+      attributes: { laneId: "auditor" },
+    });
+    const spans = [summarize, runAudit];
+    const spanById = new Map(spans.map((item) => [item.id, item]));
+    expect(laneIdForSpan(summarize, spanById)).toBe("auditor");
+    expect(laneIdForSpan(runAudit, spanById)).toBe("auditor");
+    expect(layoutSwimlanes(spans, 1200).lanes.map((lane) => lane.label)).toEqual(
+      ["auditor"],
+    );
+  });
+
+  it("puts auditor checks on spawn lanes the way Codex subagents are", () => {
+    const spawnSummary = span({
+      id: "spawn-summary",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType: "summarize",
+      },
+    });
+    const spawnIntent = span({
+      id: "spawn-intent",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:00.010Z",
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType: "intent",
+      },
+    });
+    const summarize = span({
+      id: "sum",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-summary",
+      startedAt: "2026-08-30T00:00:00.020Z",
+      attributes: { laneId: "spawn-summary" },
+    });
+    const intent = span({
+      id: "intent",
+      name: "audit.step.intent",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-intent",
+      startedAt: "2026-08-30T00:00:00.030Z",
+      attributes: { laneId: "spawn-intent" },
+    });
+    const runAudit = span({
+      id: "run",
+      name: "audit.forward-trace",
+      kind: "model_call",
+      actor: "system",
+      startedAt: "2026-08-30T00:01:00.000Z",
+      attributes: { laneId: "auditor" },
+    });
+
+    const spans = [spawnSummary, spawnIntent, summarize, intent, runAudit];
+    const spanById = new Map(spans.map((item) => [item.id, item]));
+    expect(laneIdForSpan(summarize, spanById)).toBe("spawn-summary");
+    expect(laneIdForSpan(intent, spanById)).toBe("spawn-intent");
+    expect(laneIdForSpan(spawnSummary, spanById)).toBe("auditor");
+    expect(laneIdForSpan(runAudit, spanById)).toBe("auditor");
+
+    const layout = layoutSwimlanes(spans, 1200);
+    const rowOf = (id: string) =>
+      layout.positions.find((position) => position.span.id === id)?.row;
+    expect(rowOf("run")).toBe(0);
+    expect(rowOf("spawn-summary")).toBe(0);
+    expect(rowOf("spawn-intent")).toBe(0);
+    expect(rowOf("sum")).toBe(1);
+    expect(rowOf("intent")).toBe(2);
+    expect(layout.lanes.map((lane) => lane.label)).toEqual([
+      "auditor",
+      "sub · summarize",
+      "sub · intent",
+    ]);
+    expect(layout.edges.some((edge) => edge.kind === "delegate")).toBe(true);
+  });
+
+  it("puts two calls of the same check on separate lanes", () => {
+    const spawnPlan = span({
+      id: "spawn-plan",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType: "summarize",
+        targetLabel: "Model · plan",
+      },
+    });
+    const spawnExec = span({
+      id: "spawn-exec",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:02.000Z",
+      endedAt: "2026-08-30T00:00:03.000Z",
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType: "summarize",
+        targetLabel: "Tool · exec_command",
+      },
+    });
+    const sumPlan = span({
+      id: "sum-plan",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-plan",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      attributes: { laneId: "spawn-plan", targetSpanId: "agent-plan" },
+    });
+    const sumExec = span({
+      id: "sum-exec",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-exec",
+      startedAt: "2026-08-30T00:00:02.000Z",
+      attributes: { laneId: "spawn-exec", targetSpanId: "agent-exec" },
+    });
+
+    const spans = [spawnPlan, spawnExec, sumPlan, sumExec];
+    const layout = layoutSwimlanes(spans, 1200);
+    const rowOf = (id: string) =>
+      layout.positions.find((position) => position.span.id === id)?.row;
+    expect(rowOf("spawn-plan")).toBe(0);
+    expect(rowOf("spawn-exec")).toBe(0);
+    expect(rowOf("sum-plan")).toBe(1);
+    expect(rowOf("sum-exec")).toBe(2);
+    expect(layout.lanes.map((lane) => lane.label)).toEqual([
+      "auditor",
+      "sub · summarize · Model · plan",
+      "sub · summarize · Tool · exec_command",
+    ]);
+    const delegates = layout.edges.filter((edge) => edge.kind === "delegate");
+    expect(
+      delegates.map((edge) => [edge.from.span.id, edge.to.span.id]).sort(),
+    ).toEqual([
+      ["spawn-exec", "sum-exec"],
+      ["spawn-plan", "sum-plan"],
+    ]);
+  });
+
+  it("splits an older shared spawn so each check still has its own lane", () => {
+    const spawn = span({
+      id: "spawn-summary",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType: "summarize",
+      },
+    });
+    const sumPlan = span({
+      id: "sum-plan",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-summary",
+      label: "Summarize · Model · plan",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      attributes: { laneId: "spawn-summary", targetSpanId: "agent-plan" },
+    });
+    const sumExec = span({
+      id: "sum-exec",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-summary",
+      label: "Summarize · Tool · exec_command",
+      startedAt: "2026-08-30T00:00:02.000Z",
+      attributes: { laneId: "spawn-summary", targetSpanId: "agent-exec" },
+    });
+
+    const sumExecFallback = span({
+      id: "sum-exec-fallback",
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: "spawn-summary",
+      label: "Summarize · Tool · exec_command (fallback)",
+      startedAt: "2026-08-30T00:00:03.000Z",
+      attributes: { laneId: "spawn-summary", targetSpanId: "agent-exec" },
+    });
+
+    const spans = [spawn, sumPlan, sumExec, sumExecFallback];
+    const spanById = new Map(spans.map((item) => [item.id, item]));
+    expect(laneIdForSpan(sumPlan, spanById)).toBe(
+      "audit:agent-plan:summarize",
+    );
+    expect(laneIdForSpan(sumExec, spanById)).toBe(
+      "audit:agent-exec:summarize",
+    );
+    expect(laneIdForSpan(sumExecFallback, spanById)).toBe(
+      "audit:agent-exec:summarize",
+    );
+
+    const layout = layoutSwimlanes(spans, 1200);
+    const rowOf = (id: string) =>
+      layout.positions.find((position) => position.span.id === id)?.row;
+    expect(rowOf("spawn-summary")).toBe(0);
+    expect(rowOf("sum-plan")).toBe(1);
+    expect(rowOf("sum-exec")).toBe(2);
+    expect(rowOf("sum-exec-fallback")).toBe(2);
+    expect(layout.lanes.map((lane) => lane.label)).toEqual([
+      "auditor",
+      "sub · Summarize · Model · plan",
+      "sub · Summarize · Tool · exec_command",
+    ]);
+  });
 });

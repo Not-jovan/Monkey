@@ -73,14 +73,13 @@ describe("intentChanges", () => {
       version("v2", { extended: ["Use HTML, not Markdown."] }),
       version("v3", {
         extended: [],
-        update: update({ kind: "revert", revertedFrom: "v1" }),
+        update: update({ reason: "relaxation" }),
       }),
     ]);
 
     expect(changes[2]?.removedConstraints).toEqual(["Use HTML, not Markdown."]);
     expect(changes[2]?.addedConstraints).toEqual([]);
-    expect(changes[2]?.revertedFromVersion).toBe(1);
-    expect(describeChange(changes[2]!)).toBe("Restored version 1");
+    expect(describeChange(changes[2]!)).toContain("dropped");
   });
 
   it("reports an objective replacement as a before and after", () => {
@@ -129,29 +128,23 @@ describe("intentChanges", () => {
     expect(describeChange(changes[0]!)).toContain("Spec set");
   });
 
-  it("labels a human correction and keeps its evidence link", () => {
+  it("labels a classified constraint the same way as any other update", () => {
     const changes = intentChanges([
       version("v1"),
       version("v2", {
         extended: ["Do not contact hosts outside the whitelist."],
         update: update({
-          kind: "human-correction",
           message: "Do not contact hosts outside the whitelist.",
           traceId: "trace-2",
-          sourceFindingId: "finding-2",
-          sourceSpanId: "span-7",
         }),
       }),
     ]);
 
     expect(changes[1]).toMatchObject({
-      kind: "human-correction",
-      sourceFindingId: "finding-2",
-      sourceSpanId: "span-7",
+      kind: "classified",
       traceId: "trace-2",
     });
-    expect(describeChange(changes[1]!)).toBe("Human correction applied");
-    expect(versionByTrace(changes).has("trace-2")).toBe(false);
+    expect(versionByTrace(changes).get("trace-2")?.version).toBe(2);
   });
 
   it("survives an empty history", () => {
@@ -192,19 +185,15 @@ describe("instructions as the source of truth", () => {
       version("v2", {
         instructions: REVISED,
         objective: REVISED,
-        update: update({ kind: "instructions", logs: ["Instructions changed"] }),
+        update: update({ logs: ["Instructions changed"] }),
       }),
     ]);
 
     const edit = changes[1]!;
     expect(edit.instructionsBefore).toBe(OBJECTIVE);
     expect(edit.instructionsAfter).toBe(REVISED);
-    // The objective moved with the instructions, so nothing has diverged.
     expect(edit.diverged).toBe(false);
     expect(hasVisibleChange(edit)).toBe(true);
-    expect(describeChange(edit)).toBe(
-      "Agent instructions edited; objective followed",
-    );
   });
 
   it("marks an objective the conversation moved away from the instructions", () => {
@@ -223,22 +212,20 @@ describe("instructions as the source of truth", () => {
     expect(pivot.objectiveBefore).toBe(OBJECTIVE);
   });
 
-  it("describes an adoption as collapsing the two back together", () => {
+  it("describes collapsing a diverged objective back onto the instructions", () => {
     const changes = intentChanges([
       version("v1"),
       version("v2", { objective: "Build a calendar app" }),
       version("v3", {
         instructions: "Build a calendar app",
         objective: "Build a calendar app",
-        update: update({ kind: "adopted", logs: ["Adopted"] }),
+        update: update({ logs: ["Adopted"] }),
       }),
     ]);
 
     const adopted = changes[2]!;
     expect(adopted.diverged).toBe(false);
     expect(adopted.instructionsBefore).toBe(OBJECTIVE);
-    expect(describeChange(adopted)).toBe(
-      "Objective adopted into the agent's instructions",
-    );
+    expect(hasVisibleChange(adopted)).toBe(true);
   });
 });

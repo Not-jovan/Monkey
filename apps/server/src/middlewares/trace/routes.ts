@@ -164,14 +164,12 @@ export function registerTraceRoutes(
   function glassboxTrace(id: string) {
     const trace = deps.traceStore.get(id);
     if (!trace) return null;
-    const intentId = deps.auditStore.intentId(id);
     return {
       trace,
       findings: deps.auditStore.listByTrace(id),
       auditComplete: deps.auditStore.isRunComplete(id),
       auditHealth: deps.auditStore.health(id),
-      intentId,
-      intent: deps.intentService?.forTrace(trace.agentId, intentId) ?? null,
+      intent: deps.auditStore.intentOf(id),
       context: deps.contextService?.view(id) ?? null,
       // The auditor that judged this trace, if it has been judged.
       auditTraceId: deps.traceStore.auditorTraceFor(id),
