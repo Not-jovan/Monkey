@@ -55,15 +55,15 @@ flowchart TB
     Traces -->|user prompt| Identify
     AuditsIn[("audits/")] -->|prior derivation| Identify
 
-    subgraph stepPhase ["auditStep — each step, 0-6 concurrent"]
+    subgraph stepPhase ["auditStep — each step, concurrent"]
         direction LR
-        S0["0 Summarize"]
-        S1["1 Secret exposure"]
-        S2["2 Network whitelist"]
-        S3["3 Intent alignment"]
-        S4["4 Prompt injection"]
-        S5["5 Tool misuse if tool call"]
-        S6["6 Sink writes if write"]
+        S0["Summarize"]
+        S1["Secret exposure"]
+        S2["Network whitelist"]
+        S3["Intent alignment"]
+        S4["Prompt injection"]
+        S5["Tool misuse if tool call"]
+        S6["Sink writes if write"]
     end
 
     Step --> S0
@@ -87,11 +87,11 @@ flowchart TB
     Meta --> Gate
     Gate --> All[auditAll]
 
-    subgraph runPhase ["auditAll — once, 1-3 concurrent"]
+    subgraph runPhase ["auditAll — once, concurrent"]
         direction LR
-        A1["1 Repeated failure"]
-        A2["2 Backtrace"]
-        A3["3 Forward-trace"]
+        A1["Repeated failure"]
+        A2["Backtrace"]
+        A3["Forward-trace"]
     end
 
     All --> A1
@@ -116,7 +116,7 @@ flowchart TB
 #### Artifacts
 | Action | Remark |
 | --- | --- |
-| `identifyIntent` | Runs only when this chat has no standing spec yet. Agent instructions from `launchpad.json`, user prompt from `traces/`, prior derivation from `audits/`. Later spans skip it and go to `auditStep`. Check 3 uses that spec. |
+| `identifyIntent` | Runs only when this chat has no standing spec yet. Agent instructions from `launchpad.json`, user prompt from `traces/`, prior derivation from `audits/`. Later spans skip it and go to `auditStep`. Intent alignment uses that spec. |
 | `{stepId}.md` | Durable memory for the auditor. Each step audit writes its working state here so `auditAll` still has something to read after the step is gone. A workpad, not a report. |
 | `steps-meta.json` | Index into that workpad. `auditAll` uses it to decide which `{stepId}.md` files to open, rather than rereading every step. |
 | Wait until every `auditStep` has finished | `auditAll` needs the workpad complete. Starting against an in-flight step misses the instruction that just landed. |
@@ -135,7 +135,6 @@ flowchart TB
 | Intent | New Objectives | Check whether tool output, a file, or a subagent introduced a goal the user never asked for, and whether the agent acted on it. |
 | Intent | Backtrace | For every intent suspicion, read the run history and decide whether anything the user asked for accounts for the action. |
 | Reliability | Repeated Failure | Check whether the agent retried a tool call that had already failed. |
-
 
 ## Setup
 
