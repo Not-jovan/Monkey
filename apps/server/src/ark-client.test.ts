@@ -58,7 +58,12 @@ function sseEvent(payload: unknown) {
 }
 
 describe("createArkClient", () => {
-  it("reads a JSON completion without asking the provider to stream", async () => {
+  // Streaming is asked for so the client's deadline can tell a slow answer from
+  // a stuck one; a non-streamed reply withholds headers until generation ends,
+  // which collapses the stall budget into a cap on total answer length. The
+  // provider is still free to ignore it, so the JSON path below must keep
+  // working — that is what this test protects.
+  it("asks the provider to stream, and still reads a plain JSON completion", async () => {
     let body: unknown = null;
     const ark = client(async (_url, init) => {
       body = JSON.parse(String(init?.body));
@@ -81,8 +86,10 @@ describe("createArkClient", () => {
 
     const result = await ark.complete(ask);
 
-    expect(body).toMatchObject({ model: "flash" });
-    expect(body).not.toHaveProperty("stream");
+    expect(body).toMatchObject({ model: "flash", stream: true });
+    // Ark reports usage only on the final streamed event, and only when this is
+    // set. Without it every audit loses its token accounting.
+    expect(body).toMatchObject({ stream_options: { include_usage: true } });
     expect(result.content).toBe('{"ok":true}');
     expect(result.model).toBe("served");
     expect(result.usage).toEqual({ inputTokens: 9, outputTokens: 4 });
@@ -302,5 +309,176 @@ describe("createArkClient", () => {
       expect(error.kind).toBe("cancelled");
       expect(error.summary).toBe("Audit model request was cancelled");
     }
+  });
+
+  // Ark sends `"usage": null` on every content frame and fills it only on the
+  // last. A schema that allowed absent-but-not-null silently failed the parse
+  // and dropped each frame, so the answer arrived empty while the call looked
+  // successful. Fixtures that simply omit the field cannot catch this.
+  it("keeps streamed content when frames carry an explicit null usage", async () => {
+    const ark = client(async () => {
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const piece of ['{"ok"', ":true", "}"]) {
+            controller.enqueue(
+              encoder.encode(
+                sseEvent({
+                  id: "s-1",
+                  model: "served",
+                  usage: null,
+                  choices: [{ delta: { content: piece, role: "assistant" }, index: 0 }],
+                }),
+              ),
+            );
+          }
+          controller.enqueue(
+            encoder.encode(
+              sseEvent({
+                choices: [],
+                usage: {
+                  prompt_tokens: 5,
+                  completion_tokens: 3,
+                  completion_tokens_details: { reasoning_tokens: 0 },
+                },
+              }),
+            ),
+          );
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    });
+
+    const result = await ark.complete(ask);
+
+    expect(result.content).toBe('{"ok":true}');
+    expect(result.model).toBe("served");
+    expect(result.usage).toEqual({
+      inputTokens: 5,
+      outputTokens: 3,
+      reasoningTokens: 0,
+    });
+  });
+
+  it("stops asking to stream when streaming is turned off", async () => {
+    let body: unknown = null;
+    const ark = createArkClient(
+      {
+        arkBaseUrl: "https://ark.test",
+        arkApiKey: "k",
+        auditModelStream: false,
+      },
+      timeoutMs,
+      async (_url, init) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json({ choices: [{ message: { content: "{}" } }] });
+      },
+    );
+
+    const result = await ark.complete(ask);
+
+    expect(body).not.toHaveProperty("stream");
+    expect(body).not.toHaveProperty("stream_options");
+    // The JSON path still answers, which is what makes this a safe fallback.
+    expect(result.content).toBe("{}");
+  });
+
+  it("leaves the reasoning control out unless it is configured", async () => {
+    let body: unknown = null;
+    const ark = client(async (_url, init) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ choices: [{ message: { content: "{}" } }] });
+    });
+
+    await ark.complete(ask);
+
+    expect(body).not.toHaveProperty("thinking");
+  });
+
+  it("asks a reasoning model to skip thinking when configured to", async () => {
+    let body: unknown = null;
+    const ark = createArkClient(
+      {
+        arkBaseUrl: "https://ark.test",
+        arkApiKey: "k",
+        auditModelThinking: "disabled",
+      },
+      timeoutMs,
+      async (_url, init) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json({ choices: [{ message: { content: "{}" } }] });
+      },
+    );
+
+    await ark.complete(ask);
+
+    expect(body).toMatchObject({ thinking: { type: "disabled" } });
+  });
+
+  it("records reasoning tokens billed inside the output count", async () => {
+    const ark = client(async () =>
+      Response.json({
+        choices: [{ message: { content: "{}" } }],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 900,
+          completion_tokens_details: { reasoning_tokens: 850 },
+        },
+      }),
+    );
+
+    const result = await ark.complete(ask);
+
+    // 850 of the 900 billed output tokens never reached the answer. The trace
+    // UI already draws this share; it read zero only because it was not parsed.
+    expect(result.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 900,
+      reasoningTokens: 850,
+    });
+  });
+
+  // The regression that motivated the stall timer: a long verdict is not a
+  // stuck request, but a single total-time deadline cannot tell them apart.
+  it("lets a stream that keeps producing outlive one stall budget", async () => {
+    const stallMs = 200;
+    const gapMs = 60;
+    const ark = createArkClient(
+      { arkBaseUrl: "https://ark.test", arkApiKey: "k" },
+      stallMs,
+      async () => {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            // Six gaps at 60ms run to ~360ms, comfortably past the 200ms
+            // budget, while no single gap comes close to exhausting it.
+            for (let i = 0; i < 6; i += 1) {
+              await new Promise((resolve) => setTimeout(resolve, gapMs));
+              controller.enqueue(
+                encoder.encode(
+                  sseEvent({ choices: [{ delta: { content: "x" } }] }),
+                ),
+              );
+            }
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      },
+    );
+
+    const result = await ark.complete(ask);
+
+    expect(result.content).toBe("xxxxxx");
+    expect(result.timing.chunkCount).toBe(6);
   });
 });

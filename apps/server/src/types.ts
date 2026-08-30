@@ -30,6 +30,10 @@ export interface RunUsage {
   inputTokens?: number;
   cachedInputTokens?: number;
   outputTokens?: number;
+  // Counted inside outputTokens, not alongside it. Worth carrying separately
+  // because it is the share of a reasoning model's bill that never reaches the
+  // answer, and the trace UI already draws it next to output.
+  reasoningTokens?: number;
 }
 
 // Where an upstream completion died, when it did. Null abortPhase means the

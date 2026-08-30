@@ -29,7 +29,7 @@ const onStoreError = (message: string, error?: unknown) =>
   console.error(message, error);
 const log = (message: string, error?: unknown) => console.error(message, error);
 
-const arkClient = createArkClient(config);
+const arkClient = createArkClient(config, config.auditModelTimeoutMs);
 const auditingAvailable = config.auditEnabled && isArkConfigured(config);
 
 // Built in dependency order: context reads the trace store, and the auditor

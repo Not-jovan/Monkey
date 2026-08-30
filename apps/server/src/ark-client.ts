@@ -11,8 +11,11 @@ const usageResponse = z.object({
   prompt_tokens: z.number().optional(),
   completion_tokens: z.number().optional(),
   prompt_tokens_details: z
-    .object({ cached_tokens: z.number().optional() })
-    .optional(),
+    .object({ cached_tokens: z.number().nullish() })
+    .nullish(),
+  completion_tokens_details: z
+    .object({ reasoning_tokens: z.number().nullish() })
+    .nullish(),
 });
 
 const completionResponse = z.object({
@@ -20,13 +23,13 @@ const completionResponse = z.object({
     .array(
       z.object({
         message: z.object({
-          content: z.string().nullable().optional(),
-          reasoning_content: z.string().nullable().optional(),
+          content: z.string().nullish(),
+          reasoning_content: z.string().nullish(),
         }),
       }),
     )
     .min(1),
-  usage: usageResponse.optional(),
+  usage: usageResponse.nullish(),
   // What actually served the request, which is not always what was asked for:
   // Ark resolves an endpoint id to a concrete model. Reported so an auditor
   // run can name its model the way a runtime run does.
@@ -34,28 +37,33 @@ const completionResponse = z.object({
   id: z.string().optional(),
 });
 
+// Every field is nullish rather than optional. Ark sends `"usage": null` on
+// each content frame and only fills it on the last one; under `.optional()`
+// that null failed the parse and the frame was dropped silently, so a streamed
+// answer arrived empty. Nothing caught it because the request never asked to
+// stream — the fixtures below simply omitted the field.
 const streamEvent = z.object({
-  id: z.string().optional(),
-  model: z.string().optional(),
-  usage: usageResponse.optional(),
+  id: z.string().nullish(),
+  model: z.string().nullish(),
+  usage: usageResponse.nullish(),
   choices: z
     .array(
       z.object({
         delta: z
           .object({
-            content: z.string().nullable().optional(),
-            reasoning_content: z.string().nullable().optional(),
+            content: z.string().nullish(),
+            reasoning_content: z.string().nullish(),
           })
-          .optional(),
+          .nullish(),
         message: z
           .object({
-            content: z.string().nullable().optional(),
-            reasoning_content: z.string().nullable().optional(),
+            content: z.string().nullish(),
+            reasoning_content: z.string().nullish(),
           })
-          .optional(),
+          .nullish(),
       }),
     )
-    .optional(),
+    .nullish(),
 });
 
 const errorResponse = z.object({
@@ -101,18 +109,22 @@ function isAbortError(error: unknown) {
 }
 
 function readUsage(
-  usage: z.infer<typeof usageResponse> | undefined,
+  usage: z.infer<typeof usageResponse> | null | undefined,
 ): RunUsage | null {
   if (!usage) return null;
-  const cached = usage.prompt_tokens_details?.cached_tokens;
+  // Null and absent mean the same thing here — the provider did not report the
+  // number — and `exactOptionalPropertyTypes` forbids storing the null.
+  const num = (value: number | null | undefined) =>
+    typeof value === "number" ? value : undefined;
+  const input = num(usage.prompt_tokens);
+  const output = num(usage.completion_tokens);
+  const cached = num(usage.prompt_tokens_details?.cached_tokens);
+  const reasoning = num(usage.completion_tokens_details?.reasoning_tokens);
   return {
-    ...(usage.prompt_tokens !== undefined
-      ? { inputTokens: usage.prompt_tokens }
-      : {}),
+    ...(input !== undefined ? { inputTokens: input } : {}),
     ...(cached !== undefined ? { cachedInputTokens: cached } : {}),
-    ...(usage.completion_tokens !== undefined
-      ? { outputTokens: usage.completion_tokens }
-      : {}),
+    ...(output !== undefined ? { outputTokens: output } : {}),
+    ...(reasoning !== undefined ? { reasoningTokens: reasoning } : {}),
   };
 }
 
@@ -155,16 +167,29 @@ function takeSseEvents(buffer: string): { events: string[]; rest: string } {
   return { events, rest };
 }
 
-function formatTimeout(timeoutMs: number, timing: ProviderCallTiming) {
+// The wording matters more than it looks. These messages are the whole record
+// of why a check has no verdict, and the previous version led with the
+// in-flight count on every timeout — which reads as a queueing problem and sent
+// one investigation looking at concurrency when the cause was answer length.
+// Elapsed is reported separately from the budget because the stall timer
+// restarts, so a call can legitimately outlive a single budget.
+function formatTimeout(
+  timeoutMs: number,
+  timing: ProviderCallTiming,
+  elapsedMs: number,
+) {
   const seconds = String(timeoutMs / 1000);
+  const spent = (elapsedMs / 1000).toFixed(1) + "s";
   const load = " (" + timing.inFlightAtStart + " in flight)";
   if (timing.headersMs === null) {
     return {
       summary: "Audit model timed out after " + seconds + "s waiting for headers",
       message:
-        "Audit model timed out after " +
+        "Audit model sent nothing for " +
         seconds +
-        "s waiting for headers" +
+        "s and was dropped at " +
+        spent +
+        "; no response headers arrived" +
         load,
     };
   }
@@ -189,22 +214,27 @@ function formatTimeout(timeoutMs: number, timing: ProviderCallTiming) {
         seconds +
         "s; stream opened, no answer text",
       message:
-        "Audit model timed out after " +
+        "Audit model streamed for " +
+        spent +
+        " without reaching an answer, then stalled for " +
         seconds +
         "s; headers at " +
         headers +
         ", " +
         timing.chunkCount +
-        " chunks, no answer text" +
+        " chunks. The budget went on reasoning; AUDIT_MODEL_THINKING=disabled " +
+        "buys speed at the cost of recall" +
         load,
     };
   }
   return {
     summary: "Audit model timed out after " + seconds + "s while streaming",
     message:
-      "Audit model timed out after " +
+      "Audit model stopped sending for " +
       seconds +
-      "s; first token at " +
+      "s after " +
+      spent +
+      "; first token at " +
       (timing.ttftMs / 1000).toFixed(1) +
       "s, " +
       timing.chunkCount +
@@ -216,6 +246,14 @@ function formatTimeout(timeoutMs: number, timing: ProviderCallTiming) {
 interface ArkClientConfig {
   arkBaseUrl: string;
   arkApiKey: string;
+  // Optional so a caller that does not care keeps the provider's own default.
+  // AppConfig satisfies this structurally, so the composition root passes it
+  // without naming the field.
+  auditModelThinking?: "disabled" | "enabled" | "auto";
+  // Defaults on. Off restores the pre-streaming behaviour, in which the
+  // provider withholds headers until generation ends and the deadline below
+  // therefore caps total answer length rather than detecting a stall.
+  auditModelStream?: boolean;
 }
 
 export interface ArkCompletion {
@@ -225,11 +263,17 @@ export interface ArkCompletion {
   timing: ProviderCallTiming;
 }
 
+// A stream that keeps producing is allowed this many stall budgets in total,
+// so "slow" stays possible while "trickling forever" still ends.
+const TOTAL_BUDGET_MULTIPLIER = 5;
+
 export function createArkClient(
   config: ArkClientConfig,
   timeoutMs = 60_000,
   fetchImpl: typeof fetch = globalThis.fetch,
 ) {
+  const thinking = config.auditModelThinking ?? "auto";
+  const wantStream = config.auditModelStream ?? true;
   let inFlight = 0;
 
   const complete = async (input: {
@@ -238,8 +282,8 @@ export function createArkClient(
     user: string;
     maxTokens?: number;
     // Cancels this request. Provided by a caller that owns cancellation for a
-    // whole run rather than for one call, so the timer below stays the only
-    // deadline this client imposes.
+    // whole run rather than for one call, so the timers below stay the only
+    // deadlines this client imposes.
     signal?: AbortSignal;
   }): Promise<ArkCompletion> => {
     inFlight += 1;
@@ -269,7 +313,22 @@ export function createArkClient(
     const controller = new AbortController();
     const abort = () => controller.abort();
     input.signal?.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, timeoutMs);
+    // Two deadlines, because "slow" and "stuck" are different failures. The
+    // stall timer restarts on every chunk, so a long answer is fine as long as
+    // it keeps arriving; the ceiling still bounds a stream that never ends.
+    // Without streaming these collapse into one total-generation cap, which is
+    // what made a verbose verdict indistinguishable from a hung request.
+    const ceiling = started + timeoutMs * TOTAL_BUDGET_MULTIPLIER;
+    let timer = setTimeout(abort, timeoutMs);
+    const restartStallTimer = () => {
+      clearTimeout(timer);
+      const remaining = ceiling - Date.now();
+      if (remaining <= 0) {
+        abort();
+        return;
+      }
+      timer = setTimeout(abort, Math.min(timeoutMs, remaining));
+    };
 
     const failAbort = (kind: "timeout" | "cancelled"): never => {
       const timing = snapshot();
@@ -283,7 +342,7 @@ export function createArkClient(
           usage,
         );
       }
-      const described = formatTimeout(timeoutMs, timing);
+      const described = formatTimeout(timeoutMs, timing, Date.now() - started);
       throw new ArkAbortError(
         described.message,
         "timeout",
@@ -298,6 +357,7 @@ export function createArkClient(
       chunkCount += 1;
       lastChunkMs = at;
       if (abortPhase === "waiting_for_first_token") abortPhase = "streaming";
+      restartStallTimer();
     };
 
     const takeContent = (piece: string) => {
@@ -321,6 +381,19 @@ export function createArkClient(
           ],
           // Audit models reason before answering; leave room for both.
           max_tokens: input.maxTokens ?? 2_048,
+          // Asked for so the deadline above can tell a slow answer from a
+          // stuck one. A non-streamed reply withholds headers until the whole
+          // answer exists, which turns every stall budget into a cap on total
+          // generation time. The JSON branch below still handles a provider
+          // that ignores this, which is also what serves AUDIT_MODEL_STREAM=false.
+          //
+          // Ark reports usage only on the final streamed event, and only when
+          // stream_options is set; without it the audit loses token accounting.
+          ...(wantStream
+            ? { stream: true, stream_options: { include_usage: true } }
+            : {}),
+          // Omitted when "auto" so the provider keeps its own default.
+          ...(thinking === "auto" ? {} : { thinking: { type: thinking } }),
         }),
         signal: controller.signal,
       });
