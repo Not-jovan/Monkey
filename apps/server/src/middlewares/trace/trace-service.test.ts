@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1106,6 +1107,76 @@ describe("TraceService", () => {
     // Tokens roll up, so an auditor's run accounts for its cost like any other.
     expect(trace.usage.inputTokens).toBe(30);
     expect(trace.usage.outputTokens).toBe(12);
+  });
+
+  // The rollup handled two of the three counters, so an auditor that hit a
+  // provider cache still reported none of it.
+  it("rolls up a cache hit the way a runtime run's does", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+
+    const call = (attributes: Record<string, number>) => ({
+      id: randomUUID(),
+      traceId: RUN_ID,
+      parentId: null,
+      name: "audit.step.summary",
+      label: "Step audit",
+      kind: "model_call" as const,
+      actor: "system" as const,
+      status: "ok" as const,
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes,
+      error: null,
+    });
+
+    service.recordModelCall(
+      RUN_ID,
+      call({ inputTokens: 18_000, outputTokens: 12, cachedTokens: 17_800 }),
+    );
+    // A cache hit with nothing else on it still has to count.
+    service.recordModelCall(RUN_ID, call({ cachedTokens: 200 }));
+
+    const trace = store.get(RUN_ID)!;
+    expect(trace.usage.cachedTokens).toBe(18_000);
+    expect(trace.usage.inputTokens).toBe(18_000);
+  });
+
+  it("leaves usage alone for a call that reported no tokens at all", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+
+    service.recordModelCall(RUN_ID, {
+      id: randomUUID(),
+      traceId: RUN_ID,
+      parentId: null,
+      name: "audit.step.summary",
+      label: "Step audit",
+      kind: "model_call",
+      actor: "system",
+      status: "ok",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes: { model: "ep-audit" },
+      error: null,
+    });
+
+    const trace = store.get(RUN_ID)!;
+    expect(trace.usage.inputTokens).toBe(0);
+    expect(trace.usage.cachedTokens).toBe(0);
+    expect(trace.usage.outputTokens).toBe(0);
   });
 
   it("records a spawned auditor check the way Codex records spawn_agent", async () => {

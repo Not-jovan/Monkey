@@ -66,6 +66,25 @@ const streamEvent = z.object({
     .nullish(),
 });
 
+// Ark's two cache shapes are a growing conversation ("session") and a fixed
+// leading block many independent calls share ("common_prefix"). The auditor's
+// checks are the second: one step's evidence, asked several unrelated
+// questions.
+const COMMON_PREFIX = "common_prefix";
+
+// Ark answers a context id it no longer holds with a 404. Narrow on purpose:
+// every other status is about the request, and retrying those uncached would
+// just pay full price for the same rejection.
+function isContextGone(status: number) {
+  return status === 404;
+}
+
+const contextResponse = z.object({
+  id: z.string(),
+  model: z.string().optional(),
+  ttl: z.number().optional(),
+});
+
 const errorResponse = z.object({
   error: z.object({
     code: z.string().optional(),
@@ -271,6 +290,7 @@ export function createArkClient(
   config: ArkClientConfig,
   timeoutMs = 60_000,
   fetchImpl: typeof fetch = globalThis.fetch,
+  contextTimeoutMs = 15_000,
 ) {
   const thinking = config.auditModelThinking ?? "auto";
   const wantStream = config.auditModelStream ?? true;
@@ -281,6 +301,10 @@ export function createArkClient(
     system: string;
     user: string;
     maxTokens?: number;
+    // A context created by createContext over `system` and the leading part of
+    // `user`. Only `tail` goes over the wire while it holds; `system` and
+    // `user` remain the fallback for when it does not.
+    promptCache?: { contextId: string; tail: string };
     // Cancels this request. Provided by a caller that owns cancellation for a
     // whole run rather than for one call, so the timers below stay the only
     // deadlines this client imposes.
@@ -289,6 +313,9 @@ export function createArkClient(
     inFlight += 1;
     const inFlightAtStart = inFlight;
     const started = Date.now();
+    // Reassigned when a context turns out to be gone and the call is retried
+    // whole, so the timing reports what was actually sent.
+    let cache = input.promptCache;
     let abortPhase: ProviderAbortPhase = "waiting_for_headers";
     let headersMs: number | null = null;
     let ttftMs: number | null = null;
@@ -300,7 +327,12 @@ export function createArkClient(
     let model: string | null = null;
 
     const snapshot = (): ProviderCallTiming => ({
-      promptBytes: utf8Bytes(input.system) + utf8Bytes(input.user),
+      // What went over the wire, not what the call is about. A cached call
+      // sending a few hundred bytes where it used to send eighteen thousand is
+      // the plainest signal on the trace that the cache engaged.
+      promptBytes: cache
+        ? utf8Bytes(cache.tail)
+        : utf8Bytes(input.system) + utf8Bytes(input.user),
       inFlightAtStart,
       headersMs,
       ttftMs,
@@ -366,37 +398,68 @@ export function createArkClient(
       content += piece;
     };
 
-    try {
-      const response = await fetchImpl(config.arkBaseUrl + "/chat/completions", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer " + config.arkApiKey,
-          "Content-Type": "application/json",
+    const send = () =>
+      fetchImpl(
+        config.arkBaseUrl +
+          (cache ? "/context/chat/completions" : "/chat/completions"),
+        {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer " + config.arkApiKey,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: input.model,
+            ...(cache
+              ? {
+                  context_id: cache.contextId,
+                  mode: COMMON_PREFIX,
+                  // The system turn and the shared evidence are already in the
+                  // context; sending them again would be the whole cost the
+                  // context exists to avoid.
+                  messages: [{ role: "user", content: cache.tail }],
+                }
+              : {
+                  messages: [
+                    { role: "system", content: input.system },
+                    { role: "user", content: input.user },
+                  ],
+                }),
+            // Audit models reason before answering; leave room for both.
+            max_tokens: input.maxTokens ?? 2_048,
+            // Asked for so the deadline above can tell a slow answer from a
+            // stuck one. A non-streamed reply withholds headers until the whole
+            // answer exists, which turns every stall budget into a cap on total
+            // generation time. The JSON branch below still handles a provider
+            // that ignores this, which is also what serves
+            // AUDIT_MODEL_STREAM=false.
+            //
+            // Ark reports usage only on the final streamed event, and only when
+            // stream_options is set; without it the audit loses token
+            // accounting.
+            ...(wantStream
+              ? { stream: true, stream_options: { include_usage: true } }
+              : {}),
+            // Omitted when "auto" so the provider keeps its own default.
+            ...(thinking === "auto" ? {} : { thinking: { type: thinking } }),
+          }),
+          signal: controller.signal,
         },
-        body: JSON.stringify({
-          model: input.model,
-          messages: [
-            { role: "system", content: input.system },
-            { role: "user", content: input.user },
-          ],
-          // Audit models reason before answering; leave room for both.
-          max_tokens: input.maxTokens ?? 2_048,
-          // Asked for so the deadline above can tell a slow answer from a
-          // stuck one. A non-streamed reply withholds headers until the whole
-          // answer exists, which turns every stall budget into a cap on total
-          // generation time. The JSON branch below still handles a provider
-          // that ignores this, which is also what serves AUDIT_MODEL_STREAM=false.
-          //
-          // Ark reports usage only on the final streamed event, and only when
-          // stream_options is set; without it the audit loses token accounting.
-          ...(wantStream
-            ? { stream: true, stream_options: { include_usage: true } }
-            : {}),
-          // Omitted when "auto" so the provider keeps its own default.
-          ...(thinking === "auto" ? {} : { thinking: { type: thinking } }),
-        }),
-        signal: controller.signal,
-      });
+      );
+
+    // A context that expired or was never there is the provider saying the
+    // cache is gone, not that the question was bad. Retried once whole — this
+    // is the only place holding every part of the prompt, so recovering here
+    // costs a URL and a body rather than an interface.
+    const sendOnce = async () => {
+      const first = await send();
+      if (first.ok || !cache || !isContextGone(first.status)) return first;
+      cache = undefined;
+      return send();
+    };
+
+    try {
+      const response = await sendOnce();
       headersMs = Date.now() - started;
       abortPhase = "waiting_for_first_token";
       requestId = headerRequestId(response.headers);
@@ -519,7 +582,59 @@ export function createArkClient(
       input.signal?.removeEventListener("abort", abort);
     }
   };
-  return { complete };
+  // Opens a cache over a prompt prefix and returns its id. Its own deadline,
+  // much shorter than a completion's: the calls waiting on it have their own
+  // budget, and a slow cache open must not spend it for them.
+  const createContext = async (input: {
+    model: string;
+    system: string;
+    prefix: string;
+    ttlSeconds: number;
+    signal?: AbortSignal;
+  }): Promise<string> => {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    input.signal?.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, contextTimeoutMs);
+    try {
+      const response = await fetchImpl(config.arkBaseUrl + "/context/create", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer " + config.arkApiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: input.model,
+          mode: COMMON_PREFIX,
+          messages: [
+            { role: "system", content: input.system },
+            { role: "user", content: input.prefix },
+          ],
+          ttl: input.ttlSeconds,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const parsed = errorResponse.safeParse(
+          await response.json().catch(() => null),
+        );
+        throw new ArkApiError(
+          parsed.success
+            ? (parsed.data.error.message ?? "Ark context creation failed")
+            : "Ark context creation failed with HTTP " + response.status,
+          parsed.success ? (parsed.data.error.code ?? null) : null,
+          response.status,
+        );
+      }
+      const json: unknown = await response.json().catch(() => null);
+      return contextResponse.parse(json).id;
+    } finally {
+      clearTimeout(timer);
+      input.signal?.removeEventListener("abort", abort);
+    }
+  };
+
+  return { complete, createContext };
 }
 
 export type ArkClient = ReturnType<typeof createArkClient>;
