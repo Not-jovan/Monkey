@@ -117,6 +117,130 @@ describe("subagent detection", () => {
   });
 });
 
+// Checks that run concurrently share a start time to the millisecond, so the
+// list cannot lean on the clock to tell one subagent's work from another's.
+describe("subagent nesting", () => {
+  const auditorSpawn = (id: string, subagentType: string, startedAt: string) =>
+    span({
+      id,
+      name: "tool.spawn_agent",
+      startedAt,
+      attributes: {
+        subagent: true,
+        toolName: "spawn_agent",
+        laneId: "auditor",
+        subagentType,
+      },
+    });
+
+  const auditorCheck = (id: string, spawnId: string, startedAt: string) =>
+    span({
+      id,
+      name: "audit.step.summary",
+      kind: "model_call",
+      actor: "system",
+      parentId: spawnId,
+      startedAt,
+      attributes: { laneId: spawnId },
+    });
+
+  it("keeps a check under its own spawn when both spawns start at once", () => {
+    const at = "2026-08-30T00:00:00.000Z";
+    const steps = orderedSteps([
+      auditorSpawn("spawn-plan", "summarize", at),
+      auditorSpawn("spawn-exec", "injection", at),
+      auditorCheck("sum-plan", "spawn-plan", at),
+      auditorCheck("sum-exec", "spawn-exec", at),
+    ]);
+    expect(steps.map((step) => step.span.id)).toEqual([
+      "spawn-exec",
+      "sum-exec",
+      "spawn-plan",
+      "sum-plan",
+    ]);
+    expect(steps.map((step) => step.depth)).toEqual([0, 1, 0, 1]);
+  });
+
+  it("nests by lane even when the parent chain skips the spawn", () => {
+    const spawn = span({
+      id: "spawn-a",
+      name: "tool.spawn_agent",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      attributes: { toolName: "spawn_agent", subagent: true, laneId: "root" },
+    });
+    const turn = span({
+      id: "turn",
+      name: "codex.turn",
+      kind: "turn",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:09.000Z",
+    });
+    const child = span({
+      id: "child",
+      name: "tool.read_file",
+      parentId: "turn",
+      startedAt: "2026-08-30T00:00:02.000Z",
+      attributes: { toolName: "read_file", laneId: "spawn-a" },
+    });
+    const later = span({
+      id: "later",
+      name: "tool.apply_patch",
+      parentId: "turn",
+      startedAt: "2026-08-30T00:00:01.000Z",
+      attributes: { toolName: "apply_patch", laneId: "root" },
+    });
+    const steps = orderedSteps([spawn, turn, child, later]);
+    expect(steps.map((step) => [step.span.id, step.depth])).toEqual([
+      ["spawn-a", 0],
+      ["child", 1],
+      ["later", 0],
+    ]);
+  });
+
+  it("leaves the caller's own steps in one time-ordered sequence", () => {
+    const prompt = span({
+      id: "prompt",
+      name: "user.prompt",
+      kind: "user_action",
+      actor: "user",
+      startedAt: "2026-08-30T00:00:00.000Z",
+    });
+    const second = span({
+      id: "prompt-2",
+      name: "user.prompt",
+      kind: "user_action",
+      actor: "user",
+      startedAt: "2026-08-30T00:00:09.000Z",
+    });
+    const at = "2026-08-30T00:00:03.000Z";
+    const steps = orderedSteps([
+      second,
+      prompt,
+      auditorSpawn("spawn-plan", "summarize", at),
+      auditorCheck("sum-plan", "spawn-plan", at),
+    ]);
+    expect(steps.map((step) => step.span.id)).toEqual([
+      "prompt",
+      "spawn-plan",
+      "sum-plan",
+      "prompt-2",
+    ]);
+  });
+
+  it("still lists a step whose lane names a span that is not here", () => {
+    const orphan = span({
+      id: "orphan",
+      name: "tool.read_file",
+      startedAt: "2026-08-30T00:00:01.000Z",
+      attributes: { toolName: "read_file", laneId: "spawn-gone" },
+    });
+    const steps = orderedSteps([orphan]);
+    expect(steps.map((step) => [step.span.id, step.depth])).toEqual([
+      ["orphan", 0],
+    ]);
+  });
+});
+
 // The one lever the server has for "keep this span, do not call it a step".
 // An auditor's synthetic prompt rides on it, and so does anything the layout
 // needs but the reader does not.

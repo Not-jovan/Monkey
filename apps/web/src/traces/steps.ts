@@ -133,21 +133,112 @@ export function isSubagentBoundary(span: TraceSpan) {
   return isSubagentTask(span);
 }
 
-// How deeply a step sits inside spawned subagents. Drives indentation in the
-// list, so a subagent's work reads as belonging to the task that spawned it.
-export function subagentDepth(
+export function parseSubagentIndex(span: TraceSpan) {
+  const raw = span.attributes.subagentIndex;
+  if (typeof raw === "number") return raw;
+  if (typeof raw === "string") {
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return null;
+}
+
+function nearestBoundary(
+  startId: string | null,
+  spanById: Map<string, TraceSpan>,
+) {
+  let current = spanById.get(startId ?? "");
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    if (isSubagentBoundary(current)) return current;
+    current = spanById.get(current.parentId ?? "");
+  }
+  return null;
+}
+
+function callerLaneId(span: TraceSpan, spanById: Map<string, TraceSpan>) {
+  const owner = nearestBoundary(span.parentId, spanById);
+  if (owner) return owner.id;
+  return "root";
+}
+
+// Which subagent a step belongs to. The server stamps this for anything it
+// traced itself; the parent chain is the fallback for older spans.
+export function laneIdForSpan(
   span: TraceSpan,
   spanById: Map<string, TraceSpan>,
 ) {
-  let depth = 0;
-  let current = spanById.get(span.parentId ?? "");
-  const seen = new Set<string>([span.id]);
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    if (isSubagentTask(current)) depth += 1;
-    current = spanById.get(current.parentId ?? "");
+  if (span.actor === "user") return "user";
+
+  const stamped = span.attributes.laneId;
+  if (typeof stamped === "string" && stamped.length > 0) {
+    if (isAuditorStepCheck(span)) {
+      const parent = spanById.get(span.parentId ?? "");
+      if (parent && isSubagentTask(parent) && siblingCheckCount(parent, spanById) > 1) {
+        return auditorCheckLaneId(span, parent);
+      }
+    }
+    return stamped;
   }
-  return depth;
+
+  if (span.name === "subagent.result") {
+    const index = parseSubagentIndex(span);
+    return "result:" + (span.parentId ?? span.id) + ":" + (index ?? span.id);
+  }
+
+  if (isSubagentTask(span)) {
+    return callerLaneId(span, spanById);
+  }
+
+  const owner = nearestBoundary(span.parentId, spanById);
+  if (owner) return owner.id;
+  return "root";
+}
+
+function siblingCheckCount(
+  spawn: TraceSpan,
+  spanById: Map<string, TraceSpan>,
+) {
+  let count = 0;
+  for (const other of spanById.values()) {
+    if (other.parentId === spawn.id && isAuditorStepCheck(other)) count += 1;
+  }
+  return count;
+}
+
+function auditorCheckLaneId(span: TraceSpan, spawn: TraceSpan) {
+  const target = span.attributes.targetSpanId;
+  const type = spawn.attributes.subagentType;
+  if (
+    typeof target === "string" &&
+    target.length > 0 &&
+    typeof type === "string" &&
+    type.length > 0
+  ) {
+    return "audit:" + target + ":" + type;
+  }
+  return span.id;
+}
+
+// The spawn a lane hangs off, or null when the lane is a caller's own — "user",
+// "root", "auditor", or a lane whose spawn is not in this list.
+function laneOwnerId(
+  laneId: string,
+  laneSteps: TraceSpan[],
+  spanById: Map<string, TraceSpan>,
+) {
+  const named = spanById.get(laneId);
+  if (named && isSubagentTask(named)) return named.id;
+  if (laneId.startsWith("result:")) {
+    const owner = spanById.get(laneId.split(":")[1] ?? "");
+    if (owner && isSubagentTask(owner)) return owner.id;
+  }
+  if (laneId.startsWith("audit:")) {
+    const spawn = spanById.get(laneSteps[0]?.parentId ?? "");
+    if (spawn && isSubagentTask(spawn)) return spawn.id;
+  }
+  return null;
 }
 
 export interface OrderedStep {
@@ -155,22 +246,73 @@ export interface OrderedStep {
   depth: number;
 }
 
+// Steps as a tree, not a time-sorted line. Checks that run concurrently start
+// in the same millisecond, so ordering the whole run by time let one subagent's
+// work land under another subagent's row. A spawn is followed by the lanes it
+// opened, however the clock fell.
 export function orderedSteps(spans: TraceSpan[]): OrderedStep[] {
   const spanById = new Map(spans.map((span) => [span.id, span]));
-  return spans
-    .filter(isVisibleStep)
-    .sort((left, right) => {
-      const byTime = stepSortTime(left, spanById).localeCompare(
-        stepSortTime(right, spanById),
-      );
-      if (byTime !== 0) return byTime;
-      if (left.id === right.parentId) return -1;
-      if (right.id === left.parentId) return 1;
-      if (left.kind === "tool_call" && right.kind !== "tool_call") return -1;
-      if (right.kind === "tool_call" && left.kind !== "tool_call") return 1;
-      return left.id.localeCompare(right.id);
-    })
-    .map((span) => ({ span, depth: subagentDepth(span, spanById) }));
+  const ordered = spans.filter(isVisibleStep).sort((left, right) => {
+    const byTime = stepSortTime(left, spanById).localeCompare(
+      stepSortTime(right, spanById),
+    );
+    if (byTime !== 0) return byTime;
+    if (left.id === right.parentId) return -1;
+    if (right.id === left.parentId) return 1;
+    if (left.kind === "tool_call" && right.kind !== "tool_call") return -1;
+    if (right.kind === "tool_call" && left.kind !== "tool_call") return 1;
+    return left.id.localeCompare(right.id);
+  });
+
+  const laneOf = new Map<string, string>();
+  const byLane = new Map<string, TraceSpan[]>();
+  for (const span of ordered) {
+    const laneId = laneIdForSpan(span, spanById);
+    laneOf.set(span.id, laneId);
+    const list = byLane.get(laneId);
+    if (list) {
+      list.push(span);
+      continue;
+    }
+    byLane.set(laneId, [span]);
+  }
+
+  const lanesBySpawn = new Map<string, string[]>();
+  const rootLanes = new Set<string>();
+  for (const [laneId, laneSteps] of byLane) {
+    const owner = laneOwnerId(laneId, laneSteps, spanById);
+    if (owner === null) {
+      rootLanes.add(laneId);
+      continue;
+    }
+    const lanes = lanesBySpawn.get(owner);
+    if (lanes) {
+      lanes.push(laneId);
+      continue;
+    }
+    lanesBySpawn.set(owner, [laneId]);
+  }
+
+  const steps: OrderedStep[] = [];
+  const emitted = new Set<string>();
+  const emit = (span: TraceSpan, depth: number) => {
+    if (emitted.has(span.id)) return;
+    emitted.add(span.id);
+    steps.push({ span, depth });
+    if (!isSubagentTask(span)) return;
+    for (const laneId of lanesBySpawn.get(span.id) ?? []) {
+      for (const child of byLane.get(laneId) ?? []) emit(child, depth + 1);
+    }
+  };
+
+  // The caller's own lanes stay one sequence: a second prompt must not jump
+  // ahead of the work the first one caused.
+  for (const span of ordered) {
+    if (rootLanes.has(laneOf.get(span.id) ?? "")) emit(span, 0);
+  }
+  // A lane whose spawn never made the list would otherwise lose its steps.
+  for (const span of ordered) emit(span, 0);
+  return steps;
 }
 
 // The actor behind a step, said plainly. Screen readers announce this, so it
