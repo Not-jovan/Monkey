@@ -39,7 +39,12 @@ import {
 } from "./audit-model.js";
 import { AgentChatAuditor } from "./agent-chat-auditor.js";
 import { BatchCaller } from "./batch-caller.js";
-import { renderStepMarkdown, type AuditMemory } from "./audit-memory.js";
+import {
+  renderStepMarkdown,
+  workpadExcerpt,
+  type AuditMemory,
+  type StepsMeta,
+} from "./audit-memory.js";
 import type { AuditStore } from "./audit-store.js";
 import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js";
 import { reportForStep } from "./step-findings.js";
@@ -752,10 +757,10 @@ export class AuditService {
     return { verdict, status, failure, label: check.label };
   }
 
-  // The step's own record in the chat's audit memory: a markdown file a person
-  // reads, and an entry in the index the run-level analyses query. Written
-  // after the finding is stored, and never allowed to fail the audit — a
-  // missing artifact is worth less than the finding it describes.
+  // The step's workpad: markdown the run-level pass re-reads, plus an index
+  // entry so auditAll can decide which files to open. Written after the
+  // finding is stored, and never allowed to fail the audit — a missing
+  // artifact is worth less than the finding it describes.
   private async rememberStep(
     trace: TraceRecord,
     span: TraceSpan,
@@ -782,6 +787,26 @@ export class AuditService {
       }),
     );
     await memory.updateMeta(trace.agentId, trace.id, span.id, entry);
+  }
+
+  // Meta is the index (which steps have memory). The markdown is the workpad
+  // those entries point at. A missing file falls back to the index summary.
+  private async loadWorkpads(
+    memory: AuditMemory,
+    agentId: string,
+    chatId: string,
+    stepIds: string[],
+    meta: StepsMeta,
+  ) {
+    const files = await memory.readSteps(agentId, chatId, stepIds);
+    const workpads = new Map<string, string>();
+    for (const stepId of stepIds) {
+      workpads.set(
+        stepId,
+        workpadExcerpt(files.get(stepId), meta[stepId]?.summary ?? ""),
+      );
+    }
+    return workpads;
   }
 
   // Reads the run back as an ordered list of step summaries and asks whether
@@ -823,6 +848,14 @@ export class AuditService {
     // carried it out.
     if (later.length === 0) return [];
 
+    const workpads = await this.loadWorkpads(
+      memory,
+      trace.agentId,
+      trace.id,
+      later.map(({ span }) => span.id),
+      meta,
+    );
+
     const user = [
       "## Directives found in untrusted content",
       ...directives.map(
@@ -836,7 +869,7 @@ export class AuditService {
           ". " +
           span.label +
           " — " +
-          (meta[span.id]?.summary || "(no summary recorded for this step)"),
+          (workpads.get(span.id) || "(no memory recorded for this step)"),
       ),
     ].join("\n");
 
@@ -937,13 +970,20 @@ export class AuditService {
       span,
       number: index + 1,
     }));
-    const allHistory = numbered
-      .filter(({ span }) => meta[span.id])
-      .map(({ span, number }) => ({
-        number,
-        label: span.label,
-        summary: meta[span.id]?.summary ?? "",
-      }));
+    const indexed = numbered.filter(({ span }) => meta[span.id]);
+    const workpads = await this.loadWorkpads(
+      memory,
+      trace.agentId,
+      trace.id,
+      indexed.map(({ span }) => span.id),
+      meta,
+    );
+    const allHistory = indexed.map(({ span, number }) => ({
+      number,
+      label: span.label,
+      summary:
+        workpads.get(span.id) || "(no memory recorded for this step)",
+    }));
     const cited = numbered
       .filter(({ span }) =>
         open.some((question) => question.spanId === span.id),

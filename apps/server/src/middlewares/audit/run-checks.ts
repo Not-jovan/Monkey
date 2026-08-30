@@ -87,7 +87,7 @@ export function questionBody(question: OpenQuestion) {
 }
 
 const BACK_QUESTION_CLIP = 180;
-const BACK_SUMMARY_CLIP = 140;
+const BACK_SUMMARY_CLIP = 600;
 export const BACK_TRACE_STEP_WINDOW = 3;
 
 export interface BackTraceStep {
@@ -130,7 +130,7 @@ export function buildBackTraceUser(input: {
         step.label +
         " — " +
         clip(
-          step.summary || "(no summary recorded for this step)",
+          step.summary || "(no memory recorded for this step)",
           BACK_SUMMARY_CLIP,
         ),
     ),

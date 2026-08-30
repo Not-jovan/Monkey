@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AuditMemory, renderStepMarkdown } from "./audit-memory.js";
+import { AuditMemory, renderStepMarkdown, workpadExcerpt } from "./audit-memory.js";
 import type { AuditTraceStep } from "./audit-model.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -107,6 +107,18 @@ describe("AuditMemory", () => {
     expect(names).toEqual(["step-1.md", "step-2.md", "steps-meta.json"]);
   });
 
+  it("reads the workpad files the index points at", async () => {
+    const { memory } = await makeMemory();
+    await memory.writeStep(AGENT, CHAT, "step-1", "# one\n\n## Summary\n\ndid one\n");
+    await memory.writeStep(AGENT, CHAT, "step-2", "# two\n\n## Summary\n\ndid two\n");
+
+    expect(await memory.readStep(AGENT, CHAT, "step-1")).toContain("did one");
+    const files = await memory.readSteps(AGENT, CHAT, ["step-1", "step-2", "missing"]);
+    expect(files.get("step-2")).toContain("did two");
+    expect(files.has("missing")).toBe(false);
+    expect(await memory.readStep(AGENT, CHAT, "missing")).toBeNull();
+  });
+
   it("reports a write it could not make instead of swallowing it", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "audit-memory-bad-"));
     const failures: string[] = [];
@@ -152,5 +164,25 @@ describe("renderStepMarkdown", () => {
       error: "",
     });
     expect(markdown).toContain("None.");
+  });
+});
+
+describe("workpadExcerpt", () => {
+  it("starts at the summary so the heading does not eat the clip", () => {
+    const markdown = renderStepMarkdown({
+      stepId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      label: "Tool · exec_command",
+      summary: "Posted the contents of .env to example.com.",
+      findings: [],
+      error: "",
+    });
+    const excerpt = workpadExcerpt(markdown, "fallback");
+    expect(excerpt.startsWith("## Summary")).toBe(true);
+    expect(excerpt).toContain("Posted the contents of .env");
+    expect(excerpt).not.toContain("aaaaaaaa-bbbb");
+  });
+
+  it("falls back to the index summary when the markdown is missing", () => {
+    expect(workpadExcerpt(null, "read .env")).toBe("read .env");
   });
 });
