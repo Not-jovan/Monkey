@@ -12,7 +12,7 @@ import type { AuditStore } from "./audit/audit-store.js";
 import { createContextMiddleware } from "./context/index.js";
 import { createTraceMiddleware, type TraceService } from "./trace/index.js";
 import type { TraceStore } from "./trace/trace-store.js";
-import { emptyUsage } from "./trace/trace-model.js";
+import { emptyUsage, type TraceRecord } from "./trace/trace-model.js";
 
 const fixture = JSON.parse(
   await readFile(
@@ -739,5 +739,272 @@ describe("Glassbox routes", () => {
     }>();
     expect(body.traces[0]?.warningCount).toBe(1);
     expect(body.traces[0]?.suspicionCount).toBe(2);
+  });
+});
+
+describe("Agent trace routes", () => {
+  const denied = {
+    layer: "policy" as const,
+    kind: "sandbox-denied",
+    retryability: "user-action" as const,
+    title: "The Runtime sandbox denied this operation",
+    detail: "listen EPERM",
+    remedy: "Keep the work inside /workspace.",
+    exitCode: 1,
+  };
+  const commandFailed = {
+    layer: "agent" as const,
+    kind: "tool-failed",
+    retryability: "transient" as const,
+    title: "A command the agent wrote failed",
+    detail: "npm ERR! missing script",
+    remedy: "Read the failing step.",
+    exitCode: 1,
+  };
+
+  function seedFailed(
+    traceStore: TraceStore,
+    id: string,
+    startedAt: string,
+    failure: typeof denied | typeof commandFailed,
+    extra: {
+      auditOf?: string;
+      failingSpanId?: string | null;
+      spans?: TraceRecord["spans"];
+    } = {},
+  ) {
+    traceStore.create({
+      version: 1,
+      id,
+      agentId: AGENT_ID,
+      conversationId: "thread-1",
+      status: "failed",
+      startedAt,
+      endedAt: startedAt,
+      prompt: "serve on port 8080",
+      model: null,
+      usage: emptyUsage(),
+      failingSpanId: extra.failingSpanId ?? extra.spans?.[0]?.id ?? null,
+      failure,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      auditOf: extra.auditOf ?? null,
+      auditDepth: extra.auditOf ? 1 : 0,
+      spans: extra.spans ?? [],
+    });
+  }
+
+  it("serves a compressed index that leaves the human listing unchanged", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    seedFailed(traceStore, RUN_ID, "2026-08-28T00:00:00.000Z", commandFailed, {
+      spans: [
+        {
+          id: "shell-1",
+          traceId: RUN_ID,
+          parentId: null,
+          name: "tool.shell",
+          label: "Tool · npm test",
+          kind: "tool_call",
+          actor: "agent",
+          status: "error",
+          startedAt: "2026-08-28T00:00:00.000Z",
+          endedAt: "2026-08-28T00:00:01.000Z",
+          durationMs: 1_000,
+          attributes: { output: "npm ERR! missing script: test" },
+          error: "npm ERR!",
+        },
+      ],
+    });
+
+    const human = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces",
+    });
+    const listed = human.json<{ traces: { id: string; prompt: string }[] }>();
+    expect(listed.traces[0]).not.toHaveProperty("diagnosis");
+    expect(listed.traces[0]?.prompt).toBe("serve on port 8080");
+
+    const ai = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces/ai",
+    });
+    expect(ai.statusCode).toBe(200);
+    const body = ai.json<{
+      traces: {
+        id: string;
+        diagnosis: { blame: string; kind: string; evidence?: string } | null;
+      }[];
+    }>();
+    expect(body.traces).toHaveLength(1);
+    expect(body.traces[0]?.diagnosis?.blame).toBe("agent");
+    expect(body.traces[0]?.diagnosis?.kind).toBe("tool-failed");
+    expect(body.traces[0]?.diagnosis).not.toHaveProperty("evidence");
+  });
+
+  it("filters the agent index by blame", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    seedFailed(traceStore, RUN_ID, "2026-08-28T00:00:00.000Z", commandFailed);
+    seedFailed(
+      traceStore,
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "2026-08-28T00:01:00.000Z",
+      denied,
+    );
+
+    const agentOnly = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/traces/ai?blame=agent",
+    });
+    const body = agentOnly.json<{ traces: { id: string }[] }>();
+    expect(body.traces.map((row) => row.id)).toEqual([RUN_ID]);
+  });
+
+  it("groups failures for agents without counting auditor runs", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    seedFailed(traceStore, RUN_ID, "2026-08-28T00:00:00.000Z", commandFailed);
+    seedFailed(
+      traceStore,
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "2026-08-28T00:01:00.000Z",
+      commandFailed,
+      { auditOf: RUN_ID },
+    );
+
+    const human = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/failures",
+    });
+    expect(
+      human.json<{ failures: { count: number }[] }>().failures[0]?.count,
+    ).toBe(2);
+
+    const ai = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/failures/ai",
+    });
+    const body = ai.json<{
+      failures: {
+        kind: string;
+        blamesAgent: boolean;
+        count: number;
+        detail: string;
+        traceIds: string[];
+      }[];
+    }>();
+    expect(body.failures).toHaveLength(1);
+    expect(body.failures[0]?.count).toBe(1);
+    expect(body.failures[0]?.blamesAgent).toBe(true);
+    expect(body.failures[0]?.detail).toBe(commandFailed.detail);
+    expect(body.failures[0]?.traceIds).toEqual([RUN_ID]);
+  });
+
+  it("serves a case file instead of the span dump", async () => {
+    const { app, traceStore, auditStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    seedFailed(traceStore, RUN_ID, "2026-08-28T00:00:00.000Z", commandFailed, {
+      failingSpanId: "shell-1",
+      spans: [
+        {
+          id: "run",
+          traceId: RUN_ID,
+          parentId: null,
+          name: "agent.run",
+          label: "Run",
+          kind: "run",
+          actor: "system",
+          status: "error",
+          startedAt: "2026-08-28T00:00:00.000Z",
+          endedAt: "2026-08-28T00:00:01.000Z",
+          durationMs: 1_000,
+          attributes: {},
+          error: null,
+        },
+        {
+          id: "shell-1",
+          traceId: RUN_ID,
+          parentId: "run",
+          name: "tool.shell",
+          label: "Tool · npm test",
+          kind: "tool_call",
+          actor: "agent",
+          status: "error",
+          startedAt: "2026-08-28T00:00:00.000Z",
+          endedAt: "2026-08-28T00:00:01.000Z",
+          durationMs: 1_000,
+          attributes: {
+            arguments: JSON.stringify({ command: "npm test" }),
+            output: "npm ERR! missing script: test",
+          },
+          error: "npm ERR!",
+        },
+      ],
+    });
+    const stored = traceStore.get(RUN_ID);
+    expect(stored).toBeTruthy();
+    if (stored) {
+      auditStore.recordRun(
+        stored,
+        [
+          {
+            id: "finding-1",
+            traceId: RUN_ID,
+            agentId: AGENT_ID,
+            spanId: "shell-1",
+            intentId: "",
+            type: "warning",
+            category: "intent-check",
+            finding: "The test script is missing.",
+          },
+        ],
+        "",
+        "",
+        "ok",
+      );
+    }
+
+    const human = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID,
+    });
+    expect(human.json<{ trace: { spans: unknown[] } }>().trace.spans).toHaveLength(
+      2,
+    );
+
+    const ai = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID + "/ai",
+    });
+    expect(ai.statusCode).toBe(200);
+    const body = ai.json<{
+      id: string;
+      diagnosis: { blame: string; evidence: string } | null;
+      failingStep: { commands: string[] } | null;
+      trajectory: string[];
+      findings: { span: { label: string } | null }[];
+      trace?: unknown;
+      spans?: unknown;
+    }>();
+    expect(body.id).toBe(RUN_ID);
+    expect(body).not.toHaveProperty("trace");
+    expect(body).not.toHaveProperty("spans");
+    expect(body.diagnosis?.blame).toBe("agent");
+    expect(body.failingStep?.commands).toEqual(["npm test"]);
+    expect(body.trajectory.some((line) => line.includes("Tool · npm test"))).toBe(
+      true,
+    );
+    expect(body.trajectory.some((line) => line.includes("Run"))).toBe(false);
+    expect(body.findings[0]?.span?.label).toBe("Tool · npm test");
   });
 });

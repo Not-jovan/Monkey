@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { auditAction } from "./audit-action";
+import {
+  auditAction,
+  auditorTabActions,
+  showDegradedRetry,
+} from "./audit-action";
 
 const agentRun = {
   auditOf: null,
@@ -29,9 +33,10 @@ describe("auditAction", () => {
   });
 
   it("offers a retry when an Agent run's audit failed", () => {
-    expect(
-      auditAction({ ...agentRun, auditHealth: "failed" }),
-    ).toEqual({ view: "audit-1", run: true });
+    expect(auditAction({ ...agentRun, auditHealth: "failed" })).toEqual({
+      view: "audit-1",
+      run: true,
+    });
   });
 
   it("offers an unjudged auditor the trigger and nowhere to go", () => {
@@ -75,5 +80,56 @@ describe("auditAction", () => {
       view: null,
       run: true,
     });
+  });
+});
+
+describe("auditorTabActions", () => {
+  const started = { view: "audit-1", run: false };
+  const unstarted = { view: null, run: true };
+  const retry = { view: "audit-1", run: true };
+
+  it("hides both buttons on the run tab", () => {
+    expect(auditorTabActions({ pane: "run", action: retry })).toEqual({
+      showAuditAuditor: false,
+      showViewAuditAuditor: false,
+    });
+  });
+
+  it("shows Audit Auditor on the auditor tab before a pass has started", () => {
+    expect(auditorTabActions({ pane: "auditor", action: unstarted })).toEqual({
+      showAuditAuditor: true,
+      showViewAuditAuditor: false,
+    });
+  });
+
+  it("shows View Audit Auditor on the auditor tab once a pass has started", () => {
+    expect(auditorTabActions({ pane: "auditor", action: started })).toEqual({
+      showAuditAuditor: false,
+      showViewAuditAuditor: true,
+    });
+  });
+
+  it("keeps both when a started pass still needs a retry", () => {
+    expect(auditorTabActions({ pane: "auditor", action: retry })).toEqual({
+      showAuditAuditor: true,
+      showViewAuditAuditor: true,
+    });
+  });
+});
+
+describe("showDegradedRetry", () => {
+  it("is true only on the auditor tab of a degraded pass", () => {
+    expect(
+      showDegradedRetry({ pane: "auditor", auditHealth: "degraded" }),
+    ).toBe(true);
+    expect(showDegradedRetry({ pane: "run", auditHealth: "degraded" })).toBe(
+      false,
+    );
+    expect(showDegradedRetry({ pane: "auditor", auditHealth: "ok" })).toBe(
+      false,
+    );
+    expect(showDegradedRetry({ pane: "auditor", auditHealth: "failed" })).toBe(
+      false,
+    );
   });
 });

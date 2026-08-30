@@ -2,12 +2,22 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { blamesAgent } from "../../failures.js";
+import {
+  agentFailureGroups,
+  agentTraceCase,
+  agentTraceSummary,
+  filterAgentSummaries,
+} from "./ai-view.js";
 import { isAuditorTrace } from "./trace-model.js";
 import { HttpError } from "../../errors.js";
 import type { MiddlewareDeps } from "../types.js";
 
 const idParams = z.object({ id: z.string().uuid() });
 const traceParams = z.object({ id: z.string().min(8).max(64) });
+const aiListQuery = z.object({
+  blame: z.enum(["agent", "environment"]).optional(),
+  status: z.enum(["running", "completed", "failed", "cancelled"]).optional(),
+});
 
 export function registerTraceRoutes(
   app: FastifyInstance,
@@ -160,6 +170,67 @@ export function registerTraceRoutes(
   };
 
   app.get("/api/traces/:id/download", downloadTrace);
+
+  // Agent-optimized siblings of the Glass Box GETs. The human routes above
+  // dump the record for the UI; these compress it into a triage index, a
+  // grouped failure list, and a case file. Same stores, different shape.
+  app.get("/api/agents/:id/traces/ai", async (request) => {
+    const { id } = idParams.parse(request.params);
+    const query = aiListQuery.parse(request.query);
+    const auditCounts = deps.auditStore.countsByTrace();
+    const health = deps.auditStore.healthByTrace();
+    const traces = filterAgentSummaries(
+      deps.traceStore
+        .listByAgent(id)
+        .filter((trace) => !isAuditorTrace(trace))
+        .map((trace) =>
+          agentTraceSummary({
+            trace,
+            warningCount: auditCounts.get(trace.id)?.warnings ?? 0,
+            suspicionCount: auditCounts.get(trace.id)?.suspicions ?? 0,
+            auditHealth: health.get(trace.id) ?? "ok",
+          }),
+        ),
+      {
+        ...(query.blame ? { blame: query.blame } : {}),
+        ...(query.status ? { status: query.status } : {}),
+      },
+    );
+    return { traces };
+  });
+
+  app.get("/api/agents/:id/failures/ai", async (request) => {
+    const { id } = idParams.parse(request.params);
+    return { failures: agentFailureGroups(deps.traceStore.listByAgent(id)) };
+  });
+
+  app.get("/api/traces/:id/ai", async (request) => {
+    const { id } = traceParams.parse(request.params);
+    const payload = agentCase(id);
+    if (!payload) {
+      throw new HttpError(404, "Trace not found");
+    }
+    return payload;
+  });
+
+  function agentCase(id: string) {
+    const trace = deps.traceStore.get(id);
+    if (!trace) return null;
+    return agentTraceCase({
+      trace,
+      findings: deps.auditStore.listByTrace(id),
+      auditComplete: deps.auditStore.isRunComplete(id),
+      auditHealth: deps.auditStore.health(id),
+      intent: deps.auditStore.intentOf(id),
+      context: deps.contextService?.view(id) ?? null,
+      auditTraceId: deps.traceStore.auditorTraceFor(id),
+      auditChain: deps.traceStore.auditChain(id).map((entry) => ({
+        id: entry.id,
+        auditDepth: entry.auditDepth,
+        status: entry.status,
+      })),
+    });
+  }
 
   function glassboxTrace(id: string) {
     const trace = deps.traceStore.get(id);

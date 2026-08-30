@@ -29,3 +29,28 @@ export function auditAction(input: {
     run: input.status !== "running" && !isSuccessfulAudit(input),
   };
 }
+
+export type TracePane = "run" | "auditor";
+
+// The trigger and the way into its result both live on the auditor tab.
+// View Audit Auditor stays off until an audit of this trace has actually
+// started — an id in `action.view`, not the mere presence of the tab.
+export function auditorTabActions(input: {
+  pane: TracePane;
+  action: AuditAction;
+}): { showAuditAuditor: boolean; showViewAuditAuditor: boolean } {
+  if (input.pane !== "auditor") {
+    return { showAuditAuditor: false, showViewAuditAuditor: false };
+  }
+  return {
+    showAuditAuditor: input.action.run,
+    showViewAuditAuditor: input.action.view !== null,
+  };
+}
+
+export function showDegradedRetry(input: {
+  pane: TracePane;
+  auditHealth: AuditHealth;
+}): boolean {
+  return input.pane === "auditor" && input.auditHealth === "degraded";
+}
