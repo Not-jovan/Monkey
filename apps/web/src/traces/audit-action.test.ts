@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  auditAction,
-  auditorTabActions,
-  showDegradedRetry,
-} from "./audit-action";
+import { auditAction, showDegradedRetry } from "./audit-action";
 
 const agentRun = {
   auditOf: null,
@@ -79,40 +75,6 @@ describe("auditAction", () => {
     expect(auditAction({ ...auditor, auditOf: "audit-1" })).toEqual({
       view: null,
       run: true,
-    });
-  });
-});
-
-describe("auditorTabActions", () => {
-  const started = { view: "audit-1", run: false };
-  const unstarted = { view: null, run: true };
-  const retry = { view: "audit-1", run: true };
-
-  it("hides both buttons on the run tab", () => {
-    expect(auditorTabActions({ pane: "run", action: retry })).toEqual({
-      showAuditAuditor: false,
-      showViewAuditAuditor: false,
-    });
-  });
-
-  it("shows Audit Auditor on the auditor tab before a pass has started", () => {
-    expect(auditorTabActions({ pane: "auditor", action: unstarted })).toEqual({
-      showAuditAuditor: true,
-      showViewAuditAuditor: false,
-    });
-  });
-
-  it("shows View Audit Auditor on the auditor tab once a pass has started", () => {
-    expect(auditorTabActions({ pane: "auditor", action: started })).toEqual({
-      showAuditAuditor: false,
-      showViewAuditAuditor: true,
-    });
-  });
-
-  it("keeps both when a started pass still needs a retry", () => {
-    expect(auditorTabActions({ pane: "auditor", action: retry })).toEqual({
-      showAuditAuditor: true,
-      showViewAuditAuditor: true,
     });
   });
 });

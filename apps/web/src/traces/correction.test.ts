@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { IntentCorrection } from "../types";
-import { correctedFindingIds } from "./TraceCorrection";
+import {
+  correctedFindingIds,
+  correctionsForTrace,
+  displayedConstraints,
+} from "./correction";
 
 function correction(overrides: Partial<IntentCorrection> = {}): IntentCorrection {
   return {
@@ -40,5 +44,42 @@ describe("correctedFindingIds", () => {
 
   it("is empty when nothing has been corrected", () => {
     expect(correctedFindingIds([]).size).toBe(0);
+  });
+});
+
+describe("displayedConstraints", () => {
+  it("adds active human corrections to the derived constraints", () => {
+    expect(
+      displayedConstraints(["Stay in the workspace."], [correction()]),
+    ).toEqual([
+      { text: "Stay in the workspace.", humanCorrection: false },
+      { text: "Do not read .env files.", humanCorrection: true },
+    ]);
+  });
+
+  it("does not duplicate a correction already derived by the auditor", () => {
+    expect(
+      displayedConstraints(["Do not read .env files"], [correction()]),
+    ).toEqual([
+      { text: "Do not read .env files", humanCorrection: true },
+    ]);
+  });
+
+  it("removes undone corrections from the displayed constraints", () => {
+    expect(
+      displayedConstraints([], [
+        correction({ revertedAt: "2026-08-30T01:00:00.000Z" }),
+      ]),
+    ).toEqual([]);
+  });
+});
+
+describe("correctionsForTrace", () => {
+  it("keeps correction evidence on the run where it was authored", () => {
+    const first = correction({ traceId: "trace-1" });
+    const second = correction({ id: "second", traceId: "trace-2" });
+
+    expect(correctionsForTrace([first, second], "trace-1")).toEqual([first]);
+    expect(correctionsForTrace([first, second], "trace-2")).toEqual([second]);
   });
 });

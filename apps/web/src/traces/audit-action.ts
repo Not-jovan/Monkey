@@ -2,9 +2,11 @@ import type { AuditHealth, TraceStatus } from "../types";
 import { isSuccessfulAudit } from "./audit-status";
 
 // What a trace page offers on the stack of audits above it, decided from the
-// page's own trace rather than from whichever pane happens to be showing.
-// Going deeper is a page-level move: the auditor pane is a preview of the
-// audit, so opening it and opening the audit of the run are the same journey.
+// page's own trace and offered on either tab. Going deeper is a page-level
+// move: the auditor pane is a preview of the audit, so opening it and opening
+// the audit of the run are the same journey. Gating this on the auditor tab
+// stranded whoever followed the link — they landed on the run tab of the trace
+// they had just opened with no way to audit it from there.
 //
 // The two are separate rather than one of three states because a failed pass
 // leaves both at once — an auditor trace worth reading, and no verdict to show
@@ -31,22 +33,6 @@ export function auditAction(input: {
 }
 
 export type TracePane = "run" | "auditor";
-
-// The trigger and the way into its result both live on the auditor tab.
-// View Audit Auditor stays off until an audit of this trace has actually
-// started — an id in `action.view`, not the mere presence of the tab.
-export function auditorTabActions(input: {
-  pane: TracePane;
-  action: AuditAction;
-}): { showAuditAuditor: boolean; showViewAuditAuditor: boolean } {
-  if (input.pane !== "auditor") {
-    return { showAuditAuditor: false, showViewAuditAuditor: false };
-  }
-  return {
-    showAuditAuditor: input.action.run,
-    showViewAuditAuditor: input.action.view !== null,
-  };
-}
 
 export function showDegradedRetry(input: {
   pane: TracePane;
