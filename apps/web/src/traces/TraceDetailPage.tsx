@@ -8,12 +8,7 @@ import {
   type TraceDetail,
 } from "../api";
 import type { TraceRecord } from "../types";
-import {
-  auditAction,
-  auditorTabActions,
-  showDegradedRetry,
-  type TracePane,
-} from "./audit-action";
+import { auditAction, showDegradedRetry, type TracePane } from "./audit-action";
 import { TraceRunView, type StepView } from "./TraceRunView";
 
 function download(fileName: string, data: unknown) {
@@ -213,10 +208,6 @@ export function TraceDetailPage() {
   // tab they did pick.
   const followAudit = () => setPane("run");
 
-  const { showAuditAuditor, showViewAuditAuditor } = auditorTabActions({
-    pane,
-    action,
-  });
   const degraded = showDegradedRetry({ pane, auditHealth });
 
   if (locked || detailQuery.error) {
@@ -303,23 +294,23 @@ export function TraceDetailPage() {
                 )}
               </button>
             </div>
-            {showAuditAuditor && (
+            {action.run && (
               <button
                 type="button"
                 className="button button-ghost"
                 disabled={audit.isPending}
                 onClick={() => audit.mutate()}
               >
-                {audit.isPending ? "Auditing…" : "Audit Auditor"}
+                {audit.isPending ? "Auditing…" : "Audit"}
               </button>
             )}
-            {showViewAuditAuditor && action.view && (
+            {action.view && (
               <Link
                 className="button button-ghost"
                 to={"/traces/" + action.view}
                 onClick={followAudit}
               >
-                View Audit Auditor
+                View Audit
               </Link>
             )}
           </div>
