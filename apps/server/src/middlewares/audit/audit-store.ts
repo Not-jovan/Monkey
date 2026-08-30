@@ -148,6 +148,10 @@ export class AuditStore {
     ].slice(-MAX_AUDIT_HISTORY);
     doc.spanAudit = {};
     doc.runAudit = [];
+    // The new pass has not finished, and endTime is what says so.
+    // Left at the previous pass's value, an interrupted re-audit looked
+    // complete, so the next attempt started over instead of carrying on.
+    doc.summary.endTime = 0;
     this.persist(trace.id);
   }
 

@@ -153,3 +153,47 @@ describe("AuditStore re-audit", () => {
     expect(reopened.passesFor(TRACE_ID)).toEqual([]);
   });
 });
+
+describe("AuditStore interrupted-pass detection", () => {
+  // endTime is the completion marker, and it is what tells a pass that stopped
+  // partway from one that finished. A pass beginning has not finished, so
+  // leaving the previous pass's value in place made every re-audit after the
+  // first look complete the moment it was interrupted — and the next attempt
+  // started the whole thing over instead of carrying on.
+  it("stops reporting complete once a new pass begins", async () => {
+    const { store } = await makeStore();
+    store.replaceSpan(trace(), "span-1", [finding("first-pass")], "");
+    store.recordRequestedAudit(trace(), [finding("run-level")], "");
+    expect(store.isRunComplete(TRACE_ID)).toBe(true);
+    expect(store.interruptedPass(TRACE_ID)).toBe(false);
+
+    store.beginPass(trace());
+
+    expect(store.isRunComplete(TRACE_ID)).toBe(false);
+  });
+
+  it("sees a pass that answered for a step and stopped as interrupted", async () => {
+    const { store } = await makeStore();
+    store.replaceSpan(trace(), "span-1", [finding("first-pass")], "");
+    store.recordRequestedAudit(trace(), [finding("run-level")], "");
+
+    // A second pass starts, answers one step, and the process dies.
+    store.beginPass(trace());
+    store.replaceSpan(trace(), "span-1", [finding("second-pass")], "");
+
+    expect(store.interruptedPass(TRACE_ID)).toBe(true);
+    expect(store.hasSpanAudit(TRACE_ID, "span-1")).toBe(true);
+    expect(store.hasSpanAudit(TRACE_ID, "span-2")).toBe(false);
+  });
+
+  it("is not interrupted when a pass has begun but answered nothing", async () => {
+    const { store } = await makeStore();
+    store.replaceSpan(trace(), "span-1", [finding("first-pass")], "");
+    store.recordRequestedAudit(trace(), [finding("run-level")], "");
+
+    store.beginPass(trace());
+
+    // Nothing to carry on from, so the next attempt is a fresh pass.
+    expect(store.interruptedPass(TRACE_ID)).toBe(false);
+  });
+});
