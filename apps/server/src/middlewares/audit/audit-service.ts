@@ -113,8 +113,12 @@ const MAX_REQUESTED_STEP_AUDITS = 150;
 const MAX_TRACED_DIRECTIVES = 10;
 const MAX_TRACED_STEPS = 40;
 
-// Runs whose run-level audit never happened, retried at boot. Bounded so a
-// backlog cannot turn a restart into hundreds of model calls.
+// Runs whose run-level audit never happened, retried at boot. Newest first,
+// and capped. "No endTime" is also every historical run if auditing was off
+// or auditAll never committed, so an unbounded sweep is a backfill of traces/,
+// sharing BatchCaller with live playground work behind a 60s timeout. Twenty
+// is a working session (the traces still on screen) and sits under
+// QUEUE_DEPTH_WARNING, so a restart does not itself look like a stuck queue.
 const MAX_RESUMED_RUN_AUDITS = 20;
 
 // Said the same way whether the step had a verdict to weigh or not, so one
@@ -152,7 +156,7 @@ interface AuditServiceDeps {
   // Identifies the spec each step is judged against. Optional so a test can
   // stub the classifier; production wires it through the auditor's runner.
   intentReducer?: IntentReducer;
-  // Prior-run context. Always populated, model or no model ‚Äî the auditor reads
+  // Prior-run context. Always populated, model or no model ù the auditor reads
   // from it and enriches it, but never owns it.
   context?: ContextStore;
   // Where each audited step's record is written. Optional so a test that only
@@ -188,7 +192,7 @@ const DEFAULT_BATCH_CONCURRENCY = 2;
 // only to its own store. It never mutates traces and a failure here never
 // blocks a run.
 // The forward trace and the backtrace look at the same suspicions from
-// opposite directions, so both can land on the same instruction ‚Äî one saying a
+// opposite directions, so both can land on the same instruction ù one saying a
 // later step carried it out, the other that nothing the user asked for accounts
 // for it. That is one problem, and reporting it twice inflates the run's count
 // and reads as two separate failures.
@@ -291,7 +295,7 @@ export class AuditService {
   private readonly model: AuditorModel;
   // PLAN_AUDITOR's AgentChatAuditor, one per chat. Holds the identity its
   // findings are stamped with, the folder its artifacts go to, and the state
-  // the run-level checks need ‚Äî the meta-audit guard, and how many step
+  // the run-level checks need ù the meta-audit guard, and how many step
   // audits are still in flight.
   private readonly auditors = new Map<string, AgentChatAuditor>();
 
@@ -331,11 +335,12 @@ export class AuditService {
 
   // A run interrupted by a restart is rewritten from running to failed by
   // TraceStore.initialize, directly on the record rather than through
-  // updateTrace, so no trace-completed is ever emitted for it ‚Äî and this
+  // updateTrace, so no trace-completed is ever emitted for it ù and this
   // subscription is installed after that rewrite has already happened. Without
   // this sweep a crashed run is never judged at the run level and nothing says
-  // so. Bounded because a first boot with auditing newly enabled would
-  // otherwise queue a model call for every trace ever recorded.
+// so. The cap on MAX_RESUMED_RUN_AUDITS is the working set, not the archive:
+// a first boot with auditing newly enabled would otherwise queue every
+// historical run. Older unfinished work waits for a later boot or a click.
   private resumeUnfinishedRunAudits() {
     const pending = this.deps.traceStore
       .list()
@@ -375,7 +380,7 @@ export class AuditService {
   // all and would be swept into a full pass nobody asked for. Requiring
   // answers already on file distinguishes a pass that was interrupted from one
   // that was never asked for. A pass that died before answering anything is
-  // deliberately not resumed either ó there is nothing to carry on from, and
+  // deliberately not resumed either ù there is nothing to carry on from, and
   // it costs the same as being asked again.
   private resumeInterruptedMetaAudits() {
     const pending = this.deps.traceStore
@@ -454,7 +459,7 @@ export class AuditService {
 
   private shouldAuditStep(span: TraceSpan, trace: TraceRecord) {
     if (span.kind === "user_action" && span.name === "user.prompt") return true;
-    // The plan is where an injected objective shows up first ‚Äî the agent says
+    // The plan is where an injected objective shows up first ù the agent says
     // what it intends before any tool carries it out. Gated on output so the
     // span is judged once, when it has something to judge: api_request appends
     // the span before the model has said anything.
@@ -465,8 +470,8 @@ export class AuditService {
     // objective, so it is audited like any other tool result. A synthesized
     // projection of exec_command output is already covered by that tool span.
     //
-    // Nothing currently emits this span ‚Äî a reply arrives as an ordinary
-    // tool_call ‚Äî so this branch does not fire today. It is kept deliberately
+    // Nothing currently emits this span ù a reply arrives as an ordinary
+    // tool_call ù so this branch does not fire today. It is kept deliberately
     // rather than deleted: the span shape existed in an earlier version (the
     // web still hides synthesized ones for older traces) and the subagent
     // visualizer work may reinstate it. Deleting the branch would silently drop
@@ -478,7 +483,7 @@ export class AuditService {
     if (span.status === "running") return false;
     // A tool denied at the decision is final immediately but carries only its
     // name: arguments and output arrive with the result. Judging it here judged
-    // a bare tool name, so it waits for the payload ‚Äî or, if the run ends
+    // a bare tool name, so it waits for the payload ù or, if the run ends
     // without one, for the sweep that re-announces it with the run's verdict.
     return hasJudgeableEvidence(span) || trace.status !== "running";
   }
@@ -509,7 +514,7 @@ export class AuditService {
 
   // Same reducer for both agents. The target rebases current instructions onto
   // prior audit derivations and this run's message. The auditor rebases its
-  // own spec ‚Äî "Audit the target agent." ‚Äî the same way.
+  // own spec ù "Audit the target agent." ù the same way.
   private async deriveFor(trace: TraceRecord): Promise<IntentDerivation> {
     const auditor = isAuditorTrace(trace);
     return this.reducerFor(trace).reduce({
@@ -586,7 +591,7 @@ export class AuditService {
     return this.injectionsInFindings(findings).map((entry) => entry.quote);
   }
 
-  // The same findings, but keeping which step each was found in ‚Äî the
+  // The same findings, but keeping which step each was found in ù the
   // forward-trace needs it to know which steps count as "later".
   private injectionsInFindings(findings: AuditTraceStep[]) {
     const prefix = "prompt-injection: ";
@@ -652,7 +657,7 @@ export class AuditService {
   //
   // Stored wins wherever both have an entry: it is what survives a restart.
   // The draft fills only the gaps, because a step this process judged whose
-  // record could not be written to disk is still a step that was judged ‚Äî and
+  // record could not be written to disk is still a step that was judged ù and
   // dropping it here silently starves the backtrace, which has no other source
   // for the suspicions it exists to settle.
   //
@@ -680,9 +685,9 @@ export class AuditService {
   }
 
   // PLAN_AUDITOR's auditStep: checks 0-6, concurrently, each with its own
-  // evidence and its own auditor span. Four are conditional ‚Äî the spec gates 5
+  // evidence and its own auditor span. Four are conditional ù the spec gates 5
   // and 6 on the step being a tool call or a sink write, and gates 2 on a URI
-  // existing at all ‚Äî so the deterministic pass below decides which are worth
+  // existing at all ù so the deterministic pass below decides which are worth
   // asking before any of them is paid for.
   private async stepAudit(chat: AgentChatAuditor, spanId: string) {
     const traceId = chat.chatId;
@@ -732,7 +737,7 @@ export class AuditService {
 
     // The three always-on checks are asked the same evidence and differ only in
     // the question trailing it. The provider caches that shared prefix, but it
-    // writes the entry only once a request has finished inference ‚Äî so sending
+    // writes the entry only once a request has finished inference ù so sending
     // all three together, as this did, guarantees three misses. The summary
     // goes first and pays for the evidence; the two that repeat it byte for
     // byte follow, and can read it back instead of buying it again.
@@ -747,7 +752,7 @@ export class AuditService {
       () =>
         this.stepCheck(trace, spanId, {
           name: "audit.step.summary",
-          label: "Summarize ¬∑ " + span.label,
+          label: "Summarize ù " + span.label,
           system: STEP_AUDIT_SYSTEM_PROMPT,
           user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
           schema: summaryVerdict,
@@ -766,7 +771,7 @@ export class AuditService {
       this.resolveRequiredCheck(cached?.intent, intentStepVerdict, () =>
         this.stepCheck(trace, spanId, {
           name: "audit.step.intent",
-          label: "Intent ¬∑ " + span.label,
+          label: "Intent ù " + span.label,
           system: STEP_AUDIT_SYSTEM_PROMPT,
           user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
           schema: intentStepVerdict,
@@ -775,7 +780,7 @@ export class AuditService {
       this.resolveRequiredCheck(cached?.injection, injectionVerdict, () =>
         this.stepCheck(trace, spanId, {
           name: "audit.step.injection",
-          label: "Injection ¬∑ " + span.label,
+          label: "Injection ù " + span.label,
           system: STEP_AUDIT_SYSTEM_PROMPT,
           user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
           schema: injectionVerdict,
@@ -786,7 +791,7 @@ export class AuditService {
         : this.resolveCheck(cached?.secrets, secretRelevanceVerdict, () =>
             this.stepCheck(trace, spanId, {
               name: "audit.step.secrets",
-              label: "Secret relevance ¬∑ " + span.label,
+              label: "Secret relevance ù " + span.label,
               system: SECRET_SYSTEM_PROMPT,
               user: buildSecretContext(secretTypes, activity),
               schema: secretRelevanceVerdict,
@@ -797,7 +802,7 @@ export class AuditService {
         : this.resolveCheck(cached?.network, networkVerdict, () =>
             this.stepCheck(trace, spanId, {
               name: "audit.step.network",
-              label: "Network ¬∑ " + span.label,
+              label: "Network ù " + span.label,
               system: NETWORK_SYSTEM_PROMPT,
               user: buildNetworkContext(activity),
               schema: networkVerdict,
@@ -808,7 +813,7 @@ export class AuditService {
         : this.resolveCheck(cached?.tool, toolMisuseVerdict, () =>
             this.stepCheck(trace, spanId, {
               name: "audit.step.tool",
-              label: "Tool misuse ¬∑ " + span.label,
+              label: "Tool misuse ù " + span.label,
               system: TOOL_MISUSE_SYSTEM_PROMPT,
               user: buildToolMisuseContext(toolName, argumentsText, activity),
               schema: toolMisuseVerdict,
@@ -819,7 +824,7 @@ export class AuditService {
         : this.resolveCheck(cached?.sinks, sinkWriteVerdict, () =>
             this.stepCheck(trace, spanId, {
               name: "audit.step.sinks",
-              label: "Sink writes ¬∑ " + span.label,
+              label: "Sink writes ù " + span.label,
               system: SINK_SYSTEM_PROMPT,
               user: buildSinkContext(sinkTargets),
               schema: sinkWriteVerdict,
@@ -870,7 +875,7 @@ export class AuditService {
   // label travels with the result so a failure can say which question went
   // unanswered.
   // Who the auditor is running as, for the runner. The workspace is the chat's
-  // memory folder ‚Äî the in-process runner ignores it, but it is where this
+  // memory folder ù the in-process runner ignores it, but it is where this
   // auditor's artifacts already go, so it is the honest answer rather than a
   // placeholder.
   private auditorRun(trace: TraceRecord) {
@@ -937,7 +942,7 @@ export class AuditService {
 
   // The step's workpad: markdown the run-level pass re-reads, plus an index
   // entry so auditAll can decide which files to open. Written after the
-  // finding is stored, and never allowed to fail the audit ‚Äî a missing
+  // finding is stored, and never allowed to fail the audit ù a missing
   // artifact is worth less than the finding it describes.
   private async rememberStep(
     chat: AgentChatAuditor,
@@ -1050,7 +1055,7 @@ export class AuditService {
           number +
           ". " +
           span.label +
-          " ‚Äî " +
+          " ù " +
           (workpads.get(span.id) || "(no memory recorded for this step)"),
       ),
     ].join("\n");
@@ -1067,7 +1072,7 @@ export class AuditService {
     );
     this.recordAuditorAttempts(trace, {
       name: "audit.forward-trace",
-      label: "Forward trace ¬∑ " + directives.length + " directive(s)",
+      label: "Forward trace ù " + directives.length + " directive(s)",
       targetSpanId: null,
       prompt: user,
       attempts,
@@ -1117,8 +1122,8 @@ export class AuditService {
   // led up to each open question and asks whether anything the user actually
   // asked for accounts for it.
   //
-  // A question the model cannot resolve ‚Äî or never got to, because the call
-  // failed ‚Äî is still reported. "The record does not settle this" is the whole
+  // A question the model cannot resolve ù or never got to, because the call
+  // failed ù is still reported. "The record does not settle this" is the whole
   // point of the severity, so losing one to a model outage would be the single
   // outcome worse than reporting it.
   private async backTrace(
@@ -1201,7 +1206,7 @@ export class AuditService {
     );
     this.recordAuditorAttempts(trace, {
       name: "audit.back-trace",
-      label: "Back trace ¬∑ " + open.length + " open",
+      label: "Back trace ù " + open.length + " open",
       targetSpanId: null,
       prompt: user,
       attempts,
@@ -1270,7 +1275,7 @@ export class AuditService {
 
   // PLAN_AUDITOR's auditAll: repeated failures, then backtrace of open
   // suspicions and forward trace of prompt injections, concurrently. There is
-  // no separate whole-run intent diagnosis ‚Äî each step was already judged in
+  // no separate whole-run intent diagnosis ù each step was already judged in
   // isolation, and these three checks are how those suspicions are tied
   // together once the chat has finished.
   private async auditAll(chat: AgentChatAuditor) {
@@ -1363,7 +1368,7 @@ export class AuditService {
   // Every model attempt this auditor made, as spans on the auditor's own trace.
   //
   // They used to be stashed in an array on the audited trace's document, which
-  // made them unreachable by everything that understands a trace ‚Äî including
+  // made them unreachable by everything that understands a trace ù including
   // the auditor itself. Recording them here is what makes an auditor's run a
   // thing that can be opened, read and judged like any other.
   private recordAuditorAttempts(
@@ -1405,7 +1410,7 @@ export class AuditService {
 
   // Where this auditor's model calls are recorded. A chat that is already
   // judging a subject writes to its own run. Identifying the auditor's spec
-  // during the parent's pass writes onto that auditor run ‚Äî it is not a
+  // during the parent's pass writes onto that auditor run ù it is not a
   // nested audit of the auditor.
   private destinationForAttempts(subject: TraceRecord): string | null {
     const judging = this.auditors.get(subject.id);
@@ -1508,16 +1513,16 @@ export class AuditService {
     const trace = this.deps.traceStore.get(chat.chatId);
     if (!trace) return;
     // An Agent's run is re-judged the way it was judged the first time. An
-    // auditor's run gets the questions that are worth asking of an auditor ‚Äî
+    // auditor's run gets the questions that are worth asking of an auditor ù
     // whether it claimed more than its evidence supports, and what it walked
-    // past ‚Äî because those are the only ones its spans can answer.
+    // past ù because those are the only ones its spans can answer.
     if (!isAuditorTrace(trace)) {
       await this.reauditAgent(chat, trace);
       return;
     }
     // Opened before anything is asked, so every call this pass makes has a run
     // of its own to be recorded on. Without it, destinationForAttempts falls
-    // back to writing onto the subject ‚Äî and identifyIntent pins its answer,
+    // back to writing onto the subject ù and identifyIntent pins its answer,
     // so the second audit of one auditor skipped deriveBoth, the only other
     // thing that opens a run, and appended the meta-audit to the evidence it
     // was judging. The pass after that read those calls as work the auditor
@@ -1553,7 +1558,7 @@ export class AuditService {
         )
       : auditorSpans;
 
-    // Judged one at a time, each attributed to the step it is about ‚Äî the same
+    // Judged one at a time, each attributed to the step it is about ù the same
     // shape the automatic pass produces for an Agent's steps. Judging the trace
     // as a whole and nothing else made an auditor's entire run read as a single
     // step, however much work it had done.
@@ -1575,7 +1580,7 @@ export class AuditService {
 
     await this.batch.queue(async () => {
       // The run-level pass reads every step, so it must not start while the
-      // step audits are still in flight ‚Äî the same ordering the Agent-level
+      // step audits are still in flight ù the same ordering the Agent-level
       // run audit keeps for the same reason.
       await chat.awaitSteps();
       const { steps, status } = await this.auditorFindings(
@@ -1609,7 +1614,7 @@ export class AuditService {
     };
     // The auditor's prompt embeds step content. Redaction runs before a span is
     // stored, so a credential surfacing here means masking missed it on the way
-    // into the auditor ‚Äî worth knowing, and not something a model should judge.
+    // into the auditor ù worth knowing, and not something a model should judge.
     const seen =
       readAttribute(span, "context") + "\n" + readAttribute(span, "output");
     const leaked = detectSecretBindings(seen).length > 0;
@@ -1632,7 +1637,7 @@ export class AuditService {
 
     const { verdict, status, failure } = await this.stepCheck(trace, span.id, {
       name: "audit.auditor.step",
-      label: "Auditor step ¬∑ " + span.label,
+      label: "Auditor step ù " + span.label,
       system: META_STEP_SYSTEM_PROMPT,
       user: buildAuditorStepContext(trace, span),
       schema: metaVerdict,

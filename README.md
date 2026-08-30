@@ -136,6 +136,54 @@ flowchart TB
 | Intent | Backtrace | For every intent suspicion, read the run history and decide whether anything the user asked for accounts for the action. |
 | Reliability | Repeated Failure | Check whether the agent retried a tool call that had already failed. |
 
+### Auditor Recovery
+
+Suppose the auditor crashes mid audit (e.g. Shut off the poc mid audit).
+
+Upon restart, the auditor resumes agent runs whose run level audit never finished. Completed checks are reused. It does not redo a run that already got an `auditAll`.
+
+**NOTE:** This POC only auto-resumes the 20 newest unfinished runs. The rest stay `auditComplete: false` until a later boot or you open the trace and click Audit. 
+
+```mermaid
+flowchart TB
+    Boot["Process start"] --> List["Unfinished agent runs, newest first"]
+    List --> Cap{"In the newest 20?"}
+    Cap -->|no| Manual["Leave it. Click Audit on that trace."]
+    Cap -->|yes| Fresh["Open a new auditor trace"]
+    Fresh --> Identify["identifyIntent"]
+    Identify --> Step["For each judgeable agent step"]
+
+    Step --> Meta{"This step has a row in steps-meta.json?"}
+    Meta -->|no, crash before the row was written| RunAll["Attempt every applicable check"]
+    Meta -->|yes| Need{"Any check failed or missing?"}
+    Need -->|no| KeepStep["Reuse the whole step"]
+    Need -->|yes| Cat["For each check: reuse completed/degraded, redo failed/missing, skip not applicable"]
+
+    RunAll --> After["After every step"]
+    KeepStep --> After
+    Cat --> After
+
+    After --> All["auditAll"]
+    All --> Commit["commitPass writes audits/"]
+
+    style Cap fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style Fresh fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style Meta fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style Cat fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style All fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style Commit fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+```
+
+Audit Step States
+
+| Cached status | Meaning | On resume |
+| --- | --- | --- |
+| `completed` | Primary model returned a verdict | Reuse |
+| `degraded` | Fallback still produced a verdict | Reuse |
+| `failed` | No verdict | Re-ask |
+| missing | No row, or that check never written | Re-ask |
+| not applicable | Gated off | Skip |
+
 ## Setup
 
 ### Requirements
