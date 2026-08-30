@@ -17,19 +17,21 @@ const auditor = {
 };
 
 describe("auditAction", () => {
-  // The automatic pass judges depth 0 and nothing else, so an Agent run is
-  // only ever a way into the audit above it.
-  it("offers an Agent run its audit and never a trigger", () => {
+  it("offers an Agent run its audit and no trigger once the pass succeeded", () => {
     expect(auditAction(agentRun)).toEqual({ view: "audit-1", run: false });
   });
 
-  // The audit trace is registered when the pass opens, not when it lands, so
-  // there is somewhere to go while the judging is still happening.
-  it("offers the audit of an Agent run before that pass has finished", () => {
+  it("offers a retry while an Agent run's audit has not finished", () => {
     expect(auditAction({ ...agentRun, auditComplete: false })).toEqual({
       view: "audit-1",
-      run: false,
+      run: true,
     });
+  });
+
+  it("offers a retry when an Agent run's audit failed", () => {
+    expect(
+      auditAction({ ...agentRun, auditHealth: "failed" }),
+    ).toEqual({ view: "audit-1", run: true });
   });
 
   it("offers an unjudged auditor the trigger and nowhere to go", () => {

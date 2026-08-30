@@ -36,6 +36,7 @@ import {
   pushAuditorStatus,
   type AuditHealth,
   type AuditTraceStep,
+  worstHealth,
 } from "./audit-model.js";
 import { AgentChatAuditor } from "./agent-chat-auditor.js";
 import { BatchCaller } from "./batch-caller.js";
@@ -47,7 +48,15 @@ import {
 } from "./audit-memory.js";
 import type { AuditStore } from "./audit-store.js";
 import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js";
-import { reportForStep } from "./step-findings.js";
+import { reportForStep, type StepCheckOutcome } from "./step-findings.js";
+import {
+  restoreCheck,
+  stepNeedsRetry,
+  storeCheck,
+  healthOfCheck,
+  type CachedCheck,
+  type CachedChecks,
+} from "./step-check-cache.js";
 import {
   backTraceVerdict,
   buildAuditorStepContext,
@@ -226,6 +235,38 @@ function quotedDirective(finding: string): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+// One health note is enough for a pass, the same rule recordSpan used to
+// enforce while findings arrived one step at a time.
+function collapseHealthNotes(
+  spanAudit: Record<string, AuditTraceStep[]>,
+  runAudit: AuditTraceStep[],
+): {
+  spanAudit: Record<string, AuditTraceStep[]>;
+  runAudit: AuditTraceStep[];
+} {
+  const health: AuditTraceStep[] = [];
+  const nextSpan: Record<string, AuditTraceStep[]> = {};
+  for (const [spanId, steps] of Object.entries(spanAudit)) {
+    nextSpan[spanId] = [];
+    for (const step of steps) {
+      if (step.category === "audit-health") health.push(step);
+      else nextSpan[spanId].push(step);
+    }
+  }
+  const nextRun: AuditTraceStep[] = [];
+  for (const step of runAudit) {
+    if (step.category === "audit-health") health.push(step);
+    else nextRun.push(step);
+  }
+  const kept =
+    health.find((step) => step.type === "error") ?? health[0];
+  if (!kept) return { spanAudit: nextSpan, runAudit: nextRun };
+  const bucket = kept.spanId === null ? undefined : nextSpan[kept.spanId];
+  if (bucket) bucket.push(kept);
+  else nextRun.push(kept);
+  return { spanAudit: nextSpan, runAudit: nextRun };
+}
+
 function judgedIntent(
   chat: AgentChatAuditor,
   trace: TraceRecord,
@@ -311,7 +352,7 @@ export class AuditService {
     for (const trace of pending.slice(0, MAX_RESUMED_RUN_AUDITS)) {
       const chat = this.auditorFor(trace);
       this.enqueue(() =>
-        this.identifyFor(chat, trace).then(() => chat.auditAll()),
+        this.identifyFor(chat, trace).then(() => this.reauditAgent(chat, trace)),
       );
     }
     const skipped = pending.length - MAX_RESUMED_RUN_AUDITS;
@@ -502,16 +543,15 @@ export class AuditService {
     return verdict;
   }
 
-  private priorPromptInjectionQuotes(traceId: string): string[] {
-    return this.injectionsInTrace(traceId).map((entry) => entry.quote);
+  private priorPromptInjectionQuotes(findings: AuditTraceStep[]): string[] {
+    return this.injectionsInFindings(findings).map((entry) => entry.quote);
   }
 
   // The same findings, but keeping which step each was found in — the
   // forward-trace needs it to know which steps count as "later".
-  private injectionsInTrace(traceId: string) {
+  private injectionsInFindings(findings: AuditTraceStep[]) {
     const prefix = "prompt-injection: ";
-    return this.deps.auditStore
-      .listByTrace(traceId)
+    return findings
       .filter((step) => step.finding.startsWith(prefix))
       .map((step) => ({
         spanId: step.spanId,
@@ -523,9 +563,8 @@ export class AuditService {
   // Every step-level intent suspicion in the run. These are what auditAll's
   // backtrace is for: the step audit saw something that might not fit the
   // objective, and only the run as a whole can say whether it did.
-  private deviationSuspicions(traceId: string): OpenQuestion[] {
-    return this.deps.auditStore
-      .listByTrace(traceId)
+  private deviationSuspicions(findings: AuditTraceStep[]): OpenQuestion[] {
+    return findings
       .filter(
         (step) => step.type === "suspicion" && step.category === "intent-check",
       )
@@ -539,11 +578,10 @@ export class AuditService {
 
   // PLAN_AUDITOR's auditAll check 2 reads "steps that have suspicions", which
   // includes the instructions check 4 found in untrusted content. Taken from
-  // the store rather than from the forward trace's leftovers, so the backtrace
-  // examines them on its own evidence — and still examines them when the
-  // forward trace produced no verdict at all.
-  private injectionSuspicions(traceId: string): OpenQuestion[] {
-    return this.injectionsInTrace(traceId)
+  // the workpad rather than from the published store, so a retry's new
+  // suspicions are visible before commit.
+  private injectionSuspicions(findings: AuditTraceStep[]): OpenQuestion[] {
+    return this.injectionsInFindings(findings)
       .slice(0, MAX_TRACED_DIRECTIVES)
       .map((entry) => ({
         kind: "follow-through" as const,
@@ -556,13 +594,28 @@ export class AuditService {
 
   // What the per-step audits already reported as followed-through, so the
   // forward-trace does not say it a second time in different words.
-  private reportedFollowThrough(traceId: string): string[] {
-    const prefix = "The agent appears to have carried out a previously injected instruction: ";
-    return this.deps.auditStore
-      .listByTrace(traceId)
+  private reportedFollowThrough(findings: AuditTraceStep[]): string[] {
+    const prefix =
+      "The agent appears to have carried out a previously injected instruction: ";
+    return findings
       .map((step) => step.finding)
       .filter((finding) => finding.startsWith(prefix))
       .map((finding) => finding.slice(prefix.length).trim().toLowerCase());
+  }
+
+  private async draftFindings(chat: AgentChatAuditor): Promise<AuditTraceStep[]> {
+    return Object.values(await this.metaFor(chat)).flatMap(
+      (entry) => entry.findings,
+    );
+  }
+
+  // Disk when a memory folder is configured, the in-process draft otherwise.
+  // Same shape either way, so auditAll can commit from one source.
+  private async metaFor(chat: AgentChatAuditor): Promise<StepsMeta> {
+    if (this.deps.memory) {
+      return this.deps.memory.readMeta(chat.agentId, chat.chatId);
+    }
+    return chat.draftMeta();
   }
 
   // PLAN_AUDITOR's auditStep: checks 0-6, concurrently, each with its own
@@ -582,7 +635,10 @@ export class AuditService {
     // Runs first and without a model, so a whitelist violation or a leaked
     // credential is still reported when the audit model is unreachable.
     const activity = activityFromSpan(span, trace);
-    const priorPromptInjections = this.priorPromptInjectionQuotes(traceId);
+    const cached = (await this.metaFor(chat))[span.id]?.checks ?? {};
+    const priorPromptInjections = this.priorPromptInjectionQuotes(
+      await this.draftFindings(chat),
+    );
     const deterministic = runDeterministicChecks(activity, {
       whitelist: this.deps.networkWhitelist,
     });
@@ -627,72 +683,83 @@ export class AuditService {
       toolCheck,
       sinkCheck,
     ] = await Promise.all([
-      // These three share the step's evidence byte for byte, which is what
-      // makes it worth caching: what differs between them is the question,
-      // and the question now trails the evidence rather than leading it.
-      this.stepCheck(trace, spanId, {
-        name: "audit.step.summary",
-        label: "Summarize · " + span.label,
-        system: STEP_AUDIT_SYSTEM_PROMPT,
-        user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
-        tail: SUMMARY_SYSTEM_PROMPT,
-        cache: stepCache,
-        schema: summaryVerdict,
-      }),
-      this.stepCheck(trace, spanId, {
-        name: "audit.step.intent",
-        label: "Intent · " + span.label,
-        system: STEP_AUDIT_SYSTEM_PROMPT,
-        user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
-        tail: INTENT_STEP_SYSTEM_PROMPT,
-        cache: stepCache,
-        schema: intentStepVerdict,
-      }),
-      this.stepCheck(trace, spanId, {
-        name: "audit.step.injection",
-        label: "Injection · " + span.label,
-        system: STEP_AUDIT_SYSTEM_PROMPT,
-        user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
-        tail: INJECTION_SYSTEM_PROMPT,
-        cache: stepCache,
-        schema: injectionVerdict,
-      }),
+      this.resolveRequiredCheck(cached?.summary, summaryVerdict, () =>
+        this.stepCheck(trace, spanId, {
+          name: "audit.step.summary",
+          label: "Summarize · " + span.label,
+          system: STEP_AUDIT_SYSTEM_PROMPT,
+          user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
+          tail: SUMMARY_SYSTEM_PROMPT,
+          cache: stepCache,
+          schema: summaryVerdict,
+        }),
+      ),
+      this.resolveRequiredCheck(cached?.intent, intentStepVerdict, () =>
+        this.stepCheck(trace, spanId, {
+          name: "audit.step.intent",
+          label: "Intent · " + span.label,
+          system: STEP_AUDIT_SYSTEM_PROMPT,
+          user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
+          tail: INTENT_STEP_SYSTEM_PROMPT,
+          cache: stepCache,
+          schema: intentStepVerdict,
+        }),
+      ),
+      this.resolveRequiredCheck(cached?.injection, injectionVerdict, () =>
+        this.stepCheck(trace, spanId, {
+          name: "audit.step.injection",
+          label: "Injection · " + span.label,
+          system: STEP_AUDIT_SYSTEM_PROMPT,
+          user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
+          tail: INJECTION_SYSTEM_PROMPT,
+          cache: stepCache,
+          schema: injectionVerdict,
+        }),
+      ),
       secretTypes.length === 0
-        ? null
-        : this.stepCheck(trace, spanId, {
-            name: "audit.step.secrets",
-            label: "Secret relevance · " + span.label,
-            system: SECRET_SYSTEM_PROMPT,
-            user: buildSecretContext(secretTypes, activity),
-            schema: secretRelevanceVerdict,
-          }),
+        ? this.resolveCheck(cached?.secrets, secretRelevanceVerdict, async () => null)
+        : this.resolveCheck(cached?.secrets, secretRelevanceVerdict, () =>
+            this.stepCheck(trace, spanId, {
+              name: "audit.step.secrets",
+              label: "Secret relevance · " + span.label,
+              system: SECRET_SYSTEM_PROMPT,
+              user: buildSecretContext(secretTypes, activity),
+              schema: secretRelevanceVerdict,
+            }),
+          ),
       activity.networkCalls.length === 0
-        ? null
-        : this.stepCheck(trace, spanId, {
-            name: "audit.step.network",
-            label: "Network · " + span.label,
-            system: NETWORK_SYSTEM_PROMPT,
-            user: buildNetworkContext(activity),
-            schema: networkVerdict,
-          }),
+        ? this.resolveCheck(cached?.network, networkVerdict, async () => null)
+        : this.resolveCheck(cached?.network, networkVerdict, () =>
+            this.stepCheck(trace, spanId, {
+              name: "audit.step.network",
+              label: "Network · " + span.label,
+              system: NETWORK_SYSTEM_PROMPT,
+              user: buildNetworkContext(activity),
+              schema: networkVerdict,
+            }),
+          ),
       span.kind !== "tool_call" || argumentsText.length === 0
-        ? null
-        : this.stepCheck(trace, spanId, {
-            name: "audit.step.tool",
-            label: "Tool misuse · " + span.label,
-            system: TOOL_MISUSE_SYSTEM_PROMPT,
-            user: buildToolMisuseContext(toolName, argumentsText, activity),
-            schema: toolMisuseVerdict,
-          }),
+        ? this.resolveCheck(cached?.tool, toolMisuseVerdict, async () => null)
+        : this.resolveCheck(cached?.tool, toolMisuseVerdict, () =>
+            this.stepCheck(trace, spanId, {
+              name: "audit.step.tool",
+              label: "Tool misuse · " + span.label,
+              system: TOOL_MISUSE_SYSTEM_PROMPT,
+              user: buildToolMisuseContext(toolName, argumentsText, activity),
+              schema: toolMisuseVerdict,
+            }),
+          ),
       sinkTargets.length === 0
-        ? null
-        : this.stepCheck(trace, spanId, {
-            name: "audit.step.sinks",
-            label: "Sink writes · " + span.label,
-            system: SINK_SYSTEM_PROMPT,
-            user: buildSinkContext(sinkTargets),
-            schema: sinkWriteVerdict,
-          }),
+        ? this.resolveCheck(cached?.sinks, sinkWriteVerdict, async () => null)
+        : this.resolveCheck(cached?.sinks, sinkWriteVerdict, () =>
+            this.stepCheck(trace, spanId, {
+              name: "audit.step.sinks",
+              label: "Sink writes · " + span.label,
+              system: SINK_SYSTEM_PROMPT,
+              user: buildSinkContext(sinkTargets),
+              schema: sinkWriteVerdict,
+            }),
+          ),
     ]);
 
     const report = reportForStep(deterministic, {
@@ -719,16 +786,18 @@ export class AuditService {
         pushAuditorStatus(push, report.status, report.failure);
       },
     );
-    this.deps.auditStore.recordSpan(
-      trace,
-      spanId,
-      steps,
-      "",
-      healthOf(report.status),
-    );
-    await this.rememberStep(trace, span, steps, {
+    await this.rememberStep(chat, trace, span, steps, {
       summary: report.summary,
       error: report.failure ?? "",
+      checks: {
+        summary: storeCheck(summaryCheck),
+        intent: storeCheck(intentCheck),
+        injection: storeCheck(injectionCheck),
+        secrets: storeCheck(secretCheck),
+        network: storeCheck(networkCheck),
+        tool: storeCheck(toolCheck),
+        sinks: storeCheck(sinkCheck),
+      },
     });
   }
 
@@ -804,23 +873,51 @@ export class AuditService {
     return { verdict, status, failure, label: check.label };
   }
 
+  // Completed and degraded checks are reused as-is. Failed and missing ones
+  // are asked again. A skipped check (no subject) is stored as not applicable
+  // so a retry does not invent a model call for it.
+  private async resolveCheck<Verdict>(
+    cached: CachedCheck | undefined,
+    schema: z.ZodType<Verdict>,
+    run: () => Promise<StepCheckOutcome<Verdict> | null>,
+  ): Promise<StepCheckOutcome<Verdict> | null> {
+    const restored = restoreCheck(cached, schema);
+    if (restored !== "run") return restored;
+    return run();
+  }
+
+  // The three always-on checks always produce an outcome. A cached "not
+  // applicable" is treated as missing and asked again rather than dropped.
+  private async resolveRequiredCheck<Verdict>(
+    cached: CachedCheck | undefined,
+    schema: z.ZodType<Verdict>,
+    run: () => Promise<StepCheckOutcome<Verdict>>,
+  ): Promise<StepCheckOutcome<Verdict>> {
+    const restored = restoreCheck(cached, schema);
+    if (restored !== "run" && restored !== null) return restored;
+    return run();
+  }
+
   // The step's workpad: markdown the run-level pass re-reads, plus an index
   // entry so auditAll can decide which files to open. Written after the
   // finding is stored, and never allowed to fail the audit — a missing
   // artifact is worth less than the finding it describes.
   private async rememberStep(
+    chat: AgentChatAuditor,
     trace: TraceRecord,
     span: TraceSpan,
     steps: AuditTraceStep[],
-    outcome: { summary: string; error: string },
+    outcome: { summary: string; error: string; checks: CachedChecks },
   ) {
-    const memory = this.deps.memory;
-    if (!memory) return;
     const entry = {
       summary: outcome.summary,
       findings: steps,
       error: outcome.error,
+      checks: outcome.checks,
     };
+    chat.recordDraft(span.id, entry);
+    const memory = this.deps.memory;
+    if (!memory) return;
     await memory.writeStep(
       trace.agentId,
       trace.id,
@@ -867,10 +964,11 @@ export class AuditService {
   // needs the steps that came before.
   private async forwardTrace(
     trace: TraceRecord,
+    draft: AuditTraceStep[],
   ): Promise<AuditTraceStep[]> {
     const memory = this.deps.memory;
     if (!memory) return [];
-    const injections = this.injectionsInTrace(trace.id).slice(
+    const injections = this.injectionsInFindings(draft).slice(
       0,
       MAX_TRACED_DIRECTIVES,
     );
@@ -941,7 +1039,7 @@ export class AuditService {
 
     // Already said once, per step. Saying it again in the model's new words
     // would double-count the same follow-through.
-    const alreadyReported = this.reportedFollowThrough(trace.id);
+    const alreadyReported = this.reportedFollowThrough(draft);
     const isNew = (directive: string) => {
       const lower = directive.trim().toLowerCase();
       if (lower.length === 0) return false;
@@ -1146,36 +1244,23 @@ export class AuditService {
     const trace = this.deps.traceStore.get(traceId);
     if (!trace) return;
 
-    let followThrough: AuditTraceStep[] = [];
     try {
       await chat.awaitSteps();
-      // Re-read: the wait above is exactly the window in which the last step
-      // audits appended their auditor spans and findings.
       const settled = this.deps.traceStore.get(traceId) ?? trace;
-      // PLAN_AUDITOR's auditAll 2 and 3, concurrently, because they are two
-      // independent looks at the same suspicions rather than one feeding the
-      // other. The forward trace reads what happened *after* an instruction
-      // appeared; the backtrace reads what came before and what the user asked
-      // for. Chaining them meant a forward trace that produced no verdict took
-      // the question down with it — the backtrace was never told there was one.
+      const meta = await this.metaFor(chat);
+      const draft = Object.values(meta).flatMap((entry) => entry.findings);
       const open: OpenQuestion[] = [
-        ...this.deviationSuspicions(traceId),
-        ...this.injectionSuspicions(traceId),
+        ...this.deviationSuspicions(draft),
+        ...this.injectionSuspicions(draft),
       ];
       const [forward, back] = await Promise.all([
-        this.forwardTrace(settled),
+        this.forwardTrace(settled, draft),
         open.length === 0
           ? Promise.resolve<AuditTraceStep[]>([])
           : this.backTrace(chat, settled, open),
       ]);
-      followThrough = forward.concat(withoutDuplicatesOf(forward, back));
-    } catch (error) {
-      this.deps.log?.("follow-through trace failed for run " + traceId, error);
-    }
-
-    this.deps.auditStore.recordRun(
-      trace,
-      auditSteps(
+      const followThrough = forward.concat(withoutDuplicatesOf(forward, back));
+      const runAudit = auditSteps(
         {
           id: randomUUID(),
           traceId,
@@ -1183,8 +1268,7 @@ export class AuditService {
           spanId: null,
         },
         (push) => {
-          // Needs no model, so it still reports when Ark is unreachable.
-          for (const repeat of findRepeatedFailures(trace)) {
+          for (const repeat of findRepeatedFailures(settled)) {
             push(
               "warning",
               "reliability",
@@ -1197,15 +1281,46 @@ export class AuditService {
             );
           }
         },
-      ).concat(followThrough),
-      "",
-      "",
-      "ok",
-    );
-    // The run-level pass is the last thing an auditor does for a chat, so this
-    // is where its own run ends. Until it does the auditor's trace reads as
-    // still running, and a trace that never ends is one nobody can audit.
-    this.closeAuditTrace(chat);
+      ).concat(followThrough);
+      const spanAudit: Record<string, AuditTraceStep[]> = {};
+      for (const [spanId, entry] of Object.entries(meta)) {
+        spanAudit[spanId] = entry.findings;
+      }
+      const published = collapseHealthNotes(spanAudit, runAudit);
+      this.deps.auditStore.commitPass(settled, {
+        spanAudit: published.spanAudit,
+        runAudit: published.runAudit,
+        health: this.healthFromDraft(meta, published.runAudit),
+        contextSummary: "",
+      });
+    } catch (error) {
+      this.deps.log?.("run-level audit failed for run " + traceId, error);
+    } finally {
+      this.closeAuditTrace(chat);
+    }
+  }
+
+  private healthFromDraft(
+    meta: StepsMeta,
+    runAudit: AuditTraceStep[],
+  ): AuditHealth {
+    let health: AuditHealth = "ok";
+    for (const entry of Object.values(meta)) {
+      for (const check of Object.values(entry.checks ?? {})) {
+        if (!check.applicable) continue;
+        health = worstHealth(health, healthOfCheck(check.status));
+      }
+    }
+    if (runAudit.some((step) => step.type === "error")) {
+      health = worstHealth(health, "failed");
+    } else if (
+      runAudit.some(
+        (step) => step.category === "audit-health" && step.type === "warning",
+      )
+    ) {
+      health = worstHealth(health, "degraded");
+    }
+    return health;
   }
 
   // Every model attempt this auditor made, as spans on the auditor's own trace.
@@ -1326,6 +1441,32 @@ export class AuditService {
     };
   }
 
+  // Re-asks only the step checks that failed or never landed, then runs
+  // auditAll again. Degraded checks already have a verdict and are reused.
+  private async reauditAgent(chat: AgentChatAuditor, trace: TraceRecord) {
+    await this.identifyFor(chat, trace);
+    await this.retryIncompleteSteps(chat, trace);
+    await this.auditAll(chat);
+  }
+
+  private async retryIncompleteSteps(
+    chat: AgentChatAuditor,
+    trace: TraceRecord,
+  ) {
+    const meta = await this.metaFor(chat);
+    const retries: Promise<void>[] = [];
+    for (const span of trace.spans) {
+      if (!this.shouldAuditStep(span, trace)) continue;
+      const checks = meta[span.id]?.checks;
+      if (!stepNeedsRetry(checks)) continue;
+      chat.openStep();
+      retries.push(
+        this.stepAudit(chat, span.id).finally(() => chat.closeStep()),
+      );
+    }
+    await Promise.all(retries);
+  }
+
   private async requestedAudit(chat: AgentChatAuditor) {
     const trace = this.deps.traceStore.get(chat.chatId);
     if (!trace) return;
@@ -1334,12 +1475,7 @@ export class AuditService {
     // whether it claimed more than its evidence supports, and what it walked
     // past — because those are the only ones its spans can answer.
     if (!isAuditorTrace(trace)) {
-      // Asking again answers the same question again. The automatic pass runs
-      // once per run and appends; this one can be repeated, so the previous
-      // answer goes first rather than being doubled.
-      this.deps.auditStore.clearRunAudit(trace.id);
-      await this.identifyFor(chat, trace);
-      await this.auditAll(chat);
+      await this.reauditAgent(chat, trace);
       return;
     }
     await this.identifyFor(chat, trace);

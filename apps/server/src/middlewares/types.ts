@@ -21,7 +21,3 @@ export interface MiddlewareDeps {
   auditMemory?: AuditMemory;
   collectorToken: string;
 }
-
-// A trace names its agent, but only the agent service knows whether that agent
-// still exists; the middlewares are handed the check rather than the service.
-export type AgentExists = (agentId: string) => boolean;

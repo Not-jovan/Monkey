@@ -12,8 +12,8 @@ import { isSuccessfulAudit } from "./audit-status";
 export interface AuditAction {
   // The audit to open, once one has been started for this trace.
   view: string | null;
-  // Whether this trace can be audited on request. An Agent run is judged
-  // automatically and is never asked to be, so this is auditors only.
+  // Whether this trace can be audited on request. Automatic judging covers
+  // depth 0 once; a failed or unfinished pass can be asked again.
   run: boolean;
 }
 
@@ -24,10 +24,8 @@ export function auditAction(input: {
   auditHealth: AuditHealth;
   auditTraceId: string | null;
 }): AuditAction {
-  const isAuditor =
-    typeof input.auditOf === "string" && input.auditOf.length > 0;
   return {
     view: input.auditTraceId,
-    run: isAuditor && input.status !== "running" && !isSuccessfulAudit(input),
+    run: input.status !== "running" && !isSuccessfulAudit(input),
   };
 }

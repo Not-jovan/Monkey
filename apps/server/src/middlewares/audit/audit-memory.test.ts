@@ -78,11 +78,21 @@ describe("AuditMemory", () => {
       summary: "read .env",
       findings: [finding()],
       error: "",
+      checks: {
+        summary: {
+          applicable: true,
+          status: "completed",
+          failure: null,
+          label: "Summarize",
+          verdict: { summary: "read .env" },
+        },
+      },
     });
 
     const meta = await memory.readMeta(AGENT, CHAT);
     expect(meta["step-1"]?.findings[0]?.finding).toContain("GITHUB_TOKEN");
     expect(meta["step-1"]?.findings[0]?.intentId).toBe("intent-1");
+    expect(meta["step-1"]?.checks?.summary?.status).toBe("completed");
   });
 
   it("reports an empty index rather than throwing when nothing was written", async () => {

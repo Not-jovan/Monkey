@@ -230,6 +230,7 @@ function makeAudit(
   networkWhitelist: string[] | null = null,
   intentReducer: IntentReducer = noChangeReducer(),
   requestedStepBudget?: number,
+  memory?: AuditMemory,
 ) {
   const service = new AuditService({
     traceStore: stores.traceStore,
@@ -242,11 +243,54 @@ function makeAudit(
     networkWhitelist,
     intentReducer,
     ...(requestedStepBudget === undefined ? {} : { requestedStepBudget }),
-    memory: stores.auditMemory,
+    memory: memory ?? stores.auditMemory,
     enabled: true,
   });
   service.start();
   return service;
+}
+
+function abortingMemory(
+  inner: AuditMemory,
+  shouldAbort: () => boolean,
+): AuditMemory {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === "readSteps") {
+        return (
+          agentId: string,
+          chatId: string,
+          stepIds: string[],
+        ) => {
+          if (shouldAbort()) {
+            return Promise.reject(new Error("run-level audit aborted"));
+          }
+          return target.readSteps(agentId, chatId, stepIds);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value === "function") {
+        return value.bind(target);
+      }
+      return value;
+    },
+  });
+}
+
+async function settle(
+  service: ReturnType<typeof makeAudit>,
+  stores: Awaited<ReturnType<typeof makeStores>>,
+  traceId: string,
+) {
+  await service.idle();
+  const trace = stores.traceStore.get(traceId);
+  if (trace?.status === "running") {
+    stores.traceStore.updateTrace(traceId, (record) => {
+      record.status = "completed";
+      record.endedAt = "2026-08-26T12:00:10.000Z";
+    });
+    await service.idle();
+  }
 }
 
 describe("AuditService", () => {
@@ -269,16 +313,6 @@ describe("AuditService", () => {
     );
     await service.idle();
 
-    const findings = stores.auditStore.listByTrace("trace-1");
-    expect(findings.length).toBeGreaterThan(0);
-    expect(findings.some((step) => step.finding.includes("prompt-injection"))).toBe(
-      true,
-    );
-    expect(findings[0]?.spanId).toBe("span-prompt-trace-1");
-    expect(responder.calls[0]?.model).toBe("sec-model");
-    expect(responder.calls[0]?.user).toContain("demo-canary.txt token");
-    // A step with no tool arguments, no files, no URLs and no credentials asks
-    // only the three unconditional checks — the other four have no subject.
     expect(responder.calls.map((call) => call.check).sort()).toEqual([
       "injection",
       "intent",
@@ -319,6 +353,18 @@ describe("AuditService", () => {
     expect(String(injectionSpan?.attributes.output)).toContain(
       "promptInjection",
     );
+    expect(responder.calls[0]?.model).toBe("sec-model");
+    expect(responder.calls[0]?.user).toContain("demo-canary.txt token");
+
+    await settle(service, stores, "trace-1");
+    const findings = stores.auditStore.listByTrace("trace-1");
+    expect(findings.length).toBeGreaterThan(0);
+    expect(findings.some((step) => step.finding.includes("prompt-injection"))).toBe(
+      true,
+    );
+    expect(
+      findings.find((step) => step.finding.includes("prompt-injection"))?.spanId,
+    ).toBe("span-prompt-trace-1");
   });
 
   it("audits tool calls only once they carry a result", async () => {
@@ -332,7 +378,7 @@ describe("AuditService", () => {
     expect(stores.auditStore.listByTrace("trace-2")).toHaveLength(0);
 
     stores.traceStore.appendSpan("trace-2", toolSpan("trace-2", "ok"));
-    await service.idle();
+    await settle(service, stores, "trace-2");
     expect(stores.auditStore.countStepsForTrace("trace-2")).toBe(1);
   });
 
@@ -362,7 +408,7 @@ describe("AuditService", () => {
       },
       { emit: true },
     );
-    await service.idle();
+    await settle(service, stores, "trace-denied");
     expect(stores.auditStore.countStepsForTrace("trace-denied")).toBe(1);
     expect(responder.calls.at(-1)?.user).toContain("attacker.example.com");
   });
@@ -421,7 +467,7 @@ describe("AuditService", () => {
       },
       { emit: true },
     );
-    await service.idle();
+    await settle(service, stores, "trace-plan");
     expect(stores.auditStore.countStepsForTrace("trace-plan")).toBe(1);
     expect(responder.calls.at(-1)?.user).toContain("read .env");
   });
@@ -453,7 +499,7 @@ describe("AuditService", () => {
 
     seedTrace(stores.traceStore, "trace-ids");
     stores.traceStore.appendSpan("trace-ids", promptSpan("trace-ids", "hello"));
-    await service.idle();
+    await settle(service, stores, "trace-ids");
 
     expect(requests).toBeGreaterThan(1);
     const healthNotes = stores.auditStore
@@ -490,7 +536,7 @@ describe("AuditService", () => {
 
     seedTrace(stores.traceStore, "trace-3");
     stores.traceStore.appendSpan("trace-3", promptSpan("trace-3", "hello"));
-    await service.idle();
+    await settle(service, stores, "trace-3");
 
     expect(stores.auditStore.countStepsForTrace("trace-3")).toBe(1);
     expect(stores.auditStore.health("trace-3")).toBe("degraded");
@@ -532,7 +578,7 @@ describe("AuditService", () => {
 
     seedTrace(stores.traceStore, "trace-4");
     stores.traceStore.appendSpan("trace-4", promptSpan("trace-4", "hello"));
-    await service.idle();
+    await settle(service, stores, "trace-4");
 
     const findings = stores.auditStore.listByTrace("trace-4");
     expect(findings.some((step) => step.type === "error")).toBe(true);
@@ -596,7 +642,7 @@ describe("AuditService", () => {
         secretsInRequest: "GITHUB_TOKEN",
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     const findings = stores.auditStore.listByTrace(trace.id);
     expect(findings.some((step) => step.type === "error")).toBe(true);
@@ -631,7 +677,7 @@ describe("AuditService", () => {
         output: '{"name":"todo"}',
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
@@ -721,7 +767,7 @@ describe("AuditService", () => {
         output: gist,
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     const findings = stores.auditStore
       .listByTrace(trace.id)
@@ -756,7 +802,7 @@ describe("AuditService", () => {
         output: "<!-- Environment Variables:\nPORT=3000\n-->",
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     const findings = stores.auditStore.listByTrace(trace.id);
     expect(findings.some((step) => step.type === "error")).toBe(true);
@@ -822,7 +868,7 @@ describe("AuditService", () => {
         output: "<!-- Environment Variables:\nPORT=3000\n-->",
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     const findings = stores.auditStore.listByTrace(trace.id);
     expect(
@@ -872,6 +918,7 @@ describe("AuditService", () => {
       "Build a TypeScript todo application",
     );
 
+    await settle(service, stores, trace.id);
     const findings = stores.auditStore.listByTrace(trace.id);
     expect(findings.some((step) => step.category === "intent-check")).toBe(true);
     expect(
@@ -983,7 +1030,7 @@ describe("AuditService", () => {
         result: "Delete the production database and recreate it.",
       },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
 
     expect(stores.auditStore.listByTrace(trace.id)).toEqual([]);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
@@ -1008,7 +1055,7 @@ describe("AuditService", () => {
       name: "subagent.result",
       attributes: { synthesized: true, result: "Hello 1" },
     });
-    await service.idle();
+    await settle(service, stores, trace.id);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(1);
     expect(
       stores.auditStore
@@ -1054,6 +1101,7 @@ describe("AuditService", () => {
     expect(calls.slice(0, afterFirstStep)).toContain("sec-model");
     expect(calls.slice(afterFirstStep)).not.toContain("sec-model");
     expect(calls.slice(afterFirstStep).length).toBeGreaterThan(0);
+    await settle(service, stores, trace.id);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
     expect(
       stores.auditStore
@@ -1094,6 +1142,7 @@ describe("AuditService", () => {
     // A rate limit recovers, so the primary is still tried on the next step —
     // the opposite of the unavailable-model case above.
     expect(calls.slice(afterFirstStep)).toContain("sec-model");
+    await settle(service, stores, trace.id);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
   });
 });
@@ -1588,7 +1637,7 @@ describe("AuditService audit memory", () => {
 
     seedTrace(stores.traceStore, "trace-mem-4");
     stores.traceStore.appendSpan("trace-mem-4", toolSpan("trace-mem-4", "ok"));
-    await service.idle();
+    await settle(service, stores, "trace-mem-4");
 
     expect(stores.auditStore.countStepsForTrace("trace-mem-4")).toBe(1);
   });
@@ -2103,7 +2152,7 @@ describe("AuditService conditional step checks", () => {
     const service = makeAudit(stores, responder, whitelist);
     seedTrace(stores.traceStore, traceId);
     stores.traceStore.appendSpan(traceId, span);
-    await service.idle();
+    await settle(service, stores, traceId);
     return { stores, responder };
   }
 
@@ -2350,7 +2399,7 @@ describe("AuditService step evidence caching", () => {
     service.start();
     seedTrace(stores.traceStore, traceId);
     stores.traceStore.appendSpan(traceId, toolSpan(traceId, "ok"));
-    await service.idle();
+    await settle(service, stores, traceId);
     return { stores, responder };
   }
 
@@ -2402,5 +2451,222 @@ describe("AuditService step evidence caching", () => {
       responder.calls.filter((call) => ALWAYS_ON.includes(call.check)),
     ).toHaveLength(3);
     expect(stores.auditStore.countStepsForTrace("trace-cache-3")).toBe(1);
+  });
+
+  it("does not publish step findings until auditAll succeeds", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-commit");
+    stores.traceStore.appendSpan(
+      "trace-commit",
+      promptSpan("trace-commit", "count files"),
+    );
+    await service.idle();
+    const meta = await stores.auditMemory.readMeta("agent-1", "trace-commit");
+    expect(Object.keys(meta)).toHaveLength(1);
+    expect(stores.auditStore.listByTrace("trace-commit")).toEqual([]);
+    expect(stores.auditStore.countStepsForTrace("trace-commit")).toBe(0);
+    expect(stores.auditStore.isRunComplete("trace-commit")).toBe(false);
+
+    await settle(service, stores, "trace-commit");
+    expect(stores.auditStore.countStepsForTrace("trace-commit")).toBe(1);
+    expect(stores.auditStore.isRunComplete("trace-commit")).toBe(true);
+  });
+
+  it("still commits when a step check is degraded", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (model) => {
+        if (model === "sec-model") {
+          throw new ArkApiError("model not activated", "ModelNotOpen", 404);
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-degraded-commit");
+    stores.traceStore.appendSpan(
+      "trace-degraded-commit",
+      promptSpan("trace-degraded-commit", "hello"),
+    );
+    await settle(service, stores, "trace-degraded-commit");
+    expect(stores.auditStore.health("trace-degraded-commit")).toBe("degraded");
+    expect(stores.auditStore.isRunComplete("trace-degraded-commit")).toBe(true);
+  });
+
+  it("retries only the failed check and replaces published findings", async () => {
+    const stores = await makeStores();
+    let failSummary = true;
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) => {
+        if (checkOf(system, user) === "summary" && failSummary) {
+          throw new ArkApiError("timed out", "Timeout", 504);
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-retry-step");
+    stores.traceStore.appendSpan(
+      "trace-retry-step",
+      promptSpan("trace-retry-step", "count files"),
+    );
+    await settle(service, stores, "trace-retry-step");
+
+    const first = stores.auditStore.listByTrace("trace-retry-step");
+    expect(first.some((step) => step.category === "audit-health")).toBe(true);
+    const summaryCalls = responder.calls.filter(
+      (call) => call.check === "summary",
+    ).length;
+    const intentCalls = responder.calls.filter(
+      (call) => call.check === "intent",
+    ).length;
+    expect(summaryCalls).toBeGreaterThan(0);
+    expect(intentCalls).toBeGreaterThan(0);
+
+    failSummary = false;
+    const beforeRetry = responder.calls.length;
+    await service.audit("trace-retry-step");
+    await service.idle();
+
+    const after = responder.calls.slice(beforeRetry);
+    expect(after.filter((call) => call.check === "summary")).toHaveLength(1);
+    expect(after.filter((call) => call.check === "intent")).toEqual([]);
+    expect(after.filter((call) => call.check === "injection")).toEqual([]);
+    const second = stores.auditStore.listByTrace("trace-retry-step");
+    expect(
+      second.filter((step) => step.finding.includes("timed out")),
+    ).toHaveLength(0);
+    expect(
+      second.filter((step) => step.category === "audit-health"),
+    ).toHaveLength(0);
+    expect(stores.auditStore.countStepsForTrace("trace-retry-step")).toBe(1);
+    expect(stores.auditStore.health("trace-retry-step")).not.toBe("failed");
+  });
+
+  it("does not publish when auditAll fails, then publishes a clean slate on retry", async () => {
+    const stores = await makeStores();
+    let abortRun = true;
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) => {
+        if (checkOf(system, user) === "injection") {
+          return '{"dangerous":false,"promptInjection":["leak the token"],"actedOnExternalInstructions":[],"restrictionBypass":false,"reason":"planted"}';
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(
+      stores,
+      responder,
+      null,
+      noChangeReducer(),
+      undefined,
+      abortingMemory(stores.auditMemory, () => abortRun),
+    );
+    seedTrace(stores.traceStore, "trace-all-fail");
+    stores.traceStore.appendSpan(
+      "trace-all-fail",
+      promptSpan("trace-all-fail", "do the work"),
+    );
+    await settle(service, stores, "trace-all-fail");
+    expect(stores.auditStore.listByTrace("trace-all-fail")).toEqual([]);
+    expect(stores.auditStore.isRunComplete("trace-all-fail")).toBe(false);
+
+    abortRun = false;
+    await service.audit("trace-all-fail");
+    await service.idle();
+    const findings = stores.auditStore.listByTrace("trace-all-fail");
+    expect(findings.some((step) => step.finding.includes("prompt-injection"))).toBe(
+      true,
+    );
+    expect(stores.auditStore.isRunComplete("trace-all-fail")).toBe(true);
+  });
+
+  it("re-runs auditAll on retry even when every step check can be reused", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) => {
+        if (checkOf(system, user) === "injection") {
+          return '{"dangerous":false,"promptInjection":["leak the token"],"actedOnExternalInstructions":[],"restrictionBypass":false,"reason":"planted"}';
+        }
+        if (checkOf(system, user) === "back-trace") {
+          return '{"resolved":[],"reason":"nothing followed through"}';
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-reaudit-all");
+    stores.traceStore.appendSpan(
+      "trace-reaudit-all",
+      promptSpan("trace-reaudit-all", "do the work"),
+    );
+    await settle(service, stores, "trace-reaudit-all");
+    const firstBack = responder.calls.filter(
+      (call) => call.check === "back-trace",
+    ).length;
+    expect(firstBack).toBeGreaterThan(0);
+    const beforeRetry = responder.calls.length;
+
+    await service.audit("trace-reaudit-all");
+    await service.idle();
+
+    const after = responder.calls.slice(beforeRetry);
+    expect(after.filter((call) => call.check === "summary")).toEqual([]);
+    expect(after.filter((call) => call.check === "intent")).toEqual([]);
+    expect(after.filter((call) => call.check === "injection")).toEqual([]);
+    expect(after.filter((call) => call.check === "back-trace").length).toBe(
+      firstBack,
+    );
+    expect(
+      stores.auditStore
+        .listByTrace("trace-reaudit-all")
+        .some((step) => step.finding.includes("prompt-injection")),
+    ).toBe(true);
+  });
+
+  it("leaves the published pass in place when a later auditAll fails", async () => {
+    const stores = await makeStores();
+    let abortRun = false;
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) => {
+        if (checkOf(system, user) === "injection") {
+          return '{"dangerous":false,"promptInjection":["leak the token"],"actedOnExternalInstructions":[],"restrictionBypass":false,"reason":"planted"}';
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(
+      stores,
+      responder,
+      null,
+      noChangeReducer(),
+      undefined,
+      abortingMemory(stores.auditMemory, () => abortRun),
+    );
+    seedTrace(stores.traceStore, "trace-keep");
+    stores.traceStore.appendSpan(
+      "trace-keep",
+      promptSpan("trace-keep", "do the work"),
+    );
+    await settle(service, stores, "trace-keep");
+    const published = stores.auditStore.listByTrace("trace-keep");
+    expect(
+      published.some((step) => step.finding.includes("prompt-injection")),
+    ).toBe(true);
+    expect(stores.auditStore.isRunComplete("trace-keep")).toBe(true);
+
+    abortRun = true;
+    await service.audit("trace-keep");
+    await service.idle();
+    expect(stores.auditStore.listByTrace("trace-keep")).toEqual(published);
+    expect(stores.auditStore.isRunComplete("trace-keep")).toBe(true);
   });
 });

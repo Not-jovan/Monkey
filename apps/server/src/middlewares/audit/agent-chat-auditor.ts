@@ -1,5 +1,6 @@
 import path from "node:path";
 import type { IntentDerivation, IntentState } from "../intent/intent-model.js";
+import type { StepMetaEntry, StepsMeta } from "./audit-memory.js";
 
 // PLAN_AUDITOR's AgentChatAuditor: one auditor per (agentId, chatId). It owns
 // the identity every finding for that chat is stamped with, the folder its
@@ -65,6 +66,10 @@ export class AgentChatAuditor {
   private open = 0;
   private waiters: (() => void)[] = [];
   private requestRunning = false;
+  // Unpublished step records for this pass. Written as each step finishes, and
+  // read by auditAll so findings reach the store in one commit — or, when no
+  // memory folder is configured, so they are not lost.
+  private readonly drafts = new Map<string, StepMetaEntry>();
   // This auditor's own run, as a trace. Opened lazily on the first model call
   // it makes, not at construction: a chat whose audits were all answered
   // deterministically never asked a model anything, and should not leave an
@@ -97,6 +102,14 @@ export class AgentChatAuditor {
     private readonly work: ChatAuditorWork,
   ) {
     this.memoryFolderPath = path.join(memoryRoot, agentId, chatId);
+  }
+
+  recordDraft(spanId: string, entry: StepMetaEntry) {
+    this.drafts.set(spanId, entry);
+  }
+
+  draftMeta(): StepsMeta {
+    return Object.fromEntries(this.drafts);
   }
 
   openStep() {

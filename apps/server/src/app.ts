@@ -138,15 +138,7 @@ export async function createApp(
   });
 
   if (middlewares) {
-    registerMiddlewareRoutes(app, middlewares, service, (agentId) => {
-      try {
-        service.getAgent(agentId);
-        return true;
-      } catch (error) {
-        if (error instanceof HttpError && error.statusCode === 404) return false;
-        throw error;
-      }
-    });
+    registerMiddlewareRoutes(app, middlewares, service);
   }
 
   if (config.nodeEnv === "production") {

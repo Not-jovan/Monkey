@@ -1,9 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AgentService } from "../../agent-service.js";
-import { HttpError } from "../../errors.js";
 import { isAuditorTrace } from "../trace/trace-model.js";
-import type { AgentExists, MiddlewareDeps } from "../types.js";
+import type { MiddlewareDeps } from "../types.js";
 import { hasDivergedObjective, type IntentVersionEntry } from "./intent-model.js";
 
 const idParams = z.object({ id: z.string().uuid() });
@@ -12,7 +11,6 @@ export function registerIntentRoutes(
   app: FastifyInstance,
   deps: MiddlewareDeps,
   service: AgentService,
-  _agentExists: AgentExists,
 ) {
   app.get("/api/agents/:id/intent", async (request) => {
     const { id } = idParams.parse(request.params);

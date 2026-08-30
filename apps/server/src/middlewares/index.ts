@@ -3,20 +3,19 @@ import type { AgentService } from "../agent-service.js";
 import { registerAuditRoutes } from "./audit/index.js";
 import { registerIntentRoutes } from "./intent/index.js";
 import { registerTraceRoutes } from "./trace/index.js";
-import type { AgentExists, MiddlewareDeps } from "./types.js";
+import type { MiddlewareDeps } from "./types.js";
 
 export function registerMiddlewareRoutes(
   app: FastifyInstance,
   deps: MiddlewareDeps,
   service: AgentService,
-  agentExists: AgentExists,
 ) {
   registerTraceRoutes(app, deps);
   registerAuditRoutes(app, deps);
-  registerIntentRoutes(app, deps, service, agentExists);
+  registerIntentRoutes(app, deps, service);
 }
 
-export type { AgentExists, MiddlewareDeps } from "./types.js";
+export type { MiddlewareDeps } from "./types.js";
 export * from "./audit/index.js";
 export * from "./context/index.js";
 export * from "./intent/index.js";

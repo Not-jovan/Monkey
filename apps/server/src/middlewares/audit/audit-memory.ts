@@ -2,6 +2,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { auditTraceStepSchema, type AuditTraceStep } from "./audit-model.js";
+import { cachedCheckSchema } from "./step-check-cache.js";
 
 // PLAN_AUDITOR's audit memory: one folder per chat holding a markdown record of
 // every audited step plus a meta index.
@@ -18,6 +19,9 @@ export const stepMetaEntrySchema = z.object({
   summary: z.string().default(""),
   findings: z.array(auditTraceStepSchema).default([]),
   error: z.string().default(""),
+  // Per-check outcomes so a retry can skip completed/degraded calls and only
+  // re-ask the ones that failed. Defaulted so older workpads still parse.
+  checks: z.record(z.string(), cachedCheckSchema).optional(),
 });
 
 export type StepMetaEntry = z.infer<typeof stepMetaEntrySchema>;

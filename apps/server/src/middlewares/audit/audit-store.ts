@@ -145,6 +145,36 @@ export class AuditStore {
     this.persist(trace.id);
   }
 
+  // Published findings for one pass. Replaces span and run answers together so
+  // a retry cannot leave a mix of the previous pass and the one still running.
+  // Called only after auditAll has finished, which is when the record is
+  // something a reader can trust.
+  commitPass(
+    trace: TraceRecord,
+    input: {
+      spanAudit: Record<string, AuditTraceStep[]>;
+      runAudit: AuditTraceStep[];
+      health: AuditHealth;
+      contextSummary: string;
+    },
+  ) {
+    const doc = this.ensure(trace, "");
+    doc.spanAudit = Object.fromEntries(
+      Object.entries(input.spanAudit).map(([spanId, steps]) => [
+        spanId,
+        [...steps],
+      ]),
+    );
+    doc.runAudit = [...input.runAudit];
+    doc.health = input.health;
+    doc.contextSummary = input.contextSummary;
+    this.syncFromTrace(doc, trace);
+    if (trace.status !== "running") {
+      doc.summary.endTime = Date.parse(trace.endedAt ?? trace.startedAt);
+    }
+    this.persist(trace.id);
+  }
+
   // Drops the previous per-step answers, for the same reason clearRunAudit
   // drops the run-level one. Only the requested path writes step findings it
   // will write again; the automatic pass writes each step once, and clearing
