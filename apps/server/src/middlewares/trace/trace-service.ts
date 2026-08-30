@@ -112,6 +112,17 @@ function auditorCallSubject(label: string) {
   return subject.length > 0 ? subject : undefined;
 }
 
+// Drop the Model/Tool kind so the spawn can name the step in the space a
+// canvas box actually has. "Model · after update_plan" → "after update_plan".
+function shortAuditorTarget(subject: string) {
+  const parts = subject.split(" · ").map((part) => part.trim()).filter(Boolean);
+  const rest =
+    parts.length >= 2 && (parts[0] === "Model" || parts[0] === "Tool")
+      ? parts.slice(1).join(" · ")
+      : subject;
+  return preview(rest, 28);
+}
+
 function isSubagentTool(toolName: string) {
   const normalized = toolName.toLowerCase();
   if (normalized === "task") return true;
@@ -1210,14 +1221,17 @@ export class TraceService {
     const callId = "spawn:" + spanId;
     state.toolSpans.set(callId, spanId);
     const targetSpanId = call.attributes.targetSpanId;
-    const targetLabel = auditorCallSubject(call.label);
+    const subject = auditorCallSubject(call.label);
+    const targetLabel = subject ? shortAuditorTarget(subject) : undefined;
     const completed = call.status !== "running";
     this.store.appendSpan(runId, {
       id: spanId,
       traceId: runId,
       parentId: state.rootSpanId,
       name: "tool.spawn_agent",
-      label: "Subagent · " + subagentType,
+      label: targetLabel
+        ? "Subagent · " + subagentType + " · " + targetLabel
+        : "Subagent · " + subagentType,
       kind: "tool_call",
       actor: "agent",
       status: completed ? call.status : "running",

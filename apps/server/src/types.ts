@@ -32,6 +32,25 @@ export interface RunUsage {
   outputTokens?: number;
 }
 
+// Where an upstream completion died, when it did. Null abortPhase means the
+// call finished; the timings are still recorded so a slow success is
+// comparable to a timeout.
+export type ProviderAbortPhase =
+  | "waiting_for_headers"
+  | "waiting_for_first_token"
+  | "streaming";
+
+export interface ProviderCallTiming {
+  promptBytes: number;
+  inFlightAtStart: number;
+  headersMs: number | null;
+  ttftMs: number | null;
+  lastChunkMs: number | null;
+  chunkCount: number;
+  requestId: string | null;
+  abortPhase: ProviderAbortPhase | null;
+}
+
 export interface AgentRun {
   id: string;
   agentId: string;
@@ -74,6 +93,9 @@ export interface RunnerResult {
   // Null when the runtime never reported one (Codex, whose model comes from
   // config and the OTLP trace instead).
   model: string | null;
+  // Present for in-process Ark completions. Process runtimes have no HTTP
+  // phases of their own, so they leave this unset.
+  timing?: ProviderCallTiming | undefined;
 }
 
 export interface RunnerRequest {

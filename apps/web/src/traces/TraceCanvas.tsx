@@ -61,7 +61,12 @@ function stepLabel(span: TraceSpan) {
         : span.name.replace(/^tool\./, "");
     if (isSubagentTask(span)) {
       const call = subagentCallLabel(span);
-      if (call) return "Subagent · " + call;
+      if (call) {
+        // Auditor spawns already name the check and the step. Prefixing
+        // Subagent ate the line the step needs.
+        if (typeof span.attributes.targetLabel === "string") return call;
+        return "Subagent · " + call;
+      }
       if (span.label.startsWith("Subagent")) return span.label;
       return "Subagent · task";
     }

@@ -47,6 +47,16 @@ export function previewLabel(text: string, limit: number) {
   return flat.slice(0, limit - 1) + "…";
 }
 
+// "Model · after update_plan" → "after update_plan". The kind is already on
+// the step; the spawn only has room for which step it asked about.
+export function shortStepSubject(subject: string) {
+  const parts = subject.split(" · ").map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 2 && (parts[0] === "Model" || parts[0] === "Tool")) {
+    return previewLabel(parts.slice(1).join(" · "), 28);
+  }
+  return previewLabel(subject, 28);
+}
+
 function firstNonEmptyLine(text: string) {
   return (
     text
@@ -81,7 +91,7 @@ export function subagentCallLabel(span: TraceSpan) {
   if (typeof type !== "string" || type.length === 0) return null;
   const target = span.attributes.targetLabel;
   if (typeof target === "string" && target.length > 0) {
-    return type + " · " + target;
+    return type + " · " + shortStepSubject(target);
   }
   return type;
 }
@@ -96,7 +106,12 @@ export function stepHeadline(span: TraceSpan) {
   if (span.name === "subagent.result") {
     return subagentResultHeadline(span) ?? span.label;
   }
-  if (span.kind === "tool_call" && !isSubagentTask(span)) {
+  if (isSubagentTask(span)) {
+    // The list already chips this as Subagent. Repeating that here is what
+    // made auditor rows read as "SubagentSubagent · injection".
+    return subagentCallLabel(span) ?? span.label.replace(/^Subagent · /, "");
+  }
+  if (span.kind === "tool_call") {
     const toolName =
       typeof span.attributes.toolName === "string"
         ? span.attributes.toolName

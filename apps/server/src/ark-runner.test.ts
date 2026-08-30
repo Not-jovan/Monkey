@@ -6,9 +6,36 @@ import type { AppConfig } from "./config.js";
 const config = { arkModel: "default-model" } as AppConfig;
 
 function client(
-  complete: ArkClient["complete"],
+  complete: (
+    input: Parameters<ArkClient["complete"]>[0],
+  ) => Promise<{
+    content: string;
+    usage: import("./types.js").RunUsage | null;
+    model: string | null;
+    timing?: import("./types.js").ProviderCallTiming;
+  }>,
 ): ArkClient {
-  return { complete };
+  return {
+    complete: async (input) => {
+      const result = await complete(input);
+      return {
+        content: result.content,
+        usage: result.usage,
+        model: result.model,
+        timing:
+          result.timing ?? {
+            promptBytes: 0,
+            inFlightAtStart: 1,
+            headersMs: null,
+            ttftMs: null,
+            lastChunkMs: null,
+            chunkCount: 0,
+            requestId: null,
+            abortPhase: null,
+          },
+      };
+    },
+  };
 }
 
 const request = {
@@ -50,6 +77,33 @@ describe("ArkRunner", () => {
     expect(models).toEqual(["served-model"]);
     // A completion is one exchange, so there is no conversation to correlate on.
     expect(result.threadId).toBeNull();
+  });
+
+  it("forwards the provider's call timing onto the runner result", async () => {
+    const timing = {
+      promptBytes: 12,
+      inFlightAtStart: 4,
+      headersMs: 80,
+      ttftMs: 400,
+      lastChunkMs: 900,
+      chunkCount: 3,
+      requestId: "req-1",
+      abortPhase: null,
+    };
+    const runner = new ArkRunner(
+      client(async () => ({
+        content: "{}",
+        usage: null,
+        model: "m",
+        timing,
+      })),
+      config,
+      4_096,
+    );
+
+    const result = await runner.run({ ...request, model: "m" });
+
+    expect(result.timing).toEqual(timing);
   });
 
   it("passes the system prompt and model through rather than inventing them", async () => {

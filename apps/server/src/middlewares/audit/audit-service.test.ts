@@ -1928,6 +1928,7 @@ describe("AuditService back trace", () => {
     );
     expect(backCall?.user).toContain("## What the user asked for");
     expect(backCall?.user).toContain("## What the run did, in order");
+    expect(backCall?.user).toContain("Q1");
   });
 
   // The auditor reached a conclusion. Repeating a question it has answered is

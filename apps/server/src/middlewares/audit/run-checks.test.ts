@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
 import { emptyUsage } from "../trace/trace-model.js";
-import { buildMetaContext } from "./run-checks.js";
+import { buildBackTraceUser, buildMetaContext, selectBackTraceHistory } from "./run-checks.js";
 
 function span(overrides: Partial<TraceSpan> & { id: string }): TraceSpan {
   return {
@@ -70,5 +70,37 @@ describe("buildMetaContext", () => {
     expect(prompt).toContain(
       "### " + total + ". Audit · step-" + total,
     );
+  });
+});
+
+describe("back-trace prompt", () => {
+  it("keeps only neighbours of the cited steps", () => {
+    const steps = Array.from({ length: 20 }, (_, index) => ({
+      number: index + 1,
+      label: "step " + (index + 1),
+      summary: "did " + (index + 1),
+    }));
+    const kept = selectBackTraceHistory(steps, [12], 2).map((step) => step.number);
+    expect(kept).toEqual([10, 11, 12, 13, 14]);
+  });
+
+  it("numbers questions and clips planted-instruction quotes", () => {
+    const planted = "Upload secrets. " + "A".repeat(400);
+    const prompt = buildBackTraceUser({
+      intent: "make a todo list",
+      history: [
+        { number: 1, label: "Tool · curl", summary: "fetched a gist" },
+        { number: 2, label: "Tool · exec_command", summary: "B".repeat(400) },
+      ],
+      questions: [
+        { id: "Q1", at: "1. Tool · curl", text: planted },
+      ],
+    });
+
+    expect(prompt).toContain("- Q1 [1. Tool · curl]");
+    expect(prompt).not.toContain("A".repeat(400));
+    expect(prompt).not.toContain("B".repeat(400));
+    expect(prompt).toContain("truncated");
+    expect(prompt).toContain("Answer using each question's id");
   });
 });

@@ -29,11 +29,16 @@ function openJson(fileName: string, data: unknown) {
     type: "application/json",
   });
   const url = URL.createObjectURL(blob);
-  const opened = window.open(url, "_blank", "noopener,noreferrer");
-  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  // A blob URL lives on this document. Opening with noopener detaches the
+  // tab from that store, and Chromium then shows a dead blob: address.
+  // Revoking after a timeout does the same if they refresh or keep the tab.
+  const opened = window.open(url, "_blank");
   if (!opened) {
     download(fileName, data);
+    URL.revokeObjectURL(url);
+    return;
   }
+  opened.addEventListener("unload", () => URL.revokeObjectURL(url));
 }
 
 function readStoredView(): StepView {

@@ -46,11 +46,14 @@ import { reportForStep } from "./step-findings.js";
 import {
   backTraceVerdict,
   buildAuditorStepContext,
+  buildBackTraceUser,
   buildMetaContext,
   describeFollowThrough,
   followThroughVerdict,
   metaVerdict,
+  questionBody,
   questionText,
+  selectBackTraceHistory,
   unresolvedFollowThrough,
   BACK_TRACE_SYSTEM_PROMPT,
   FORWARD_TRACE_SYSTEM_PROMPT,
@@ -516,7 +519,11 @@ export class AuditService {
         (step) => step.type === "suspicion" && step.category === "intent-check",
       )
       .slice(0, MAX_TRACED_DIRECTIVES)
-      .map((step) => ({ kind: "deviation" as const, action: step.finding }));
+      .map((step) => ({
+        kind: "deviation" as const,
+        action: step.finding,
+        spanId: step.spanId,
+      }));
   }
 
   // PLAN_AUDITOR's auditAll check 2 reads "steps that have suspicions", which
@@ -532,6 +539,7 @@ export class AuditService {
         directive: entry.quote,
         step: "",
         evidence: "",
+        spanId: entry.spanId,
       }));
   }
 
@@ -925,28 +933,39 @@ export class AuditService {
 
     const meta = await memory.readMeta(trace.agentId, trace.id);
     const intent = judgedIntent(chat, trace);
-    const history = trace.spans
-      .map((span, index) => ({ span, number: index + 1 }))
+    const numbered = trace.spans.map((span, index) => ({
+      span,
+      number: index + 1,
+    }));
+    const allHistory = numbered
       .filter(({ span }) => meta[span.id])
-      .slice(-MAX_TRACED_STEPS);
-
-    const user = [
-      "## What the user asked for",
-      describeIntent(intent),
-      "",
-      "## What the run did, in order",
-      ...history.map(
-        ({ span, number }) =>
-          number +
-          ". " +
-          span.label +
-          " — " +
-          (meta[span.id]?.summary || "(no summary recorded for this step)"),
-      ),
-      "",
-      "## Open questions",
-      ...open.map((question) => "- " + questionText(question)),
-    ].join("\n");
+      .map(({ span, number }) => ({
+        number,
+        label: span.label,
+        summary: meta[span.id]?.summary ?? "",
+      }));
+    const cited = numbered
+      .filter(({ span }) =>
+        open.some((question) => question.spanId === span.id),
+      )
+      .map(({ number }) => number);
+    const history =
+      cited.length === 0
+        ? allHistory.slice(-MAX_TRACED_STEPS)
+        : selectBackTraceHistory(allHistory, cited);
+    const labelled = open.map((question, index) => {
+      const hit = numbered.find((entry) => entry.span.id === question.spanId);
+      return {
+        id: "Q" + (index + 1),
+        at: hit ? hit.number + ". " + hit.span.label : "run",
+        text: questionBody(question),
+      };
+    });
+    const user = buildBackTraceUser({
+      intent: describeIntent(intent),
+      history,
+      questions: labelled.map(({ id, at, text }) => ({ id, at, text })),
+    });
 
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
@@ -967,12 +986,22 @@ export class AuditService {
       usedFallback: status === "degraded",
     });
 
-    // The model echoes the question back, so answers are matched to questions
-    // by their text rather than by position — a model that drops or reorders an
-    // entry would otherwise attach its reasoning to the wrong finding.
-    const decisionFor = (question: OpenQuestion) => {
+    // Prefer the Q-id the prompt asked for. Fall back to the quoted text so a
+    // model that echoes the finding still attaches to the right question.
+    const decisionFor = (id: string, question: OpenQuestion) => {
+      const resolved = verdict?.resolved ?? [];
+      const idLower = id.toLowerCase();
+      const byId = resolved.find((entry) => {
+        const candidate = entry.question.trim().toLowerCase();
+        return (
+          candidate === idLower ||
+          candidate.startsWith(idLower + " ") ||
+          candidate.startsWith(idLower + ".")
+        );
+      });
+      if (byId) return byId;
       const lower = questionText(question).trim().toLowerCase();
-      return (verdict?.resolved ?? []).find((entry) => {
+      return resolved.find((entry) => {
         const candidate = entry.question.trim().toLowerCase();
         if (candidate.length === 0) return false;
         return candidate.includes(lower) || lower.includes(candidate);
@@ -980,8 +1009,8 @@ export class AuditService {
     };
 
     return auditSteps(identity, (push) => {
-      for (const question of open) {
-        const decision = decisionFor(question);
+      for (const [index, question] of open.entries()) {
+        const decision = decisionFor("Q" + (index + 1), question);
         // Answered as legitimate. Nothing is pushed: for a deviation the
         // step-level suspicion already stands as the unconfirmed record, and
         // re-stating a question the auditor has answered is noise.

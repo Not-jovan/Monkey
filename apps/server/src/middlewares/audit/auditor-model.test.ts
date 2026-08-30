@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { ArkApiError } from "../../ark-client.js";
+import { ArkAbortError, ArkApiError } from "../../ark-client.js";
 import type { AgentRunner } from "../../types.js";
 import { AuditorModel, auditorCallSpan, auditorSubagentType, describeError, summarizeError } from "./auditor-model.js";
 
@@ -59,6 +59,38 @@ describe("summarizeError", () => {
     );
 
     expect(left).not.toBe(right);
+  });
+
+  it("groups timeouts by phase rather than by in-flight count", () => {
+    const timing = {
+      promptBytes: 10,
+      inFlightAtStart: 22,
+      headersMs: null,
+      ttftMs: null,
+      lastChunkMs: null,
+      chunkCount: 0,
+      requestId: null,
+      abortPhase: "waiting_for_headers" as const,
+    };
+    const first = new ArkAbortError(
+      "Audit model timed out after 60s waiting for headers (22 in flight)",
+      "timeout",
+      "Audit model timed out after 60s waiting for headers",
+      { ...timing, inFlightAtStart: 22 },
+      "",
+      null,
+    );
+    const second = new ArkAbortError(
+      "Audit model timed out after 60s waiting for headers (7 in flight)",
+      "timeout",
+      "Audit model timed out after 60s waiting for headers",
+      { ...timing, inFlightAtStart: 7 },
+      "",
+      null,
+    );
+
+    expect(summarizeError(first)).toBe(summarizeError(second));
+    expect(describeError(first)).toContain("22 in flight");
   });
 });
 
@@ -131,6 +163,51 @@ describe("AuditorModel.complete", () => {
       answer.attempts.some((attempt) => attempt.error?.includes("Request id:")),
     ).toBe(true);
   });
+
+  it("keeps timeout timing and partial output on the attempt", async () => {
+    const timing = {
+      promptBytes: 12,
+      inFlightAtStart: 3,
+      headersMs: 12,
+      ttftMs: 40,
+      lastChunkMs: 50,
+      chunkCount: 2,
+      requestId: "req-9",
+      abortPhase: "streaming" as const,
+    };
+    const runner: AgentRunner = {
+      run: async () => {
+        throw new ArkAbortError(
+          "Audit model timed out after 60s; first token at 0.0s, 2 chunks (3 in flight)",
+          "timeout",
+          "Audit model timed out after 60s while streaming",
+          timing,
+          '{"ok":',
+          null,
+        );
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    const model = new AuditorModel(runner);
+
+    const answer = await model.complete(
+      RUN,
+      "flash",
+      null,
+      "s",
+      "u",
+      verdict,
+    );
+
+    expect(answer.status).toBe("failed");
+    expect(answer.failure).toBe(
+      "Audit model timed out after 60s while streaming",
+    );
+    expect(answer.attempts[0]?.content).toBe('{"ok":');
+    expect(answer.attempts[0]?.timing).toEqual(timing);
+    expect(answer.attempts[0]?.error).toContain("3 in flight");
+  });
 });
 
 describe("auditorCallSpan", () => {
@@ -171,6 +248,37 @@ describe("auditorCallSpan", () => {
     });
     expect(span.attributes.phase).toBe("run");
     expect(auditorSubagentType(span.name)).toBeUndefined();
+  });
+
+  it("copies provider timing onto the span the inspector already shows", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.step.intent",
+      label: "Intent · Model · plan",
+      targetSpanId: "span-1",
+      prompt: "judge this",
+      attempt: {
+        ...attempt,
+        error: "Audit model timed out after 60s waiting for headers (22 in flight)",
+        timing: {
+          promptBytes: 7200,
+          inFlightAtStart: 22,
+          headersMs: null,
+          ttftMs: null,
+          lastChunkMs: null,
+          chunkCount: 0,
+          requestId: null,
+          abortPhase: "waiting_for_headers",
+        },
+      },
+      fallback: false,
+    });
+
+    expect(span.attributes.promptBytes).toBe(7200);
+    expect(span.attributes.inFlightAtStart).toBe(22);
+    expect(span.attributes.abortPhase).toBe("waiting_for_headers");
+    expect(span.attributes.chunkCount).toBe(0);
+    expect(span.attributes.headersMs).toBeUndefined();
   });
 });
 

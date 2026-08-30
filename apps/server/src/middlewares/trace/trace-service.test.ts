@@ -1191,12 +1191,12 @@ describe("TraceService", () => {
     expect(summarizeSpawns[0]?.status).toBe("ok");
     expect(summarizeSpawns[0]?.endedAt).toBe("2026-08-30T00:00:01.000Z");
     expect(summarizeSpawns[0]?.durationMs).toBe(1_000);
-    expect(summarizeSpawns[0]?.attributes.targetLabel).toBe("Model · plan");
+    expect(summarizeSpawns[0]?.attributes.targetLabel).toBe("plan");
     expect(summarizeSpawns[0]?.attributes.targetSpanId).toBe("span-plan");
-    expect(summarizeSpawns[1]?.attributes.targetLabel).toBe(
-      "Tool · exec_command",
-    );
+    expect(summarizeSpawns[1]?.attributes.targetLabel).toBe("exec_command");
     expect(summarizeSpawns[1]?.attributes.targetSpanId).toBe("span-exec");
+    expect(summarizeSpawns[0]?.label).toBe("Subagent · summarize · plan");
+    expect(summarizeSpawns[1]?.label).toBe("Subagent · summarize · exec_command");
     expect(summarizeSpawns[0]?.attributes.laneId).toBe("auditor");
     expect(summarizeSpawns[0]?.attributes.toolName).toBe("spawn_agent");
     expect(first?.parentId).toBe(summarizeSpawns[0]?.id);

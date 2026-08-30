@@ -410,8 +410,8 @@ describe("canvas swimlanes", () => {
     expect(rowOf("sum-exec")).toBe(2);
     expect(layout.lanes.map((lane) => lane.label)).toEqual([
       "auditor",
-      "sub · summarize · Model · plan",
-      "sub · summarize · Tool · exec_command",
+      "sub · summarize · plan",
+      "sub · summarize · exec_command",
     ]);
     const delegates = layout.edges.filter((edge) => edge.kind === "delegate");
     expect(

@@ -78,7 +78,24 @@ describe("subagent detection", () => {
           },
         }),
       ),
-    ).toBe("summarize · Model · plan");
+    ).toBe("summarize · plan");
+  });
+
+  it("does not repeat Subagent in the list headline", () => {
+    expect(
+      stepHeadline(
+        span({
+          id: "spawn",
+          name: "tool.spawn_agent",
+          label: "Subagent · injection · after update_plan",
+          attributes: {
+            toolName: "spawn_agent",
+            subagentType: "injection",
+            targetLabel: "after update_plan",
+          },
+        }),
+      ),
+    ).toBe("injection · after update_plan");
   });
 
   it("hides synthesized subagent results inferred from a command", () => {

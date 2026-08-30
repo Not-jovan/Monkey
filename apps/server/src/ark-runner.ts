@@ -67,6 +67,7 @@ export class ArkRunner implements AgentRunner {
         threadId: null,
         usage: result.usage,
         model: served,
+        timing: result.timing,
       };
     } finally {
       controllers.delete(controller);

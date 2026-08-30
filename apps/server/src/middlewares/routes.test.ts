@@ -53,7 +53,21 @@ async function makeApp(environment: Record<string, string> = {}) {
   // Auditing off: these tests write the findings they assert on directly into
   // the store, and a live auditor would queue a model call per completed run.
   const client = {
-    complete: async () => ({ content: "", usage: null, model: null }),
+    complete: async () => ({
+      content: "",
+      usage: null,
+      model: null,
+      timing: {
+        promptBytes: 0,
+        inFlightAtStart: 0,
+        headersMs: null,
+        ttftMs: null,
+        lastChunkMs: null,
+        chunkCount: 0,
+        requestId: null,
+        abortPhase: null,
+      },
+    }),
   };
 
   const trace = await createTraceMiddleware({

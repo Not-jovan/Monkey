@@ -72,14 +72,81 @@ export function describeFollowThrough(entry: { step: string; evidence: string })
 export type OpenQuestion =
   // PLAN_AUDITOR check 3: the step audit thought this might deviate from the
   // intent. It is already recorded as a suspicion against its own step.
-  | { kind: "deviation"; action: string }
+  | { kind: "deviation"; action: string; spanId: string | null }
   // What the forward trace could not settle from the steps after a directive.
-  | ({ kind: "follow-through" } & FollowThrough);
+  | ({ kind: "follow-through"; spanId: string | null } & FollowThrough);
 
 export function questionText(question: OpenQuestion) {
   return question.kind === "deviation"
     ? question.action
     : question.directive + " (" + describeFollowThrough(question) + ")";
+}
+
+export function questionBody(question: OpenQuestion) {
+  return question.kind === "deviation" ? question.action : question.directive;
+}
+
+const BACK_QUESTION_CLIP = 180;
+const BACK_SUMMARY_CLIP = 140;
+export const BACK_TRACE_STEP_WINDOW = 3;
+
+export interface BackTraceStep {
+  number: number;
+  label: string;
+  summary: string;
+}
+
+// A question about step 12 does not need the other 39 summaries. Neighbours
+// stay so the model can see what led up to it; the rest is dropped.
+export function selectBackTraceHistory(
+  steps: BackTraceStep[],
+  cited: number[],
+  window = BACK_TRACE_STEP_WINDOW,
+) {
+  if (cited.length === 0) return steps;
+  const keep = new Set<number>();
+  for (const number of cited) {
+    for (let offset = -window; offset <= window; offset += 1) {
+      keep.add(number + offset);
+    }
+  }
+  return steps.filter((step) => keep.has(step.number));
+}
+
+export function buildBackTraceUser(input: {
+  intent: string;
+  history: BackTraceStep[];
+  questions: { id: string; at: string; text: string }[];
+}) {
+  return [
+    "## What the user asked for",
+    input.intent,
+    "",
+    "## What the run did, in order",
+    ...input.history.map(
+      (step) =>
+        step.number +
+        ". " +
+        step.label +
+        " — " +
+        clip(
+          step.summary || "(no summary recorded for this step)",
+          BACK_SUMMARY_CLIP,
+        ),
+    ),
+    "",
+    "## Open questions",
+    "Answer using each question's id (Q1, Q2, …) in the question field.",
+    ...input.questions.map(
+      (question) =>
+        "- " +
+        question.id +
+        " [" +
+        question.at +
+        "] " +
+        clip(question.text, BACK_QUESTION_CLIP),
+    ),
+  ].join("\n");
 }
 
 export function unresolvedFollowThrough(question: FollowThrough) {
@@ -136,8 +203,8 @@ export const BACK_TRACE_SYSTEM_PROMPT = [
   "  thing that explains it.",
   '- "unclear": the history genuinely does not say. Prefer this over guessing.',
   "",
-  "Give one entry per question, echoing the question back, and quote what",
-  "decided it.",
+  "Give one entry per question. Echo the question id (Q1, Q2, …) in the",
+  "question field, not the quoted text.",
   "",
   'Reply with JSON only: {"resolved":[{"question":string,',
   '"because":"user"|"unexplained"|"unclear","reason":string}],"reason":string}',

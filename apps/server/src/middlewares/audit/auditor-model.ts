@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { z } from "zod";
 import { isPermanentProviderError } from "../../failures.js";
 import type { TraceSpan } from "../trace/trace-model.js";
-import { ArkApiError } from "../../ark-client.js";
-import type { AgentRunner, RunUsage } from "../../types.js";
+import { ArkAbortError, ArkApiError } from "../../ark-client.js";
+import type { AgentRunner, ProviderCallTiming, RunUsage } from "../../types.js";
 
 // Everything about asking the audit model a question and living with the
 // answer: the fallback, what counts as a permanent failure, and the record of
@@ -24,6 +24,7 @@ export interface AuditorCallAttempt {
   content: string;
   error: string | null;
   usage: RunUsage | null;
+  timing?: ProviderCallTiming | null;
 }
 
 // Who the auditor is running as. An in-process runner ignores the workspace,
@@ -65,20 +66,29 @@ export function describeError(error: unknown) {
 }
 
 /**
- * The same error as {@link describeError}, minus the parts the provider stamps
- * per response. Ark ends every failure with its own request id, so one outage
- * reported by seven checks is seven strings that differ only in that id —
- * nothing downstream can tell it is one outage, and the auditor's health then
- * repeats the same sentence once per check.
- *
- * Used for what a check *reports*. The id is not lost: the attempt keeps the
- * full message, which is what the auditor's own span carries and what the log
- * line below prints.
+ * The same error as {@link describeError}, minus the parts that differ per
+ * call. Ark request ids and in-flight counts would otherwise make one outage
+ * look like seven. The attempt keeps the full message.
  */
 export function summarizeError(error: unknown) {
+  if (error instanceof ArkAbortError) return error.summary;
   return describeError(error)
     .replace(/\s*Request id:\s*\S+/gi, "")
     .trim();
+}
+
+function timingAttributes(timing: ProviderCallTiming | null | undefined) {
+  if (!timing) return {};
+  return {
+    promptBytes: timing.promptBytes,
+    inFlightAtStart: timing.inFlightAtStart,
+    chunkCount: timing.chunkCount,
+    ...(timing.headersMs !== null ? { headersMs: timing.headersMs } : {}),
+    ...(timing.ttftMs !== null ? { ttftMs: timing.ttftMs } : {}),
+    ...(timing.lastChunkMs !== null ? { lastChunkMs: timing.lastChunkMs } : {}),
+    ...(timing.requestId ? { arkRequestId: timing.requestId } : {}),
+    ...(timing.abortPhase ? { abortPhase: timing.abortPhase } : {}),
+  };
 }
 
 // One attempt, as a span in the agent's own shape. That compatibility is what
@@ -119,6 +129,7 @@ export function auditorCallSpan(input: {
       ...(input.attempt.usage?.outputTokens !== undefined
         ? { outputTokens: input.attempt.usage.outputTokens }
         : {}),
+      ...timingAttributes(input.attempt.timing),
       ...(input.fallback ? { fallback: true } : {}),
       ...(input.targetSpanId ? { targetSpanId: input.targetSpanId } : {}),
     },
@@ -184,6 +195,7 @@ export class AuditorModel {
       const startedAt = new Date().toISOString();
       const startedMs = Date.now();
       let usage: RunUsage | null = null;
+      let timing: ProviderCallTiming | null = null;
       try {
         // Through the runner rather than the provider client: an auditor that
         // executes the way an Agent does is one the trace pipeline can record,
@@ -197,6 +209,7 @@ export class AuditorModel {
           model,
         });
         usage = result.usage;
+        timing = result.timing ?? null;
         const content = result.output;
         const parsed = schema.safeParse(extractJson(content));
         const endedAt = new Date().toISOString();
@@ -211,6 +224,7 @@ export class AuditorModel {
             content,
             error,
             usage,
+            timing,
           });
           throw new Error(error);
         }
@@ -222,18 +236,21 @@ export class AuditorModel {
           content,
           error: null,
           usage,
+          timing,
         });
         return parsed.data as z.infer<Schema>;
       } catch (error) {
         if (attempts.length === 0 || attempts[attempts.length - 1]?.model !== model) {
+          const aborted = error instanceof ArkAbortError ? error : null;
           attempts.push({
             model,
             startedAt,
             endedAt: new Date().toISOString(),
             durationMs: Date.now() - startedMs,
-            content: "",
+            content: aborted?.content ?? "",
             error: describeError(error),
-            usage,
+            usage: aborted?.usage ?? usage,
+            timing: aborted?.timing ?? timing,
           });
         }
         throw error;
