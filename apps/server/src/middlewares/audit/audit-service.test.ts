@@ -2660,3 +2660,139 @@ describe("AuditService step evidence caching", () => {
     expect(stores.auditStore.isRunComplete("trace-keep")).toBe(true);
   });
 });
+
+// Crash recovery. An Agent's run finishes, the auditor is partway through, and
+// the process dies. On the next boot the audit has to carry on from what
+// survived on disk rather than start the whole pass again — and it must not
+// re-ask questions it already has verdicts for, because those are billed model
+// calls.
+describe("AuditService crash recovery", () => {
+  const TRACE = "trace-crash";
+
+  // Reopens every store over the same directory, which is what a restart
+  // actually is: the in-memory chat state is gone, only the files remain.
+  async function reopen(directory: string) {
+    const traceStore = new TraceStore(path.join(directory, "traces"));
+    await traceStore.initialize();
+    const traceService = new TraceService(
+      traceStore,
+      createRedactor([]),
+      codexRuntime.trace,
+    );
+    const auditStore = new AuditStore(path.join(directory, "audits"));
+    await auditStore.initialize();
+    const contextStore = new ContextStore(path.join(directory, "context"));
+    await contextStore.initialize();
+    new ContextService({ traceStore, store: contextStore }).start();
+    const auditMemory = new AuditMemory(path.join(directory, "agent-runs"));
+    return {
+      traceStore,
+      traceService,
+      auditStore,
+      contextStore,
+      auditMemory,
+      directory,
+    };
+  }
+
+  it("resumes the unfinished audit and re-asks only what has no verdict", async () => {
+    const stores = await makeStores();
+    // The injection check alone fails, so the step is left with verdicts for
+    // everything else and a hole where that one should be.
+    const before: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) => {
+        if (checkOf(system, user) === "injection") {
+          throw new ArkApiError("upstream fell over", "InternalError", 500);
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const first = makeAudit(stores, before);
+    seedTrace(stores.traceStore, TRACE);
+    stores.traceStore.appendSpan(TRACE, toolSpan(TRACE, "ok"));
+    await first.idle();
+    await stores.auditMemory.flush();
+    await stores.traceStore.flush();
+    await stores.auditStore.flush();
+
+    // The run-level pass never happened, which is what makes this trace
+    // unfinished business rather than a completed audit.
+    expect(stores.auditStore.isRunComplete(TRACE)).toBe(false);
+    const asked = before.calls.filter((call) => call.check !== "identify");
+    expect(asked.map((call) => call.check)).toContain("summary");
+    expect(asked.map((call) => call.check)).toContain("injection");
+
+    // --- crash: nothing of the first service survives, only its files ---
+    const restarted = await reopen(stores.directory);
+    // A run still marked running when the process died is reopened as failed,
+    // which is what lets the boot sweep see it at all.
+    expect(restarted.traceStore.get(TRACE)?.status).not.toBe("running");
+
+    const after: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const second = makeAudit(restarted, after);
+    await second.idle();
+
+    const reasked = after.calls
+      .filter((call) => call.check !== "identify")
+      .map((call) => call.check);
+
+    // The hole is filled...
+    expect(reasked).toContain("injection");
+    // ...and nothing that already had a verdict is paid for twice.
+    expect(reasked).not.toContain("summary");
+    expect(reasked).not.toContain("intent");
+    // The run-level pass it never reached now runs, finishing the audit.
+    expect(restarted.auditStore.isRunComplete(TRACE)).toBe(true);
+
+    await restarted.auditMemory.flush();
+    await restarted.traceStore.flush();
+    await restarted.auditStore.flush();
+  });
+
+  // Context is written from the trace-completed event, and a run interrupted
+  // by a restart never emits one — TraceStore.initialize rewrites it to failed
+  // directly. The boot sweep in ContextService is what fills that in, so the
+  // run still contributes to the chain the next run inherits.
+  it("records the context a crashed run never got to write", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    const first = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-context-crash");
+    stores.traceStore.appendSpan(
+      "trace-context-crash",
+      toolSpan("trace-context-crash", "ok"),
+    );
+    await first.idle();
+    await stores.contextStore.flush();
+    await stores.traceStore.flush();
+    await stores.auditStore.flush();
+    await stores.auditMemory.flush();
+
+    // Still running when the process died, so no context was ever recorded.
+    expect(stores.contextStore.get("trace-context-crash")).toBeNull();
+
+    const restarted = await reopen(stores.directory);
+    const second = makeAudit(restarted, {
+      calls: [],
+      respond: () => SAFE_VERDICT,
+    });
+    await second.idle();
+
+    // The audit finished on the second boot...
+    expect(restarted.auditStore.isRunComplete("trace-context-crash")).toBe(true);
+    // ...and the run that died mid-flight now has its context record, so the
+    // chain it belongs to is whole rather than cut at that point.
+    const recovered = restarted.contextStore.get("trace-context-crash");
+    expect(recovered).not.toBeNull();
+    expect(recovered?.traceId).toBe("trace-context-crash");
+    expect(restarted.contextStore.chainFor("trace-context-crash")).not.toEqual(
+      [],
+    );
+
+    await restarted.contextStore.flush();
+    await restarted.traceStore.flush();
+    await restarted.auditStore.flush();
+    await restarted.auditMemory.flush();
+  });
+});

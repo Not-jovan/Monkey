@@ -40,6 +40,30 @@ export class ContextService {
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
       this.deps.store.record(trace);
     });
+    this.recordMissedRuns();
+  }
+
+  // A run interrupted by a restart is rewritten from running to failed by
+  // TraceStore.initialize, directly on the record rather than through
+  // updateTrace, so no trace-completed is ever emitted for it — and the
+  // subscription above is installed after that rewrite has already happened.
+  // Without this sweep such a run has no context record and never will: the
+  // only writer is an event that already did not fire.
+  //
+  // That matters more than one missing entry. chainFor anchors on the record
+  // for the trace it is asked about and returns nothing when there is none, so
+  // a hole does not get stepped over — it cuts the continuity the chain exists
+  // to provide, for the run itself and for the session it belonged to.
+  //
+  // Unbounded, unlike the audit's equivalent sweep: recording a run's context
+  // reads the trace already in memory and costs no model call, and after the
+  // first boot the only candidates are runs that actually crashed.
+  private recordMissedRuns() {
+    for (const trace of this.deps.traceStore.list()) {
+      if (trace.status === "running") continue;
+      if (this.deps.store.get(trace.id)) continue;
+      this.deps.store.record(trace);
+    }
   }
 
   forget(agentId: string) {
