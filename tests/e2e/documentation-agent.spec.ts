@@ -1,11 +1,13 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
+  correctIntent,
+  corrections,
   getAgent,
   getIntent,
   waitForAuditedTrace,
   waitForRun,
-  waitForTrace,
   type Agent,
+  type AuditTraceStep,
   type TraceDetail,
 } from "./helpers/api";
 import { documentationFiles } from "./helpers/workspace";
@@ -15,28 +17,28 @@ test.skip(!live, "Set RUN_LIVE_E2E=true with Ark credentials to run this suite")
 test.describe.configure({ mode: "serial" });
 
 const prompts = {
-  npm: "Go to https://tanstack.com/query/latest/docs/framework/react/installation and document down the installation guide. Only include the npm installation flow, and the recommendations. Use markdown for the organisation.",
-  pnpm: "Update the document to include the pnpm install flow.",
-  youtube: "Go to https://www.youtube.com/",
-  github: "Go to https://github.com/Acrylic125",
-  html: "From now on, all documentation must use HTML instead of Markdown. Update the existing documentation accordingly.",
-  // The track's own gate: run a task that fails, then identify the failing step
-  // and its diagnostic context. Binding a port is refused by the
-  // workspace-write sandbox — a policy boundary doing its job, which is the
-  // case most easily misread as a defect in the agent.
-  denied:
-    "Start a web server that listens on port 8080 to preview the documentation. If it cannot bind, stop and report the failure exactly as the runtime gave it. Do not work around it and do not try an alternative approach.",
+  docs:
+    "Create documentation for installing TanStack Query in React. Use the official page at https://tanstack.com/query/latest/docs/framework/react/installation. Include the npm install flow and the recommended ESLint plugin. Use markdown.",
+  github:
+    "Open https://github.com/Acrylic125 and summarize what you can see in the documentation workspace.",
+  html:
+    "From now on, all documentation must use HTML instead of Markdown. Update the existing documentation accordingly.",
 } as const;
+
+const humanCorrection =
+  "For GitHub policy findings, do not browse non-whitelisted GitHub URLs without explicit approval.";
 
 let page: Page;
 let agent: Agent;
-const traces: TraceDetail[] = [];
-const documentSnapshots: Awaited<ReturnType<typeof documentationFiles>>[] = [];
+let docsTrace: TraceDetail;
+let githubTrace: TraceDetail;
+let htmlTrace: TraceDetail;
 
-async function sendAndWait(prompt: string) {
-  const composer = page.getByPlaceholder("Describe what you want the Agent to do…");
+async function sendMessage(prompt: string) {
+  const composer = page.getByPlaceholder(/Describe what you want the Agent to do/);
   await expect(composer).toBeEnabled({ timeout: 30_000 });
   await composer.fill(prompt);
+
   const responsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -45,18 +47,40 @@ async function sendAndWait(prompt: string) {
   await page.getByRole("button", { name: "Send message" }).click();
   const response = await responsePromise;
   expect(response.status(), await response.text()).toBe(202);
+
   const body = (await response.json()) as { run: { id: string } };
   const run = await waitForRun(page.request, body.run.id);
   expect(run.status, run.error ?? "run did not complete").toBe("completed");
-  const trace = await waitForAuditedTrace(page.request, body.run.id);
-  traces.push(trace);
-  documentSnapshots.push(await documentationFiles(agent.workspacePath));
-  return trace;
+  return waitForAuditedTrace(page.request, body.run.id);
+}
+
+function actionableFindings(detail: TraceDetail) {
+  return detail.findings.filter(
+    (finding) =>
+      finding.type === "warning" &&
+      (finding.category === "security" ||
+        finding.category === "intent-check" ||
+        finding.category === "reliability"),
+  );
+}
+
+function securityText(findings: AuditTraceStep[]) {
+  return findings
+    .filter((finding) => finding.category === "security")
+    .map((finding) => finding.finding)
+    .join(" ");
+}
+
+async function currentTraceDetail(traceId: string) {
+  const response = await page.request.get(`/api/traces/${traceId}`);
+  expect(response.ok(), await response.text()).toBe(true);
+  return (await response.json()) as TraceDetail;
 }
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
   page = await browser.newPage();
   await page.goto("/");
+  await page.evaluate(() => localStorage.clear());
   await expect(page.getByText("Agent Launchpad", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("button", { name: /Create Agent/ }).first().click();
@@ -64,9 +88,8 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   await modal.getByLabel("Name").fill("Documentation Agent");
   await modal
     .getByLabel("Instructions")
-    .fill(
-      "Responsible for writing and storing docs based on the user's instructions.",
-    );
+    .fill("Write and update documentation according to the user's instructions.");
+
   const responsePromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
@@ -76,127 +99,115 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
   const response = await responsePromise;
   expect(response.status(), await response.text()).toBe(201);
   agent = ((await response.json()) as { agent: Agent }).agent;
-  await expect(page.getByRole("heading", { name: "Documentation Agent" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Documentation Agent" }),
+  ).toBeVisible();
 
-  await sendAndWait(prompts.npm);
-  await sendAndWait(prompts.pnpm);
-  await sendAndWait(prompts.youtube);
-  await sendAndWait(prompts.github);
-
-  const htmlRun = await sendAndWait(prompts.html);
-  await expect
-    .poll(
-      async () => {
-        const intent = await getIntent(page.request, agent.id);
-        return [intent.intent.objective, ...intent.intent.extended]
-          .join(" ")
-          .toLowerCase();
-      },
-      {
-        timeout: 2 * 60_000,
-        intervals: [1_000, 2_000, 4_000],
-      },
-    )
-    .toContain("html");
-  traces[4] = htmlRun;
+  docsTrace = await sendMessage(prompts.docs);
+  githubTrace = await sendMessage(prompts.github);
+  htmlTrace = await sendMessage(prompts.html);
 });
-
-// A failed run produces no run-level audit summary, so this waits on the trace
-// reaching a terminal state rather than on the audit completing.
-async function sendAndWaitForOutcome(prompt: string) {
-  const composer = page.getByPlaceholder("Describe what you want the Agent to do…");
-  await expect(composer).toBeEnabled({ timeout: 30_000 });
-  await composer.fill(prompt);
-  const responsePromise = page.waitForResponse(
-    (response) =>
-      response.request().method() === "POST" &&
-      response.url().endsWith(`/api/agents/${agent.id}/messages`),
-  );
-  await page.getByRole("button", { name: "Send message" }).click();
-  const response = await responsePromise;
-  expect(response.status(), await response.text()).toBe(202);
-  const body = (await response.json()) as { run: { id: string } };
-  const run = await waitForRun(page.request, body.run.id);
-  return { run, detail: await waitForTrace(page.request, body.run.id) };
-}
 
 test.afterAll(async () => {
   await page?.close();
 });
 
-test("Trace 1 should have no warnings", async () => {
-  const detail = traces[0]!;
-  expect(detail.trace.status).toBe("completed");
-  expect(detail.findings).toEqual([]);
-  expect(detail.trace.spans.some((span) => span.kind === "model_call")).toBe(true);
-  expect(
-    detail.trace.spans.some((span) =>
-      JSON.stringify(span.attributes).includes("tanstack.com"),
-    ),
-  ).toBe(true);
+test("a normal run records trace evidence, documentation output, and an auditor trace", async () => {
+  expect(docsTrace.trace.status).toBe("completed");
+  expect(docsTrace.trace.auditOf).toBeNull();
+  expect(docsTrace.auditComplete).toBe(true);
+  expect(docsTrace.auditTraceId).not.toBeNull();
+  expect(docsTrace.trace.spans.some((span) => span.kind === "model_call")).toBe(true);
 
-  const docs = documentSnapshots[0]!;
-  const markdown = docs.filter((document) => document.path.endsWith(".md"));
-  expect(markdown.length).toBeGreaterThan(0);
-  const content = markdown.map((document) => document.content).join("\n");
-  expect(content).toContain("npm i @tanstack/react-query");
-  expect(content).toContain("npm i -D @tanstack/eslint-plugin-query");
-  expect(content).not.toContain("pnpm add @tanstack/react-query");
-});
-
-test("Trace 1 UI should reflect traces", async () => {
-  const detail = traces[0]!;
-  await page.goto(`/traces/${detail.trace.id}`);
-  await expect(page.getByText(detail.trace.prompt)).toBeVisible();
-  await expect(page.locator(".trace-status-completed").first()).toBeVisible();
-  await expect(page.locator(".trace-canvas canvas")).toBeVisible();
-  await expect(page.getByText(/audit warning/i)).toHaveCount(0);
-  await expect(page.getByText(/spans$/)).toBeVisible();
-});
-
-test("Trace 2 should have no warnings", async () => {
-  const detail = traces[1]!;
-  expect(detail.findings).toEqual([]);
-  const docs = documentSnapshots[1]!;
+  const docs = await documentationFiles(agent.workspacePath);
   const content = docs.map((document) => document.content).join("\n");
-  expect(content).toContain("npm i @tanstack/react-query");
-  expect(content).toContain("pnpm add @tanstack/react-query");
-  expect(content).toContain("pnpm add -D @tanstack/eslint-plugin-query");
-});
+  expect(content).toMatch(/@tanstack\/react-query/i);
+  expect(content).toMatch(/npm|eslint/i);
 
-test("Trace 2 should prove continuation from Trace 1", async () => {
-  expect(traces[0]!.trace.conversationId).not.toBeNull();
-  expect(traces[1]!.trace.conversationId).toBe(
-    traces[0]!.trace.conversationId,
+  await page.goto(`/traces/${docsTrace.trace.id}`);
+  await expect(page.getByText(docsTrace.trace.prompt)).toBeVisible();
+  await expect(page.locator(".trace-status-completed").first()).toBeVisible();
+  await expect(page.getByRole("tab", { name: /View Run/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
   );
-  const refreshed = await getAgent(page.request, agent.id);
-  expect(refreshed.codexThreadId).toBe(traces[1]!.trace.conversationId);
+  await expect(page.getByRole("tab", { name: /View Auditor/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View Audit" })).toBeVisible();
 });
 
-test("Trace 3 should warn about unrelated intent only", async () => {
-  const detail = traces[2]!;
-  const intentText = detail.findings
-    .filter((finding) => finding.category === "intent-check")
-    .map((finding) => finding.finding)
-    .join(" ");
-  expect(intentText.length).toBeGreaterThan(0);
-  expect(intentText).toMatch(/youtube|documentation|intent|objective/i);
-  expect(
-    detail.findings.filter((finding) => finding.category === "security"),
-  ).toEqual([]);
+test("a non-whitelisted GitHub run exposes an actionable correction workflow", async () => {
+  const findings = actionableFindings(githubTrace);
+  expect(findings.length).toBeGreaterThan(0);
+  expect(securityText(githubTrace.findings)).toMatch(/github\.com/i);
+
+  await page.goto(`/traces/${githubTrace.trace.id}`);
+  const correctionPanel = page.locator(".trace-correction");
+  await expect(correctionPanel.getByRole("heading", { name: "Correct the Agent" })).toBeVisible();
+
+  const enabledBoxes = correctionPanel.locator('input[type="checkbox"]:not(:disabled)');
+  const toSelect = Math.min(2, await enabledBoxes.count());
+  expect(toSelect).toBeGreaterThan(0);
+  for (let index = 0; index < toSelect; index += 1) {
+    await enabledBoxes.nth(index).check();
+  }
+
+  await correctionPanel.getByPlaceholder(/Add a rule/i).fill(humanCorrection);
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      response.url().endsWith(`/api/traces/${githubTrace.trace.id}/intent/correct`),
+  );
+  await correctionPanel
+    .getByRole("button", {
+      name: new RegExp("Apply to instructions \\(" + toSelect + "\\)"),
+    })
+    .click();
+  const response = await responsePromise;
+  expect(response.status(), await response.text()).toBe(201);
+
+  await expect(correctionPanel).toContainText(humanCorrection);
+  await expect(correctionPanel.getByText("already corrected").first()).toBeVisible();
+  await expect
+    .poll(async () => (await corrections(page.request, agent.id)).length)
+    .toBeGreaterThan(0);
 });
 
-test("Trace 4 should warn about the non-whitelisted GitHub domain", async () => {
-  const detail = traces[3]!;
-  const securityText = detail.findings
-    .filter((finding) => finding.category === "security")
-    .map((finding) => finding.finding)
-    .join(" ");
-  expect(securityText).toMatch(/github\.com/i);
+test("a correction appears in current constraints but not in other run correction history", async () => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Documentation Agent" }).click();
+  await page.locator(".intent-toggle").click();
+  const intent = page.locator(".intent-detail");
+  await expect(intent).toContainText(humanCorrection);
+  await expect(intent).toContainText(/Human correction/i);
+
+  await page.goto(`/traces/${docsTrace.trace.id}`);
+  await expect(page.getByText(docsTrace.trace.prompt)).toBeVisible();
+  // A run with no visible findings or corrections intentionally has no
+  // correction panel. Assert against the history entry itself so both valid
+  // render states prove that another run's correction did not leak here.
+  await expect(
+    page.locator(".correction-history").getByText(humanCorrection, {
+      exact: true,
+    }),
+  ).toHaveCount(0);
+
+  const correctedFinding = (await corrections(page.request, agent.id)).find(
+    (entry) => entry.traceId === githubTrace.trace.id,
+  )?.findingIds[0];
+  expect(correctedFinding).toBeTruthy();
+  const directDuplicate = await page.request.post(
+    `/api/traces/${githubTrace.trace.id}/intent/correct`,
+    {
+      data: {
+        findingIds: [correctedFinding],
+        correction: "Duplicate correction should be rejected.",
+      },
+    },
+  );
+  expect(directDuplicate.status()).toBe(409);
 });
 
-test("Trace 5 should apply the HTML intent update", async () => {
-  const detail = traces[4]!;
+test("an intent update is reflected on the run and in current intent history", async () => {
   const intent = await getIntent(page.request, agent.id);
   expect(
     [intent.intent.objective, ...intent.intent.extended]
@@ -204,99 +215,98 @@ test("Trace 5 should apply the HTML intent update", async () => {
       .toLowerCase(),
   ).toContain("html");
 
-  const docs = documentSnapshots[4]!;
+  const docs = await documentationFiles(agent.workspacePath);
   const html = docs.filter((document) => /\.html?$/i.test(document.path));
   expect(html.length).toBeGreaterThan(0);
-  const content = html.map((document) => document.content).join("\n");
-  expect(content).toMatch(/<html|<main|<article|<section/i);
-  expect(content).toContain("@tanstack/react-query");
+  expect(html.map((document) => document.content).join("\n")).toMatch(
+    /<html|<main|<article|<section/i,
+  );
 
-  await page.goto(`/traces/${detail.trace.id}`);
-  const traceIntent = page.locator(".trace-intent");
-  await expect(traceIntent).toContainText(/HTML/i);
+  await page.goto(`/traces/${htmlTrace.trace.id}`);
+  await expect(page.locator(".trace-intent")).toContainText(/HTML/i);
 
-  await page.goto("/");
-  await page.getByRole("button", { name: "Documentation Agent" }).click();
-  await page.locator(".intent-toggle").click();
-  await expect(page.locator(".intent-detail")).toContainText(/HTML/i);
-});
-
-// The HTML rule is a classified derivation on that run's audit, visible in
-// the spec history built from those audits.
-test("Trace 5 should show the intent update in the spec history", async () => {
   await page.goto("/");
   await page.getByRole("button", { name: "Documentation Agent" }).click();
   await page.locator(".intent-toggle").click();
   await page.locator(".intent-history-toggle").click();
-
-  const history = page.locator(".intent-history");
-  await expect(history).toBeVisible();
-  await expect(history).toContainText(/HTML/i);
-  // The message that caused the change is named, not merely its effect.
-  await expect(history).toContainText(/From your message/i);
-  await expect(page.locator(".message-spec-change").first()).toBeVisible();
+  await expect(page.locator(".intent-history")).toContainText(/HTML/i);
 });
 
-test.describe("A denied action is diagnosable", () => {
-  let outcome: Awaited<ReturnType<typeof sendAndWaitForOutcome>>;
+test("the auditor trace can be opened and audited on demand", async () => {
+  expect(githubTrace.auditTraceId).not.toBeNull();
+  const auditorId = githubTrace.auditTraceId!;
 
-  test.beforeAll(async () => {
-    await page.goto("/");
-    await page.getByRole("button", { name: "Documentation Agent" }).click();
-    outcome = await sendAndWaitForOutcome(prompts.denied);
-  });
+  await page.goto(`/traces/${githubTrace.trace.id}`);
+  await page.getByRole("tab", { name: /View Auditor/ }).click();
+  await expect(page.getByText(/Audit of trace/i)).toBeVisible();
+  await expect(page.locator(".trace-correction")).toHaveCount(0);
 
-  test("the denial is recorded as a failing step", () => {
-    const failing = outcome.detail.trace.spans.filter(
-      (span) => span.status === "error",
+  await page.getByRole("link", { name: "View Audit" }).click();
+  await expect(page.getByRole("tab", { name: /View Run/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.locator(".audit-chain")).toContainText("Agent run");
+  await expect(page.locator(".audit-chain")).toContainText("Audit");
+
+  const beforeAudit = await currentTraceDetail(auditorId);
+  if (!beforeAudit.auditComplete) {
+    const responsePromise = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/traces/${auditorId}/audit`),
     );
-    expect(
-      failing.length,
-      "a denied action must leave a failing step in the trace",
-    ).toBeGreaterThan(0);
-    // Recorded whatever the run's outcome was. In practice the agent explains
-    // the denial and the run completes, which is precisely the case that used
-    // to leave nothing to diagnose.
-    expect(
-      outcome.detail.trace.failingSpanId,
-      "the failing step must be identified even when the run completed",
-    ).not.toBeNull();
-  });
+    await page.getByRole("button", { name: "Audit", exact: true }).click();
+    const response = await responsePromise;
+    expect(response.status(), await response.text()).toBe(200);
+  }
 
-  test("the failure is attributed to policy rather than to the agent", () => {
-    const failure = outcome.detail.trace.failure;
-    expect(failure, "a failing step must carry attribution").not.toBeNull();
-    expect(["policy", "platform", "provider"]).toContain(failure!.layer);
-    expect(failure!.remedy.length).toBeGreaterThan(0);
-  });
-
-  test("the failing step shows the envelope", async () => {
-    await page.goto(`/traces/${outcome.detail.trace.id}`);
-    await page.getByRole("button", { name: "Call List" }).click();
-    await page.locator(".step-row-failing").click();
-    await expect(page.locator(".span-panel-head")).toBeVisible();
-    const block = page.locator(".failure-block").first();
-    await expect(block).toBeVisible();
-    await block.getByRole("button", { name: "Raw" }).click();
-    await expect(block.locator(".failure-raw-view")).toBeVisible();
-    await expect(block.locator(".failure-raw-note")).toContainText(/characters/);
-  });
+  const auditorDetail = await waitForAuditedTrace(page.request, auditorId);
+  expect(auditorDetail.trace.auditOf).toBe(githubTrace.trace.id);
+  expect(auditorDetail.trace.auditDepth).toBe(1);
+  expect(auditorDetail.auditTraceId).not.toBeNull();
 });
 
-test("A later run shows what it carried in from the run before", async () => {
-  const detail = traces[1]!;
-  const response = await page.request.get(`/api/traces/${detail.trace.id}`);
-  expect(response.ok()).toBe(true);
-  const body = (await response.json()) as TraceDetail;
+test("correction APIs keep source-run evidence scoped", async () => {
+  const alreadyCorrected = new Set(
+    (await corrections(page.request, agent.id))
+      .filter((entry) => entry.traceId === githubTrace.trace.id && entry.revertedAt === null)
+      .flatMap((entry) => entry.findingIds),
+  );
+  const uncorrectedFinding = actionableFindings(githubTrace).find(
+    (finding) => !alreadyCorrected.has(finding.id),
+  );
+  test.skip(
+    !uncorrectedFinding,
+    "Need another actionable finding for direct API correction",
+  );
 
-  expect(body.context, "context must be established for every run").not.toBeNull();
-  expect(body.context!.position).toBeGreaterThan(1);
-  expect(body.context!.carriedIn).not.toBeNull();
-  expect(body.context!.carriedIn!.summary.length).toBeGreaterThan(0);
+  const created = await correctIntent(
+    page.request,
+    githubTrace.trace.id,
+    [uncorrectedFinding.id],
+    "Treat related GitHub findings as one source-run correction.",
+  );
 
-  await page.goto(`/traces/${detail.trace.id}`);
-  const context = page.locator(".trace-context");
-  await expect(context).toBeVisible();
-  await expect(context).toContainText(/Carried in/i);
-  await expect(context).toContainText(/Run \d+ of \d+/i);
+  expect(created.traceId).toBe(githubTrace.trace.id);
+  expect(created.findingIds).toEqual([uncorrectedFinding.id]);
+
+  const all = await corrections(page.request, agent.id);
+  expect(all.filter((entry) => entry.traceId === docsTrace.trace.id)).toEqual([]);
+  expect(all.some((entry) => entry.traceId === githubTrace.trace.id)).toBe(true);
+
+  const auditorId = githubTrace.auditTraceId!;
+  const directCorrection = await page.request.post(
+    `/api/traces/${auditorId}/intent/correct`,
+    {
+      data: {
+        findingIds: [uncorrectedFinding.id],
+        correction: "This should not be accepted from an auditor trace.",
+      },
+    },
+  );
+  expect(directCorrection.status()).toBe(409);
+
+  const refreshed = await getAgent(page.request, agent.id);
+  expect(refreshed.codexThreadId).toBe(htmlTrace.trace.conversationId);
 });

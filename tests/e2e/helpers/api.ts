@@ -46,6 +46,8 @@ export interface TraceRecord {
   agentId: string;
   conversationId: string | null;
   status: "running" | "completed" | "failed" | "cancelled";
+  auditOf: string | null;
+  auditDepth: number;
   prompt: string;
   failingSpanId: string | null;
   failure: RunFailure | null;
@@ -64,7 +66,8 @@ export interface AuditTraceStep {
   traceId: string;
   agentId: string;
   spanId: string | null;
-  type: "warning" | "error";
+  intentId: string;
+  type: "warning" | "suspicion" | "error";
   category: "intent-check" | "security" | "reliability" | "audit-health";
   finding: string;
 }
@@ -95,6 +98,8 @@ export interface TraceDetail {
     extended: string[];
   } | null;
   context: ContextView | null;
+  auditTraceId: string | null;
+  auditChain: { id: string; auditDepth: number }[];
 }
 
 export interface IntentUpdate {
@@ -120,6 +125,17 @@ export interface IntentResponse {
   intent: { objective: string; extended: string[] };
   versions: IntentVersionEntry[];
   intentId: string | null;
+}
+
+export interface IntentCorrection {
+  id: string;
+  agentId: string;
+  traceId: string;
+  findingIds: string[];
+  correction: string;
+  instructionsBefore: string;
+  createdAt: string;
+  revertedAt: string | null;
 }
 
 async function json<T>(response: Awaited<ReturnType<APIRequestContext["get"]>>) {
@@ -203,5 +219,40 @@ export async function getIntent(
 ): Promise<IntentResponse> {
   return json<IntentResponse>(
     await request.get(`/api/agents/${agentId}/intent`),
+  );
+}
+
+export async function corrections(
+  request: APIRequestContext,
+  agentId: string,
+): Promise<IntentCorrection[]> {
+  return (
+    await json<{ corrections: IntentCorrection[] }>(
+      await request.get(`/api/agents/${agentId}/corrections`),
+    )
+  ).corrections;
+}
+
+export async function correctIntent(
+  request: APIRequestContext,
+  traceId: string,
+  findingIds: string[],
+  correction: string,
+): Promise<IntentCorrection> {
+  return (
+    await json<{ correction: IntentCorrection }>(
+      await request.post(`/api/traces/${traceId}/intent/correct`, {
+        data: { findingIds, correction },
+      }),
+    )
+  ).correction;
+}
+
+export async function auditTrace(
+  request: APIRequestContext,
+  traceId: string,
+): Promise<{ traceId: string; auditTraceId: string | null }> {
+  return json<{ traceId: string; auditTraceId: string | null }>(
+    await request.post(`/api/traces/${traceId}/audit`),
   );
 }
