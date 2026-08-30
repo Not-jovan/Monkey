@@ -56,12 +56,24 @@ export async function createAuditMiddleware(input: {
     );
   }
 
+  // One object serving as both, which is the honest shape: a context and the
+  // completion that reads it must reach the same provider on the same
+  // credentials, and this is the only place that knows which that is.
+  const runner = new ArkRunner(
+    input.client,
+    config,
+    VERDICT_MAX_TOKENS,
+    config.auditPromptCache ? config.auditPromptCacheTtl : 0,
+    input.log,
+  );
+
   const auditService = new AuditService({
     traceStore,
     auditStore,
     traceService: input.traceService,
     context: input.contextStore,
-    runner: new ArkRunner(input.client, config, VERDICT_MAX_TOKENS),
+    runner,
+    ...(config.auditPromptCache ? { promptCache: runner } : {}),
     securityModel: config.auditSecurityModel,
     intentModel: config.auditIntentModel,
     networkWhitelist: config.auditNetworkWhitelist,

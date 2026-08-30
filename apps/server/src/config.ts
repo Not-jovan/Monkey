@@ -69,6 +69,20 @@ const envSchema = z.object({
   AUDIT_NETWORK_WHITELIST: z.string().optional(),
   AUDIT_SECURITY_MODEL: z.string().default("gpt-oss-120b-250805"),
   AUDIT_INTENT_MODEL: z.string().default("deepseek-v4-flash-ga-260731"),
+  // Caches the evidence a step's checks share, so only the first of them pays
+  // for it. Off by default: the write and the residency are billed whether or
+  // not the hits materialise, and whether a given endpoint holds a context at
+  // all is an account-level question.
+  AUDIT_PROMPT_CACHE: z.enum(["true", "false"]).default("false"),
+  // Ark's floor. A step's checks finish in seconds, so the cache outlives its
+  // use by an hour no matter what — which is why the residency cost, not the
+  // write, is the thing to watch.
+  AUDIT_PROMPT_CACHE_TTL: z.coerce
+    .number()
+    .int()
+    .min(3_600)
+    .max(604_800)
+    .default(3_600),
   // Override for setups where the Runtime cannot reach the control plane via
   // the derived host (e.g. rootless engines without host-gateway support).
   OTEL_COLLECTOR_URL: z.string().url().optional(),
@@ -134,6 +148,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     auditEnabled: env.AUDIT_ENABLED === "true",
     auditSecurityModel: env.AUDIT_SECURITY_MODEL.trim(),
     auditIntentModel: env.AUDIT_INTENT_MODEL.trim(),
+    auditPromptCache: env.AUDIT_PROMPT_CACHE === "true",
+    auditPromptCacheTtl: env.AUDIT_PROMPT_CACHE_TTL,
     auditNetworkWhitelist:
       env.AUDIT_NETWORK_WHITELIST === undefined
         ? null
