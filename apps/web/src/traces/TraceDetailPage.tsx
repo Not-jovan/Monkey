@@ -1,25 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
-import { api, hasAuthToken, isApiErrorWithStatus, type TraceDetail } from "../api";
-import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
-import { formatDuration, spanDuration } from "./format";
-import { stepContext, stepReturn, stepReturnNote } from "./span-context";
-import { stepHeadline } from "./steps";
-import { TraceCanvas } from "./TraceCanvas";
-import { TraceAuditor } from "./TraceAuditor";
-import { SpanFindings, TraceIntent } from "./TraceIntent";
-import { parseCodexFailure, readCommand } from "./codex-error";
-import { FailureBlock } from "./FailureBlock";
-import { TextBlock } from "./TextBlock";
-import { TraceStepList } from "./TraceStepList";
-import { TraceTimeline } from "./TraceTimeline";
-import { UsageBars } from "./UsageBars";
-import { spanUsage } from "./usage";
+import {
+  api,
+  hasAuthToken,
+  isApiErrorWithStatus,
+  type TraceDetail,
+} from "../api";
+import type { TraceRecord } from "../types";
+import { TraceRunView, type StepView } from "./TraceRunView";
 
-// TraceDetail now comes from the API client, so the response shape is declared
-// once: it carries auditHealth and the carried-in/out context as well.
-type StepView = "graph" | "list" | "timeline";
 type TracePane = "run" | "auditor";
 
 function download(fileName: string, data: unknown) {
@@ -82,96 +72,6 @@ function persistPane(pane: TracePane) {
   }
 }
 
-function SpanDetails({
-  span,
-  findings,
-  trace,
-}: {
-  span: TraceSpan;
-  findings: AuditTraceStep[];
-  trace: TraceRecord;
-}) {
-  const detailOptions = { tracePrompt: trace.prompt, spans: trace.spans };
-  const input = stepContext(span, detailOptions);
-  const output = stepReturn(span, detailOptions);
-  const returnNote = stepReturnNote(span);
-  const usage = spanUsage(span);
-  // A shell script inside the arguments keeps its escaped newlines, so show the
-  // command as real text rather than a one-line JSON blob.
-  const command =
-    typeof span.attributes.arguments === "string"
-      ? readCommand(span.attributes.arguments)
-      : null;
-  // The failure envelope repeats itself and escapes its newlines; parsing it
-  // once replaces both the Output and Error blocks with something diagnosable.
-  const failureSource = output || span.error || "";
-  const failure = failureSource ? parseCodexFailure(failureSource) : null;
-  const hiddenInPanel = new Set([
-    "context",
-    "output",
-    "result",
-    "arguments",
-    "prompt",
-    "inputTokens",
-    "cachedTokens",
-    "outputTokens",
-    "reasoningTokens",
-    "toolTokens",
-  ]);
-  const longText = ["instructions"];
-  const attributeEntries = Object.entries(span.attributes).filter(
-    ([key]) => !hiddenInPanel.has(key),
-  );
-  const duration = formatDuration(
-    span.durationMs ?? spanDuration(span.startedAt, span.endedAt),
-  );
-
-  let errorBlock = null;
-  if (failure) {
-    errorBlock = <FailureBlock failure={failure} raw={failureSource} />;
-  } else if (span.error) {
-    errorBlock = <div className="span-error">{span.error}</div>;
-  }
-
-  let inputBlock = null;
-  if (command) {
-    inputBlock = <TextBlock label="Input" text={command} />;
-  } else if (input) {
-    inputBlock = <TextBlock label="Input" text={input} />;
-  }
-
-  return (
-    <div className="span-panel">
-      <div className="span-panel-head">
-        <strong>{stepHeadline(span)}</strong>
-        <span className="muted-cell">{duration}</span>
-      </div>
-      {errorBlock}
-      {usage && <UsageBars model={trace.model} usage={usage} />}
-      {inputBlock}
-      {!failure && output && (
-        <TextBlock label="Output" text={output} note={returnNote} />
-      )}
-      <div className="span-attributes">
-        {attributeEntries.map(([key, value]) =>
-          longText.includes(key) ? (
-            <TextBlock key={key} label={key} text={String(value)} />
-          ) : (
-            <div className="span-attribute-row" key={key}>
-              <span className="attribute-key">{key}</span>
-              <span>{String(value)}</span>
-            </div>
-          ),
-        )}
-        {attributeEntries.length === 0 && !input && !output && !command && (
-          <span className="muted-cell">No recorded attributes.</span>
-        )}
-      </div>
-      <SpanFindings findings={findings} />
-    </div>
-  );
-}
-
 // Where this trace sits in the stack of audits above the Agent run at the root
 // of it. Rendered only once there is a stack: a run nobody has audited has a
 // chain of one, and saying so would be noise.
@@ -213,13 +113,29 @@ export function auditChainLabel(depth: number) {
   return depth === 0 ? "Agent run" : "Audit";
 }
 
+function tracePollMs(data: TraceDetail | undefined) {
+  if (!data) return 4_000;
+  if (data.trace.status === "running") return 1_200;
+  // Agent runs are judged automatically; keep polling until that pass lands.
+  // An auditor is judged only when asked, so incompleteness is the steady state.
+  if (data.trace.auditOf === null && data.auditComplete === false) return 1_200;
+  return 4_000;
+}
+
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
   const [searchParams] = useSearchParams();
-  const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [runSpanId, setRunSpanId] = useState<string | null>(null);
+  const [auditorSpanId, setAuditorSpanId] = useState<string | null>(null);
   const [view, setView] = useState<StepView>(readStoredView);
   const [pane, setPane] = useState<TracePane>(() =>
-    searchParams.get("pane") === "auditor" ? "auditor" : readStoredPane(),
+    searchParams.get("pane") === "auditor"
+      ? "auditor"
+      : searchParams.get("pane") === "run"
+        ? "run"
+        : searchParams.get("finding")
+          ? "run"
+          : readStoredPane(),
   );
   const focusedFindingId = searchParams.get("finding");
 
@@ -231,46 +147,20 @@ export function TraceDetailPage() {
     queryFn: (): Promise<TraceDetail> => api.trace(traceId),
     enabled: !locked && traceId.length > 0,
     refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
-      query.state.data?.trace.status === "running" ? 1_200 : 4_000,
+      tracePollMs(query.state.data),
   });
 
-  const auditorQuery = useQuery({
-    queryKey: ["audit", traceId],
-    queryFn: () => api.auditor(traceId),
-    enabled: !locked && traceId.length > 0,
-    refetchInterval: () =>
-      detailQuery.data?.trace.status === "running" ||
-      detailQuery.data?.auditComplete === false
-        ? 1_200
-        : 4_000,
+  const auditTraceId = detailQuery.data?.auditTraceId ?? null;
+  const auditorDetailQuery = useQuery({
+    queryKey: ["trace", auditTraceId],
+    queryFn: (): Promise<TraceDetail> => api.trace(auditTraceId!),
+    enabled: !locked && auditTraceId !== null,
+    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
+      tracePollMs(query.state.data),
   });
 
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
-  const findings: AuditTraceStep[] = detailQuery.data?.findings ?? [];
-
-  const agentFindings = findings.filter(
-    (finding) => finding.category !== "audit-health",
-  );
-  const warningsBySpan = new Map<string, number>();
-  for (const finding of agentFindings) {
-    if (!finding.spanId) continue;
-    warningsBySpan.set(
-      finding.spanId,
-      (warningsBySpan.get(finding.spanId) ?? 0) + 1,
-    );
-  }
-  // A suspicion is a question the auditor could not settle, not a warning
-  // against the agent, so it is not in this count.
-  const warningCount = agentFindings.filter(
-    (finding) => finding.type !== "suspicion",
-  ).length;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
-
-  const selectedSpan =
-    trace?.spans.find((span) => span.id === selectedSpanId) ?? null;
-  const selectedFindings = findings.filter(
-    (finding) => finding.spanId === selectedSpanId,
-  );
 
   const chooseView = (next: StepView) => {
     setView(next);
@@ -280,11 +170,6 @@ export function TraceDetailPage() {
   const choosePane = (next: TracePane) => {
     setPane(next);
     persistPane(next);
-  };
-
-  const showStep = (spanId: string) => {
-    setSelectedSpanId(spanId);
-    choosePane("run");
   };
 
   if (locked || detailQuery.error) {
@@ -305,19 +190,6 @@ export function TraceDetailPage() {
         </Link>
       </div>
     );
-  }
-
-  let durationLabel = "—";
-  if (trace) {
-    if (trace.endedAt) {
-      durationLabel = formatDuration(
-        spanDuration(trace.startedAt, trace.endedAt),
-      );
-    } else {
-      durationLabel = formatDuration(
-        Date.now() - new Date(trace.startedAt).getTime(),
-      );
-    }
   }
 
   return (
@@ -363,9 +235,6 @@ export function TraceDetailPage() {
       {trace && (
         <>
           <AuditChain chain={detailQuery.data?.auditChain ?? []} current={traceId} />
-          <p className="trace-instruction" title={trace.prompt}>
-            {trace.prompt}
-          </p>
           <div className="pane-toggle view-toggle" role="tablist" aria-label="Trace view">
             <button
               type="button"
@@ -389,123 +258,38 @@ export function TraceDetailPage() {
               )}
             </button>
           </div>
-          {pane === "run" && (
-            <>
-              <div className="trace-badges">
-                <span className={"trace-status trace-status-" + trace.status}>
-                  {trace.status}
-                </span>
-                {warningCount > 0 && (
-                  <span className="warning-badge">
-                    {warningCount} Warning{warningCount === 1 ? "" : "s"}
-                  </span>
-                )}
-                {!trace.evidenceComplete && (
-                  <span
-                    className="failure-partial"
-                    title="The output cap truncated this run's stream, so some evidence was discarded"
-                  >
-                    partial evidence
-                  </span>
-                )}
-                <span className="trace-duration">{durationLabel}</span>
-              </div>
-              <UsageBars model={trace.model} usage={trace.usage} />
-            </>
-          )}
         </>
       )}
 
-      {pane === "run" && trace && (
-          <TraceIntent intent={detailQuery.data?.intent ?? null} />
-      )}
-
-      {pane === "auditor" && trace && (
-        <TraceAuditor
-          trace={trace}
-          findings={findings}
-          auditHealth={auditHealth}
-          intent={detailQuery.data?.intent ?? null}
-          context={detailQuery.data?.context ?? null}
-          auditorSpans={auditorQuery.data?.spans ?? []}
-          auditTraceId={auditorQuery.data?.auditTraceId ?? null}
-          legacyMetaAudit={auditorQuery.data?.legacyMetaAudit ?? []}
-          legacyMetaAuditedAt={auditorQuery.data?.legacyMetaAuditedAt ?? null}
-          onShowStep={showStep}
+      {pane === "run" && detailQuery.data && (
+        <TraceRunView
+          detail={detailQuery.data}
+          view={view}
+          onViewChange={chooseView}
+          selectedSpanId={runSpanId}
+          onSelectSpan={setRunSpanId}
           focusedFindingId={focusedFindingId}
         />
       )}
 
-      {pane === "run" && trace && (
-        <section className="trace-steps" aria-labelledby="trace-steps-heading">
-          <div className="trace-steps-head">
-            <h2 className="eyebrow" id="trace-steps-heading">
-              Steps
-            </h2>
-            <div className="view-toggle" role="group" aria-label="Step view">
-              <button
-                type="button"
-                className={view === "graph" ? "is-active" : ""}
-                aria-pressed={view === "graph"}
-                onClick={() => chooseView("graph")}
-              >
-                Call Graph
-              </button>
-              <button
-                type="button"
-                className={view === "list" ? "is-active" : ""}
-                aria-pressed={view === "list"}
-                onClick={() => chooseView("list")}
-              >
-                Call List
-              </button>
-              <button
-                type="button"
-                className={view === "timeline" ? "is-active" : ""}
-                aria-pressed={view === "timeline"}
-                onClick={() => chooseView("timeline")}
-              >
-                Timeline
-              </button>
-            </div>
-          </div>
-          {view === "list" && (
-            <TraceStepList
-              spans={trace.spans}
-              selectedId={selectedSpanId}
-              failingSpanId={trace.failingSpanId}
-              warningsBySpan={warningsBySpan}
-              onSelect={setSelectedSpanId}
-            />
-          )}
-          {view === "graph" && (
-            <TraceCanvas
-              spans={trace.spans}
-              selectedId={selectedSpanId}
-              failingSpanId={trace.failingSpanId}
-              warningsBySpan={warningsBySpan}
-              onSelect={setSelectedSpanId}
-            />
-          )}
-          {view === "timeline" && (
-            <TraceTimeline
-              spans={trace.spans}
-              selectedId={selectedSpanId}
-              failingSpanId={trace.failingSpanId}
-              warningsBySpan={warningsBySpan}
-              onSelect={setSelectedSpanId}
-            />
-          )}
-        </section>
-      )}
-
-      {pane === "run" && trace && selectedSpan && (
-        <SpanDetails
-          findings={selectedFindings}
-          span={selectedSpan}
-          trace={trace}
+      {pane === "auditor" && auditorDetailQuery.data && (
+        <TraceRunView
+          detail={auditorDetailQuery.data}
+          view={view}
+          onViewChange={chooseView}
+          selectedSpanId={auditorSpanId}
+          onSelectSpan={setAuditorSpanId}
+          focusedFindingId={focusedFindingId}
         />
       )}
+
+      {pane === "auditor" &&
+        !auditorDetailQuery.data &&
+        (!auditTraceId || auditorDetailQuery.error) && (
+          <p className="muted-cell">
+            The auditor has not recorded any steps yet.
+          </p>
+        )}
     </div>
   );
 }

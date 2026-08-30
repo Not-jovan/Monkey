@@ -197,7 +197,7 @@ export function IntentPanel({ agentId }: { agentId: string }) {
                         to={
                           "/traces/" +
                           change.traceId +
-                          "?pane=auditor" +
+                          "?pane=run" +
                           (change.sourceFindingId
                             ? "&finding=" +
                               encodeURIComponent(change.sourceFindingId)

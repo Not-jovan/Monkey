@@ -3,9 +3,6 @@ import { orderedLaneIds, laneIdForSpan } from "./canvas-layout";
 import { formatDuration } from "./format";
 import { isVisibleStep, sortTime } from "./steps";
 
-// A zero-width bar is unclickable; keep a sliver so short steps still register.
-const MIN_BAR_RATIO = 0.012;
-
 export interface TimelineBar {
   span: TraceSpan;
   laneId: string;
@@ -13,6 +10,8 @@ export interface TimelineBar {
   stack: number;
   left: number;
   width: number;
+  startMs: number;
+  endMs: number;
 }
 
 export interface TimelineLayout {
@@ -63,8 +62,7 @@ export function layoutTimeline(spans: TraceSpan[], nowMs: number) {
   const bars: TimelineBar[] = ranges.map(({ span, start, end }) => {
     const laneId = laneIdForSpan(span, spanById);
     const left = (start - startedAt) / durationMs;
-    const rawWidth = (end - start) / durationMs;
-    const width = Math.min(Math.max(rawWidth, MIN_BAR_RATIO), 1 - left);
+    const width = Math.min((end - start) / durationMs, 1 - left);
     return {
       span,
       laneId,
@@ -72,6 +70,8 @@ export function layoutTimeline(spans: TraceSpan[], nowMs: number) {
       stack: 0,
       left,
       width,
+      startMs: start,
+      endMs: end,
     };
   });
 
@@ -88,6 +88,8 @@ export function layoutTimeline(spans: TraceSpan[], nowMs: number) {
   };
 }
 
+// Stack only when wall-clock ranges overlap. Visual min-width is a canvas
+// concern and must not invent concurrency for sequential steps.
 function packStacks(bars: TimelineBar[]) {
   const stacksByLane = new Map<string, number>();
   const byLane = new Map<string, TimelineBar[]>();
@@ -97,17 +99,16 @@ function packStacks(bars: TimelineBar[]) {
     byLane.set(bar.laneId, list);
   }
   for (const [laneId, list] of byLane) {
-    list.sort((left, right) => left.left - right.left);
+    list.sort((left, right) => left.startMs - right.startMs);
     const rowEnds: number[] = [];
     for (const bar of list) {
-      const right = bar.left + bar.width;
       let stack = 0;
-      while (stack < rowEnds.length && rowEnds[stack]! > bar.left + 0.001) {
+      while (stack < rowEnds.length && rowEnds[stack]! > bar.startMs) {
         stack += 1;
       }
       bar.stack = stack;
-      if (stack === rowEnds.length) rowEnds.push(right);
-      else rowEnds[stack] = right;
+      if (stack === rowEnds.length) rowEnds.push(bar.endMs);
+      else rowEnds[stack] = bar.endMs;
     }
     stacksByLane.set(laneId, Math.max(1, rowEnds.length));
   }
@@ -117,4 +118,62 @@ function packStacks(bars: TimelineBar[]) {
 export function timelineTickLabels(layout: TimelineLayout) {
   if (layout.durationMs <= 0) return ["0", formatDuration(0)];
   return ["0", formatDuration(layout.durationMs / 2), formatDuration(layout.durationMs)];
+}
+
+export const MIN_TIMELINE_ZOOM = 1;
+export const MAX_TIMELINE_ZOOM = 48;
+
+export function timelineContentWidth(viewWidth: number, zoom: number) {
+  return Math.max(viewWidth, viewWidth * zoom);
+}
+
+export function clampTimelinePan(
+  panX: number,
+  viewWidth: number,
+  contentWidth: number,
+) {
+  const minX = Math.min(0, viewWidth - contentWidth);
+  return Math.max(minX, Math.min(0, panX));
+}
+
+export function zoomTimeline(input: {
+  zoom: number;
+  panX: number;
+  viewWidth: number;
+  pointerX: number;
+  factor: number;
+}) {
+  const nextZoom = Math.min(
+    MAX_TIMELINE_ZOOM,
+    Math.max(MIN_TIMELINE_ZOOM, input.zoom * input.factor),
+  );
+  const content = timelineContentWidth(input.viewWidth, input.zoom);
+  const nextContent = timelineContentWidth(input.viewWidth, nextZoom);
+  const ratio = content <= 0 ? 0 : (input.pointerX - input.panX) / content;
+  return {
+    zoom: nextZoom,
+    panX: clampTimelinePan(
+      input.pointerX - ratio * nextContent,
+      input.viewWidth,
+      nextContent,
+    ),
+  };
+}
+
+export function visibleTimelineTicks(
+  layout: TimelineLayout,
+  panX: number,
+  viewWidth: number,
+  contentWidth: number,
+) {
+  if (layout.durationMs <= 0 || contentWidth <= 0) {
+    return timelineTickLabels(layout);
+  }
+  const startOffset = (-panX / contentWidth) * layout.durationMs;
+  const endOffset = ((-panX + viewWidth) / contentWidth) * layout.durationMs;
+  return [
+    formatDuration(Math.max(0, startOffset)),
+    formatDuration(Math.max(0, (startOffset + endOffset) / 2)),
+    formatDuration(Math.max(0, endOffset)),
+  ];
 }

@@ -206,8 +206,9 @@ test("A human can turn Trace 4 evidence into a reversible correction", async () 
 
   const correction =
     "Do not contact hosts outside the configured network whitelist.";
-  await page.goto(`/traces/${detail.trace.id}`);
-  await page.getByRole("tab", { name: /View Auditor/ }).click();
+  await page.goto(
+    `/traces/${detail.trace.id}?pane=run&finding=${encodeURIComponent(finding!.id)}`,
+  );
   const findingRow = page.locator(
     `.findings-table tbody tr[data-finding-id="${finding!.id}"]`,
   );
