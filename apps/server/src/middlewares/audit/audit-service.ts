@@ -108,10 +108,6 @@ const MAX_TRACED_STEPS = 40;
 // backlog cannot turn a restart into hundreds of model calls.
 const MAX_RESUMED_RUN_AUDITS = 20;
 
-
-// A run whose auditor fell back to the secondary model is not the same as one
-// whose auditor worked, and neither is a defect in the agent. Recorded so the
-// UI can say which of the three happened.
 // Said the same way whether the step had a verdict to weigh or not, so one
 // masking failure does not read as two different problems.
 function leakedCredentialFinding(span: TraceSpan) {
@@ -123,6 +119,9 @@ function leakedCredentialFinding(span: TraceSpan) {
   );
 }
 
+// A run whose auditor fell back to the secondary model is not the same as one
+// whose auditor worked, and neither is a defect in the agent. Recorded so the
+// UI can say which of the three happened.
 function healthOf(status: "completed" | "degraded" | "failed"): AuditHealth {
   if (status === "completed") return "ok";
   return status;
