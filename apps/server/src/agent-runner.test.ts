@@ -31,10 +31,15 @@ function stubRuntime(lines: unknown[]): RuntimeDefinition {
     homeEnvVar: "STUB_HOME",
     buildArgs: () => [
       "-e",
-      lines.map((line) => "console.log(" + JSON.stringify(JSON.stringify(line)) + ")").join(";"),
+      lines
+        .map((line) => "console.log(JSON.stringify(" + JSON.stringify(line) + "))")
+        .join(";"),
     ],
     parseEventLine: (line: string, parsed: ParsedEvents) => {
-      const event = JSON.parse(line) as Record<string, unknown>;
+      const raw = JSON.parse(line) as unknown;
+      const event = (
+        typeof raw === "string" ? JSON.parse(raw) : raw
+      ) as Record<string, unknown>;
       if (typeof event.session === "string") parsed.threadId = event.session;
       if (typeof event.model === "string") parsed.model = event.model;
       if (typeof event.message === "string") parsed.messages.push(event.message);

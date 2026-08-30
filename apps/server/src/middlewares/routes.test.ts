@@ -775,6 +775,7 @@ describe("Glassbox routes", () => {
 // run — so a correction is an instructions edit plus a record of why.
 describe("intent correction routes", () => {
   const FINDING_ID = "finding-1";
+  const SECOND_FINDING_ID = "finding-2";
 
   async function makeCorrectable() {
     const context = await makeApp();
@@ -798,6 +799,16 @@ describe("intent correction routes", () => {
           type: "warning" as const,
           category: "security" as const,
           finding: "Read a .env file",
+        },
+        {
+          id: SECOND_FINDING_ID,
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          intentId: "",
+          type: "warning" as const,
+          category: "security" as const,
+          finding: "Deleted a file without asking",
         },
       ],
       "",
@@ -848,7 +859,7 @@ describe("intent correction routes", () => {
     auditStore.recordSpan(trace, "span-x", [], "", "ok");
 
     const response = await correct(app, {
-      findingIds: [FINDING_ID],
+      findingIds: [FINDING_ID, SECOND_FINDING_ID],
       correction: "Ask before deleting files.",
     });
 
@@ -856,7 +867,7 @@ describe("intent correction routes", () => {
     expect(
       response.json<{ correction: { findingIds: string[] } }>().correction
         .findingIds,
-    ).toEqual([FINDING_ID]);
+    ).toEqual([FINDING_ID, SECOND_FINDING_ID]);
   });
 
   it("refuses a finding that is not on this run", async () => {
@@ -872,6 +883,63 @@ describe("intent correction routes", () => {
     expect(service.getAgent(AGENT_ID).instructions).toBe(
       "Build a todo list web application",
     );
+  });
+
+  it("refuses to correct the same finding twice while the first correction is active", async () => {
+    const { app, service } = await makeCorrectable();
+
+    await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Ask before reading env files.",
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application\nDo not read .env files.",
+    );
+  });
+
+  it("allows a finding to be corrected again after its earlier correction is undone", async () => {
+    const { app, service } = await makeCorrectable();
+    const created = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+    const { correction } = created.json<{ correction: { id: string } }>();
+    await app.inject({
+      method: "POST",
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { correctionId: correction.id },
+    });
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Ask before reading env files.",
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application\nAsk before reading env files.",
+    );
+  });
+
+  it("refuses to correct an auditor trace", async () => {
+    const { app, traceStore } = await makeCorrectable();
+    traceStore.updateTrace(RUN_ID, (trace) => {
+      trace.auditOf = EARLIER_RUN_ID;
+      trace.auditDepth = 1;
+    });
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(409);
   });
 
   it("refuses to correct a run that is still going", async () => {
@@ -941,7 +1009,10 @@ describe("intent correction routes", () => {
       findingIds: [FINDING_ID],
       correction: "Do not read .env files.",
     });
-    await correct(app, { findingIds: [FINDING_ID], correction: "Ask before rm." });
+    await correct(app, {
+      findingIds: [SECOND_FINDING_ID],
+      correction: "Ask before rm.",
+    });
     const { correction } = first.json<{ correction: { id: string } }>();
 
     const response = await app.inject({

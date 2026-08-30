@@ -82,4 +82,21 @@ describe("correctionsForTrace", () => {
     expect(correctionsForTrace([first, second], "trace-1")).toEqual([first]);
     expect(correctionsForTrace([first, second], "trace-2")).toEqual([second]);
   });
+
+  it("does not let another run's correction mark this run's findings as corrected", () => {
+    const otherRunCorrection = correction({
+      traceId: "trace-2",
+      findingIds: ["finding-on-this-run"],
+    });
+
+    const thisRunCorrections = correctionsForTrace(
+      [otherRunCorrection],
+      "trace-1",
+    );
+
+    expect(thisRunCorrections).toEqual([]);
+    expect(correctedFindingIds(thisRunCorrections).has("finding-on-this-run")).toBe(
+      false,
+    );
+  });
 });
