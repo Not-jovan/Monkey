@@ -1,9 +1,9 @@
 import type { TraceSpan } from "../types";
 import {
-  isAuditorStepCheck,
-  isSubagentBoundary,
   isSubagentTask,
   isVisibleStep,
+  laneIdForSpan,
+  parseSubagentIndex,
   previewLabel,
   sortTime,
   subagentCallLabel,
@@ -49,92 +49,6 @@ export interface CanvasLayout {
   contentWidth: number;
   height: number;
   maxRow: number;
-}
-
-export function parseSubagentIndex(span: TraceSpan) {
-  const raw = span.attributes.subagentIndex;
-  if (typeof raw === "number") return raw;
-  if (typeof raw === "string") {
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isNaN(parsed)) return parsed;
-  }
-  return null;
-}
-
-function nearestBoundary(
-  startId: string | null,
-  spanById: Map<string, TraceSpan>,
-) {
-  let current = spanById.get(startId ?? "");
-  const seen = new Set<string>();
-  while (current && !seen.has(current.id)) {
-    seen.add(current.id);
-    if (isSubagentBoundary(current)) return current;
-    current = spanById.get(current.parentId ?? "");
-  }
-  return null;
-}
-
-function callerLaneId(span: TraceSpan, spanById: Map<string, TraceSpan>) {
-  const owner = nearestBoundary(span.parentId, spanById);
-  if (owner) return owner.id;
-  return "root";
-}
-
-export function laneIdForSpan(
-  span: TraceSpan,
-  spanById: Map<string, TraceSpan>,
-) {
-  if (span.actor === "user") return "user";
-
-  const stamped = span.attributes.laneId;
-  if (typeof stamped === "string" && stamped.length > 0) {
-    if (isAuditorStepCheck(span)) {
-      const parent = spanById.get(span.parentId ?? "");
-      if (parent && isSubagentTask(parent) && siblingCheckCount(parent, spanById) > 1) {
-        return auditorCheckLaneId(span, parent);
-      }
-    }
-    return stamped;
-  }
-
-  if (span.name === "subagent.result") {
-    const index = parseSubagentIndex(span);
-    return "result:" + (span.parentId ?? span.id) + ":" + (index ?? span.id);
-  }
-
-  if (isSubagentTask(span)) {
-    return callerLaneId(span, spanById);
-  }
-
-  const owner = nearestBoundary(span.parentId, spanById);
-  if (owner) return owner.id;
-  return "root";
-}
-
-function siblingCheckCount(
-  spawn: TraceSpan,
-  spanById: Map<string, TraceSpan>,
-) {
-  let count = 0;
-  for (const other of spanById.values()) {
-    if (other.parentId === spawn.id && isAuditorStepCheck(other)) count += 1;
-  }
-  return count;
-}
-
-function auditorCheckLaneId(span: TraceSpan, spawn: TraceSpan) {
-  const target = span.attributes.targetSpanId;
-  const type = spawn.attributes.subagentType;
-  if (
-    typeof target === "string" &&
-    target.length > 0 &&
-    typeof type === "string" &&
-    type.length > 0
-  ) {
-    return "audit:" + target + ":" + type;
-  }
-  return span.id;
 }
 
 function childLaneLabel(child: TraceSpan, spawn: TraceSpan) {

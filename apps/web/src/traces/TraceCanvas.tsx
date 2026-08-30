@@ -7,12 +7,12 @@ import {
   NODE_HEIGHT,
   SLOT_WIDTH,
   layoutSwimlanes,
-  parseSubagentIndex,
   type EdgeKind,
 } from "./canvas-layout";
 import {
   isErrorStep,
   isSubagentTask,
+  parseSubagentIndex,
   previewLabel,
   subagentCallLabel,
   subagentResultHeadline,

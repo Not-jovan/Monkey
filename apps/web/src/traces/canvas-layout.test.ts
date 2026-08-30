@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { TraceSpan } from "../types";
-import { laneIdForSpan, layoutSwimlanes, orderedLaneIds } from "./canvas-layout";
+import { layoutSwimlanes, orderedLaneIds } from "./canvas-layout";
+import { laneIdForSpan } from "./steps";
 
 function span(overrides: Partial<TraceSpan> & Pick<TraceSpan, "id" | "name">) {
   return {
