@@ -161,6 +161,48 @@ export class AgentService {
     return updated;
   }
 
+  // Adds a line to an Agent's instructions and reports what they were before.
+  //
+  // Read and write happen inside one mutate rather than through getAgent plus
+  // updateAgent, because the caller needs the prior text to be exactly what
+  // this edit replaced — an undo built on a value read a moment earlier would
+  // restore a spec that never existed if anything else edited in between.
+  //
+  // Everything else is updateAgent's: the busy guard, the serialised write,
+  // and the workspace copy the runtime actually reads.
+  async appendInstruction(
+    id: string,
+    line: string,
+  ): Promise<{ agent: Agent; instructionsBefore: string }> {
+    const current = this.getAgent(id);
+    if (current.status === "busy") {
+      throw new HttpError(409, "Stop the active run before editing this Agent");
+    }
+    let instructionsBefore = "";
+    const updated = await this.store.mutate((database) => {
+      const agent = database.agents.find((item) => item.id === id);
+      if (!agent) {
+        throw new HttpError(404, "Agent not found");
+      }
+      if (agent.status === "busy") {
+        throw new HttpError(
+          409,
+          "Stop the active run before editing this Agent",
+        );
+      }
+      instructionsBefore = agent.instructions;
+      const addition = line.trim();
+      agent.instructions = agent.instructions.trim()
+        ? agent.instructions.trim() + "\n" + addition
+        : addition;
+      agent.lastError = null;
+      agent.updatedAt = now();
+      return structuredClone(agent);
+    });
+    await this.workspaces.writeInstructions(updated);
+    return { agent: updated, instructionsBefore };
+  }
+
   async deleteAgent(id: string): Promise<{ archivedWorkspace: string }> {
     const agent = this.getAgent(id);
     await this.cancelExecution(id);

@@ -5,6 +5,7 @@ import type {
   AuditorTrace,
   AuditTraceStep,
   ContextView,
+  IntentCorrection,
   IntentState,
   IntentVersionEntry,
   Message,
@@ -168,6 +169,24 @@ export const api = {
       { method: "POST" },
     ),
   auditArchiveUrl: (id: string) => "/api/audits/" + id + "/archive",
+  // Turns findings into a constraint on the Agent. Several at once by design:
+  // findings that share a cause read as one rule, not as near-duplicates.
+  correctIntent: (traceId: string, findingIds: string[], correction: string) =>
+    request<{ correction: IntentCorrection }>(
+      "/api/traces/" + traceId + "/intent/correct",
+      { method: "POST", body: JSON.stringify({ findingIds, correction }) },
+    ),
+  // Undo, and only for the newest correction still in force: what it restores
+  // is the spec as it stood immediately before that one edit.
+  revertCorrection: (agentId: string, correctionId: string) =>
+    request<{ correction: IntentCorrection; instructions: string }>(
+      "/api/agents/" + agentId + "/intent/revert",
+      { method: "POST", body: JSON.stringify({ correctionId }) },
+    ),
+  corrections: (agentId: string) =>
+    request<{ corrections: IntentCorrection[] }>(
+      "/api/agents/" + agentId + "/corrections",
+    ),
 };
 
 export type { RunFailure };

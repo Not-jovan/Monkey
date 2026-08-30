@@ -273,3 +273,18 @@ export interface SystemInfo {
   containerEngine: string | null;
   runtime: string;
 }
+
+// An operator's answer to what an audit found: a constraint added to the
+// Agent's spec, and the evidence they were reading when they added it. The
+// spec itself is the Agent's instructions — this is the record of the change,
+// which is also what makes it undoable.
+export interface IntentCorrection {
+  id: string;
+  agentId: string;
+  traceId: string;
+  findingIds: string[];
+  correction: string;
+  instructionsBefore: string;
+  createdAt: string;
+  revertedAt: string | null;
+}

@@ -106,6 +106,74 @@ describe("Agent lifecycle", () => {
     expect(service.listAgents()).toHaveLength(0);
   });
 
+  // Human intent correction adds a constraint to the Agent's spec, and the
+  // spec is the instructions. Both halves matter: the line lands, and the
+  // caller learns exactly what it replaced so the edit can be undone.
+  it("appends an instruction and reports what it replaced", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({
+      name: "Builder",
+      instructions: "Build a todo list.",
+    });
+
+    const first = await service.appendInstruction(
+      agent.id,
+      "Do not read .env files.",
+    );
+
+    expect(first.instructionsBefore).toBe("Build a todo list.");
+    expect(first.agent.instructions).toBe(
+      "Build a todo list.\nDo not read .env files.",
+    );
+
+    // The second append replaces what the first produced, which is what an
+    // undo of it has to restore.
+    const second = await service.appendInstruction(agent.id, "Ask before rm.");
+    expect(second.instructionsBefore).toBe(
+      "Build a todo list.\nDo not read .env files.",
+    );
+    expect(service.getAgent(agent.id).instructions).toBe(
+      "Build a todo list.\nDo not read .env files.\nAsk before rm.",
+    );
+  });
+
+  it("appends to an Agent that started with no instructions", async () => {
+    const service = await makeService();
+    const agent = await service.createAgent({ name: "Blank" });
+
+    const result = await service.appendInstruction(agent.id, "Be careful.");
+
+    expect(result.instructionsBefore).toBe("");
+    expect(result.agent.instructions).toBe("Be careful.");
+  });
+
+  // The same guard updateAgent enforces: a spec must not move under a run
+  // that is being judged against it.
+  it("refuses to append while a run is active", async () => {
+    let finish!: (result: RunnerResult) => void;
+    const pending = new Promise<RunnerResult>((resolve) => {
+      finish = resolve;
+    });
+    const service = await makeService({
+      run: () => pending,
+      cancel: async () => false,
+      isAvailable: async () => true,
+    });
+    const agent = await service.createAgent({
+      name: "Busy",
+      instructions: "Build a todo list.",
+    });
+    const { run } = await service.sendMessage(agent.id, "take your time");
+
+    await expect(
+      service.appendInstruction(agent.id, "Do not read .env files."),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(service.getAgent(agent.id).instructions).toBe("Build a todo list.");
+
+    finish({ output: "done", threadId: "thread", usage: null, model: null });
+    await expect.poll(() => service.getRun(run.id).status).toBe("completed");
+  });
+
   it("persists a playground conversation", async () => {
     const service = await makeService();
     const agent = await service.createAgent({ name: "Coder" });

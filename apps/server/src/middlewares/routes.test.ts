@@ -1,6 +1,7 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { LightMyRequestResponse } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentService } from "../agent-service.js";
 import { createApp } from "../app.js";
@@ -10,6 +11,7 @@ import { codexRuntime } from "../runtimes/codex.js";
 import { createAuditMiddleware } from "./audit/index.js";
 import type { AuditStore } from "./audit/audit-store.js";
 import { createContextMiddleware } from "./context/index.js";
+import { createIntentMiddleware } from "./intent/index.js";
 import { createTraceMiddleware, type TraceService } from "./trace/index.js";
 import type { TraceStore } from "./trace/trace-store.js";
 import { emptyUsage } from "./trace/trace-model.js";
@@ -31,14 +33,33 @@ afterEach(async () => {
 
 async function makeApp(environment: Record<string, string> = {}) {
   const agents = new Set([AGENT_ID]);
+  // The spec lives on the Agent, so a correction is an instructions edit. The
+  // stub keeps that state for real rather than swallowing it: these routes are
+  // only worth testing if the edit is observable afterwards.
+  const instructions = new Map<string, string>([
+    [AGENT_ID, "Build a todo list web application"],
+  ]);
   const service = {
     listAgents: () => [],
     getAgent: (id: string) => {
       if (!agents.has(id)) throw new HttpError(404, "Agent not found");
+      return { id, instructions: instructions.get(id) ?? "" };
+    },
+    appendInstruction: async (id: string, line: string) => {
+      if (!agents.has(id)) throw new HttpError(404, "Agent not found");
+      const before = instructions.get(id) ?? "";
+      instructions.set(id, before ? before + "\n" + line.trim() : line.trim());
       return {
-        id,
-        instructions: "Build a todo list web application",
+        agent: { id, instructions: instructions.get(id) },
+        instructionsBefore: before,
       };
+    },
+    updateAgent: async (id: string, input: { instructions?: string }) => {
+      if (!agents.has(id)) throw new HttpError(404, "Agent not found");
+      if (input.instructions !== undefined) {
+        instructions.set(id, input.instructions);
+      }
+      return { id, instructions: instructions.get(id) };
     },
     systemInfo: async () => ({}),
   } as unknown as AgentService;
@@ -98,21 +119,26 @@ async function makeApp(environment: Record<string, string> = {}) {
     await rm(directory, { recursive: true, force: true, maxRetries: 5 });
   });
 
+  const intent = await createIntentMiddleware({ config, onStoreError });
   const app = await createApp(config, service, {
     traceStore: trace.traceStore,
     traceService: trace.traceService,
     auditStore: audit.auditStore,
     auditMemory: audit.auditMemory,
     contextService: context.contextService,
+    correctionStore: intent.correctionStore,
     collectorToken: "collector-token-1",
   });
   return {
     app,
+    service,
     traceStore: trace.traceStore,
     traceService: trace.traceService,
     auditStore: audit.auditStore,
     auditMemory: audit.auditMemory,
     contextStore: context.contextStore,
+    correctionStore: intent.correctionStore,
+    auditDirectory: path.join(directory, "audits"),
   };
 }
 
@@ -486,12 +512,14 @@ describe("Glassbox routes", () => {
     expect(body).not.toHaveProperty("pending");
     expect(body).not.toHaveProperty("requiresConfirmation");
 
-    const gone = await app.inject({
+    // Undo names a correction, not an intent version: the versions above are
+    // derived from runs and were never something an operator authored.
+    const unknown = await app.inject({
       method: "POST",
       url: "/api/agents/" + AGENT_ID + "/intent/revert",
-      payload: { intentId: RUN_ID },
+      payload: { correctionId: "never-made" },
     });
-    expect(gone.statusCode).toBe(404);
+    expect(unknown.statusCode).toBe(404);
   });
 
   it("includes the derived intent on a trace", async () => {
@@ -739,5 +767,290 @@ describe("Glassbox routes", () => {
     }>();
     expect(body.traces[0]?.warningCount).toBe(1);
     expect(body.traces[0]?.suspicionCount).toBe(2);
+  });
+});
+
+// Turning an audit finding into a constraint on the Agent. The spec is the
+// Agent's instructions — the auditor's reducer rebases onto them on the next
+// run — so a correction is an instructions edit plus a record of why.
+describe("intent correction routes", () => {
+  const FINDING_ID = "finding-1";
+
+  async function makeCorrectable() {
+    const context = await makeApp();
+    cleanups.push(async () => {
+      await context.app.close();
+    });
+    const trace = createCompletedTrace(
+      context.traceStore,
+      RUN_ID,
+      "2026-08-30T00:00:00.000Z",
+    );
+    context.auditStore.recordRun(
+      trace,
+      [
+        {
+          id: FINDING_ID,
+          traceId: RUN_ID,
+          agentId: AGENT_ID,
+          spanId: null,
+          intentId: "",
+          type: "warning" as const,
+          category: "security" as const,
+          finding: "Read a .env file",
+        },
+      ],
+      "",
+      "",
+      "ok",
+    );
+    return context;
+  }
+
+  // `inject` types its no-callback overload as a chain, which infers awkwardly
+  // through a helper. Every call site wants the settled response.
+  async function correct(
+    app: Awaited<ReturnType<typeof makeApp>>["app"],
+    payload: { findingIds: string[]; correction: string },
+  ): Promise<LightMyRequestResponse> {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/traces/" + RUN_ID + "/intent/correct",
+      payload,
+    });
+    return response as unknown as LightMyRequestResponse;
+  }
+
+  it("adds the correction to the Agent's instructions and records the evidence", async () => {
+    const { app, service, correctionStore } = await makeCorrectable();
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(201);
+    const { correction } = response.json<{ correction: { id: string; findingIds: string[]; instructionsBefore: string } }>();
+    expect(correction.findingIds).toEqual([FINDING_ID]);
+    expect(correction.instructionsBefore).toBe("Build a todo list web application");
+    // The spec actually moved, which is the whole point.
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application\nDo not read .env files.",
+    );
+    expect(correctionStore.list(AGENT_ID).map((entry) => entry.id)).toEqual([
+      correction.id,
+    ]);
+  });
+
+  it("takes several findings at once", async () => {
+    const { app, auditStore, traceStore } = await makeCorrectable();
+    const trace = traceStore.get(RUN_ID)!;
+    auditStore.recordSpan(trace, "span-x", [], "", "ok");
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Ask before deleting files.",
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(
+      response.json<{ correction: { findingIds: string[] } }>().correction
+        .findingIds,
+    ).toEqual([FINDING_ID]);
+  });
+
+  it("refuses a finding that is not on this run", async () => {
+    const { app, service } = await makeCorrectable();
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID, "finding-from-elsewhere"],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(404);
+    // Nothing partially applied: the instructions are untouched.
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application",
+    );
+  });
+
+  it("refuses to correct a run that is still going", async () => {
+    const { app, traceStore } = await makeCorrectable();
+    traceStore.updateTrace(RUN_ID, (trace) => {
+      trace.status = "running";
+    });
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(409);
+  });
+
+  it("refuses to correct before the audit has finished", async () => {
+    const context = await makeApp();
+    cleanups.push(async () => {
+      await context.app.close();
+    });
+    createCompletedTrace(context.traceStore, RUN_ID, "2026-08-30T00:00:00.000Z");
+
+    const response = await correct(context.app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(409);
+  });
+
+  it("undoes the newest correction and restores what it replaced", async () => {
+    const { app, service } = await makeCorrectable();
+    const created = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+    const { correction } = created.json<{ correction: { id: string } }>();
+
+    const undone = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { correctionId: correction.id },
+    });
+
+    expect(undone.statusCode).toBe(201);
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application",
+    );
+    // The record survives the undo; history should not claim it never happened.
+    const listed = await app.inject({
+      method: "GET",
+      url: "/api/agents/" + AGENT_ID + "/corrections",
+    });
+    const { corrections } = listed.json<{
+      corrections: { id: string; revertedAt: string | null }[];
+    }>();
+    expect(corrections).toHaveLength(1);
+    expect(corrections[0]?.revertedAt).not.toBeNull();
+  });
+
+  // Undo restores the spec as it was immediately before one edit, so letting
+  // an older one go first would silently discard the corrections after it.
+  it("refuses to undo anything but the newest correction", async () => {
+    const { app } = await makeCorrectable();
+    const first = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+    await correct(app, { findingIds: [FINDING_ID], correction: "Ask before rm." });
+    const { correction } = first.json<{ correction: { id: string } }>();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/agents/" + AGENT_ID + "/intent/revert",
+      payload: { correctionId: correction.id },
+    });
+
+    expect(response.statusCode).toBe(409);
+  });
+
+  // A correction whose record could not be written is the worse of the two
+  // failures: the Agent carries a rule nobody can see or undo.
+  it("puts the spec back when the correction cannot be recorded", async () => {
+    const { app, service, correctionStore } = await makeCorrectable();
+    correctionStore.append = async () => {
+      throw new Error("disk full");
+    };
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Build a todo list web application",
+    );
+  });
+
+  // Restoring a snapshot would discard whatever moved the spec in between, so
+  // the undo fires only while the spec is still exactly what this edit made it.
+  it("leaves the spec alone if something else changed it first", async () => {
+    const { app, service, correctionStore } = await makeCorrectable();
+    correctionStore.append = async () => {
+      await service.updateAgent(AGENT_ID, {
+        instructions: "Someone else wrote this",
+      });
+      throw new Error("disk full");
+    };
+
+    const response = await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(service.getAgent(AGENT_ID).instructions).toBe(
+      "Someone else wrote this",
+    );
+  });
+
+  // The two properties this design exists to guarantee. If either fails, the
+  // correction path has reached into a subsystem it was built not to touch.
+  it("never writes the audit store", async () => {
+    const { app, auditStore, auditDirectory } = await makeCorrectable();
+    // The store persists asynchronously, so settle the setup's own write
+    // before snapshotting or the comparison measures that instead.
+    await auditStore.flush();
+    const before = await readdir(auditDirectory).then((files) =>
+      Promise.all(
+        files.sort().map(async (file) => [
+          file,
+          await readFile(path.join(auditDirectory, file), "utf8"),
+        ]),
+      ),
+    );
+
+    await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    await auditStore.flush();
+    const after = await readdir(auditDirectory).then((files) =>
+      Promise.all(
+        files.sort().map(async (file) => [
+          file,
+          await readFile(path.join(auditDirectory, file), "utf8"),
+        ]),
+      ),
+    );
+    expect(after).toEqual(before);
+  });
+
+  // The derived history is a projection of what the auditor concluded per run.
+  // A correction changes the spec going forward; it must not rewrite the record
+  // of what earlier runs were judged against.
+  it("leaves the derived intent history untouched", async () => {
+    const { app, auditStore, traceStore } = await makeCorrectable();
+    pinDerivedIntent(auditStore, traceStore.get(RUN_ID)!, "count files", [
+      "Stay in the workspace.",
+    ]);
+    const read = async () => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/agents/" + AGENT_ID + "/intent",
+      });
+      return response.json<{ versions: unknown[] }>();
+    };
+    const before = await read();
+
+    await correct(app, {
+      findingIds: [FINDING_ID],
+      correction: "Do not read .env files.",
+    });
+
+    const after = await read();
+    expect(after.versions).toEqual(before.versions);
+    expect(after).toEqual(before);
   });
 });

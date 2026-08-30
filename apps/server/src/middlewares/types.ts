@@ -2,6 +2,7 @@ import type { AuditMemory } from "./audit/audit-memory.js";
 import type { AuditService } from "./audit/audit-service.js";
 import type { AuditStore } from "./audit/audit-store.js";
 import type { ContextService } from "./context/context-service.js";
+import type { IntentCorrectionStore } from "./intent/correction-store.js";
 import type { TraceService } from "./trace/trace-service.js";
 import type { TraceStore } from "./trace/trace-store.js";
 
@@ -19,5 +20,10 @@ export interface MiddlewareDeps {
   // deployment without auditing still serves traces.
   auditService?: AuditService;
   auditMemory?: AuditMemory;
+  // Where an operator's corrections to an Agent's spec are recorded. Optional
+  // so a deployment that only reads traces still serves them; without it the
+  // correction routes report that correcting is unavailable rather than
+  // applying an edit nothing would remember.
+  correctionStore?: IntentCorrectionStore;
   collectorToken: string;
 }

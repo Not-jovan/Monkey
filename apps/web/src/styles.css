@@ -2611,3 +2611,84 @@ textarea:focus {
   font-weight: 600;
 }
 
+
+/* Turning findings into a rule the Agent is told. Sits below the steps: the
+   evidence is read first, the correction written second. */
+.trace-correction {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+}
+
+.correction-findings,
+.correction-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.correction-finding {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+}
+
+/* Without this the checkbox takes a flex share and stretches across the row,
+   pushing the finding it belongs to off to the right. */
+.correction-finding input[type="checkbox"] {
+  flex: none;
+  width: auto;
+  margin: 0;
+}
+
+/* Grow from the text's own width rather than from zero: a zero basis collapses
+   the finding to nothing when the row is only as wide as its contents. */
+.correction-finding .finding-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.correction-compose {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.correction-compose textarea {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 9px 12px;
+  font: inherit;
+  resize: vertical;
+}
+
+.correction-history li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+/* Kept visible rather than removed: the history should not claim the operator
+   never made the call. */
+.correction-undone .finding-copy {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+.correction-mark {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}

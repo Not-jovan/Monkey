@@ -9,6 +9,7 @@ import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { stepHeadline } from "./steps";
 import { TextBlock } from "./TextBlock";
 import { TraceCanvas } from "./TraceCanvas";
+import { TraceCorrection } from "./TraceCorrection";
 import { SpanFindings, TraceIntent } from "./TraceIntent";
 import { TraceStepList } from "./TraceStepList";
 import { TraceTimeline } from "./TraceTimeline";
@@ -278,6 +279,17 @@ export function TraceRunView({
           trace={trace}
           includeAuditHealth={includeAuditHealth}
           focusedFindingId={focusedFindingId}
+        />
+      )}
+
+      {/* Agent runs only. An auditor's findings are claims about the auditor,
+          and correcting from them would edit the audited Agent's spec using
+          evidence that was never about it. */}
+      {!isAuditor && (
+        <TraceCorrection
+          trace={trace}
+          findings={findings}
+          correctable={trace.status !== "running" && detail.auditComplete}
         />
       )}
     </>

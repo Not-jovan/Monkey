@@ -7,6 +7,7 @@ import { isArkConfigured, loadConfig } from "./config.js";
 import {
   createAuditMiddleware,
   createContextMiddleware,
+  createIntentMiddleware,
   createTraceMiddleware,
 } from "./middlewares/index.js";
 import { createRunner } from "./runner-factory.js";
@@ -51,6 +52,9 @@ const audit = await createAuditMiddleware({
   log,
   warn: (message) => console.warn(message),
 });
+// No dependency on the others: an operator's corrections are a record of what
+// they changed, not an input to auditing.
+const intent = await createIntentMiddleware({ config, onStoreError });
 
 const service = new AgentService(
   config,
@@ -70,6 +74,7 @@ const app = await createApp(config, service, {
   auditService: audit.auditService,
   auditMemory: audit.auditMemory,
   contextService: context.contextService,
+  correctionStore: intent.correctionStore,
   collectorToken,
 });
 
@@ -79,6 +84,7 @@ const shutdown = async (signal: string) => {
   await trace.flush();
   await context.flush();
   await audit.flush();
+  await intent.flush();
   process.exit(0);
 };
 
