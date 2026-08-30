@@ -96,6 +96,12 @@ export function registerIntentRoutes(
 
     const trace = deps.traceStore.get(id);
     if (!trace) throw new HttpError(404, "Trace not found");
+    if (isAuditorTrace(trace)) {
+      throw new HttpError(
+        409,
+        "Correct the audited Agent run, not the auditor's own trace",
+      );
+    }
     const agent = service.getAgent(trace.agentId);
     if (trace.status === "running") {
       throw new HttpError(409, "Wait for the run to finish before correcting it");
@@ -133,6 +139,18 @@ export function registerIntentRoutes(
       ) {
         throw new HttpError(404, "Finding " + findingId + " is not on this run");
       }
+    }
+    const alreadyCorrected = new Set(
+      store
+        .list(agent.id)
+        .filter((entry) => entry.traceId === trace.id && entry.revertedAt === null)
+        .flatMap((entry) => entry.findingIds),
+    );
+    const duplicate = body.findingIds.find((findingId) =>
+      alreadyCorrected.has(findingId),
+    );
+    if (duplicate) {
+      throw new HttpError(409, "Finding " + duplicate + " has already been corrected");
     }
 
     const { agent: corrected, instructionsBefore } =
