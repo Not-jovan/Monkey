@@ -68,9 +68,6 @@ async function makeApp(environment: Record<string, string> = {}) {
         abortPhase: null,
       },
     }),
-    createContext: async () => {
-      throw new Error("createContext is not stubbed for this test");
-    },
   };
 
   const trace = await createTraceMiddleware({

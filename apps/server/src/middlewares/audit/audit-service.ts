@@ -22,7 +22,7 @@ import {
 import type { TraceStore } from "../trace/trace-store.js";
 import { detectSecretBindings } from "../trace/secrets.js";
 import type { ContextStore } from "../context/context-store.js";
-import type { AgentRunner, PromptCache } from "../../types.js";
+import type { AgentRunner } from "../../types.js";
 import type { TraceService } from "../trace/trace-service.js";
 import {
   auditorCallSpan,
@@ -117,10 +117,6 @@ const MAX_TRACED_STEPS = 40;
 // backlog cannot turn a restart into hundreds of model calls.
 const MAX_RESUMED_RUN_AUDITS = 20;
 
-
-// A run whose auditor fell back to the secondary model is not the same as one
-// whose auditor worked, and neither is a defect in the agent. Recorded so the
-// UI can say which of the three happened.
 // Said the same way whether the step had a verdict to weigh or not, so one
 // masking failure does not read as two different problems.
 function leakedCredentialFinding(span: TraceSpan) {
@@ -132,6 +128,9 @@ function leakedCredentialFinding(span: TraceSpan) {
   );
 }
 
+// A run whose auditor fell back to the secondary model is not the same as one
+// whose auditor worked, and neither is a defect in the agent. Recorded so the
+// UI can say which of the three happened.
 function healthOf(status: "completed" | "degraded" | "failed"): AuditHealth {
   if (status === "completed") return "ok";
   return status;
@@ -143,10 +142,6 @@ interface AuditServiceDeps {
   // The auditor executes through the same interface an Agent does, so its own
   // work is recorded as a trace and can be audited in turn.
   runner: AgentRunner;
-  // Caches the evidence a step's checks share. Optional because it is a
-  // provider capability, not a requirement: without it every check pays for
-  // the evidence again, which is what happened before it existed.
-  promptCache?: PromptCache;
   // Opens and closes the auditor's own trace. Optional so a test that only
   // cares about findings does not have to stand up the trace pipeline.
   traceService?: TraceService;
@@ -669,13 +664,32 @@ export class AuditService {
         : "";
     const sinkTargets = sinkTargetsOf(activity);
 
-    // Opened before the fan-out, never inside it: three checks racing to cache
-    // the same evidence would create three contexts and hit none of them.
-    const stepCache = await this.openStepCache(stepPrompt);
+    // The three always-on checks are asked the same evidence and differ only in
+    // the question trailing it. The provider caches that shared prefix, but it
+    // writes the entry only once a request has finished inference — so sending
+    // all three together, as this did, guarantees three misses. The summary
+    // goes first and pays for the evidence; the two that repeat it byte for
+    // byte follow, and can read it back instead of buying it again.
+    //
+    // Measured on a 6.2k-token prompt: sent together, both calls came back
+    // with cached 0; sent this way, the second came back with 6144 of 6186
+    // cached and in a third of the time. The extra serial call is most of what
+    // it costs, and the hit pays much of that back.
+    const summaryCheck = await this.resolveRequiredCheck(
+      cached?.summary,
+      summaryVerdict,
+      () =>
+        this.stepCheck(trace, spanId, {
+          name: "audit.step.summary",
+          label: "Summarize · " + span.label,
+          system: STEP_AUDIT_SYSTEM_PROMPT,
+          user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
+          schema: summaryVerdict,
+        }),
+    );
 
-    // Checks 0, 3 and 4 always run; the rest only when their subject exists.
+    // The first two always run; the rest only when their subject exists.
     const [
-      summaryCheck,
       intentCheck,
       injectionCheck,
       secretCheck,
@@ -683,25 +697,12 @@ export class AuditService {
       toolCheck,
       sinkCheck,
     ] = await Promise.all([
-      this.resolveRequiredCheck(cached?.summary, summaryVerdict, () =>
-        this.stepCheck(trace, spanId, {
-          name: "audit.step.summary",
-          label: "Summarize · " + span.label,
-          system: STEP_AUDIT_SYSTEM_PROMPT,
-          user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
-          tail: SUMMARY_SYSTEM_PROMPT,
-          cache: stepCache,
-          schema: summaryVerdict,
-        }),
-      ),
       this.resolveRequiredCheck(cached?.intent, intentStepVerdict, () =>
         this.stepCheck(trace, spanId, {
           name: "audit.step.intent",
           label: "Intent · " + span.label,
           system: STEP_AUDIT_SYSTEM_PROMPT,
           user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
-          tail: INTENT_STEP_SYSTEM_PROMPT,
-          cache: stepCache,
           schema: intentStepVerdict,
         }),
       ),
@@ -711,8 +712,6 @@ export class AuditService {
           label: "Injection · " + span.label,
           system: STEP_AUDIT_SYSTEM_PROMPT,
           user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
-          tail: INJECTION_SYSTEM_PROMPT,
-          cache: stepCache,
           schema: injectionVerdict,
         }),
       ),
@@ -815,24 +814,6 @@ export class AuditService {
     };
   }
 
-  // The evidence several of a step's checks share, held by the provider so
-  // only the first of them pays for it. Opened for the primary model alone:
-  // the fallback leg runs on another model, for which this context holds
-  // nothing, and opening a second one to serve a rare path would double the
-  // write it is trying to avoid.
-  private async openStepCache(stepPrompt: string) {
-    const cache = this.deps.promptCache;
-    if (!cache) return undefined;
-    const model = this.deps.securityModel;
-    const id = await cache.open({
-      model,
-      system: STEP_AUDIT_SYSTEM_PROMPT,
-      prefix: stepPrompt,
-    });
-    if (id === null) return undefined;
-    return { id, model };
-  }
-
   private async stepCheck<Schema extends z.ZodType>(
     trace: TraceRecord,
     spanId: string,
@@ -841,18 +822,9 @@ export class AuditService {
       label: string;
       system: string;
       user: string;
-      // The part of `user` that is this check's own, and the cache holding
-      // everything before it. Both or neither: a tail is only sendable on its
-      // own when the provider already holds what it follows.
-      tail?: string;
-      cache?: { id: string; model: string } | undefined;
       schema: Schema;
     },
   ) {
-    const context =
-      check.cache && check.tail !== undefined
-        ? { ...check.cache, tail: check.tail }
-        : undefined;
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
@@ -860,7 +832,6 @@ export class AuditService {
       check.system,
       check.user,
       check.schema,
-      context ? { context } : undefined,
     );
     this.recordAuditorAttempts(trace, {
       name: check.name,

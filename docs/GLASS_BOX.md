@@ -197,19 +197,32 @@ services are required.
 | `AUDIT_ENABLED` | `true` | Set to `false` to stop the automatic pass. Audits asked for from a trace page still run. |
 | `AUDIT_SECURITY_MODEL` | `gpt-oss-120b-250805` | Judges each step. |
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
-| `AUDIT_PROMPT_CACHE` | `false` | Cache a step's shared evidence with Ark, so only the first of its three always-on checks pays for it. |
-| `AUDIT_PROMPT_CACHE_TTL` | `3600` | Seconds the cache is held, 3600–604800. Ark's floor is an hour. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Comma-separated hostnames the Agent may reach. |
 | `OTEL_COLLECTOR_URL` | Derived | Override when the Runtime cannot reach the host via `host.docker.internal`. |
 
-`AUDIT_PROMPT_CACHE` ships off. A step's three always-on checks are given the
-same evidence and differ only in the question that trails it, so Ark can hold
-the evidence once and serve all three from it — but the write and an hour of
-residency are billed whether the hits land or not, and whether an endpoint
-holds a context at all is an account-level question. Turn it on, audit one Run,
-and read `cachedTokens` on the auditor's own trace before leaving it on. If the
-context cannot be opened the auditor sends every prompt whole, exactly as it
-does today, and says so once in the log.
+There is nothing to configure for the auditor's prompt cache. Ark caches a
+common leading prefix by itself on the Chat API, free to store and impossible
+to turn off, once a request is at least 1024 tokens long. What the auditor owes
+it is shape and order: a step's three always-on checks are given the same
+system turn and the same evidence, and differ only in the question trailing it,
+so all three share a prefix worth caching.
+
+Order is why the first of them is sent on its own and the other two follow.
+Ark writes the prefix into its cache when a request *finishes*, so three sent
+together can only miss — which is exactly what the auditor did before, and why
+it reported `0 cached` on every call.
+
+Measured against `deepseek-v4-flash-ga-260731` on a 6.2k-token prompt, sent
+both ways: concurrently, both calls returned `cached 0`; staggered, the second
+returned `cached 6144` of `6186` input — 99% — on the streamed and non-streamed
+paths alike. The cached call was also markedly faster (1.1–1.3s against
+3.2–9.1s), so the extra serial call costs much less wall clock than it appears
+to, and several steps are audited at once regardless.
+
+Hits are still best-effort — capacity is finite and old entries are evicted —
+so read `cachedTokens` on the auditor's own trace rather than assuming. The
+summary check pays for the evidence and should show little or none; the intent
+and injection checks that follow it should show close to the whole body.
 
 Both audit models must be **activated on your Ark account** and must answer
 within the client's 60-second timeout. Neither default is guaranteed for a given

@@ -35,9 +35,6 @@ function client(
           },
       };
     },
-    createContext: async () => {
-      throw new Error("createContext is not stubbed for this test");
-    },
   };
 }
 

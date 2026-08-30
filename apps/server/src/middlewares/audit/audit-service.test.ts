@@ -6,7 +6,7 @@ import type { TraceRecord, TraceSpan } from "../trace/trace-model.js";
 import { emptyUsage } from "../trace/trace-model.js";
 import { TraceStore } from "../trace/trace-store.js";
 import { ArkApiError } from "../../ark-client.js";
-import type { AgentRunner, PromptCache } from "../../types.js";
+import type { AgentRunner } from "../../types.js";
 import { TraceService } from "../trace/trace-service.js";
 import { createRedactor } from "../trace/redaction.js";
 import { codexRuntime } from "../../runtimes/codex.js";
@@ -472,10 +472,16 @@ describe("AuditService", () => {
     expect(responder.calls.at(-1)?.user).toContain("read .env");
   });
 
-  // The provider stamps a fresh request id on every failure, so the three
-  // checks that fall back report three strings that are the same outage in
-  // different clothes. Without normalising, nothing can tell they are one
-  // outage and the banner prints the whole sentence once per check.
+  // The provider stamps a fresh request id on every failure, so checks that
+  // fall back report the same outage in different clothes. Without
+  // normalising, nothing can tell they are one outage and the banner prints
+  // the whole sentence once per check.
+  //
+  // Since the always-on checks were staggered so the provider's cache has
+  // something to hit, the first one discovers the outage and the rest inherit
+  // the remembered reason without calling at all — so the primary is now
+  // contacted once per process rather than once per check. Both halves are
+  // asserted: one call out, one sentence in.
   it("says one outage once even though each response carries its own id", async () => {
     const stores = await makeStores();
     let requests = 0;
@@ -501,7 +507,8 @@ describe("AuditService", () => {
     stores.traceStore.appendSpan("trace-ids", promptSpan("trace-ids", "hello"));
     await settle(service, stores, "trace-ids");
 
-    expect(requests).toBeGreaterThan(1);
+    // One wasted call on a dead model, not one per check.
+    expect(requests).toBe(1);
     const healthNotes = stores.auditStore
       .listByTrace("trace-ids")
       .filter((step) => step.category === "audit-health");
@@ -511,14 +518,13 @@ describe("AuditService", () => {
         "activated the model sec-model. Please activate the model service in " +
         "the Ark Console.",
     );
-    // The id is still on record, one per call, where the auditor's own steps
-    // show it.
+    // The id the banner drops is still on record where the auditor's own steps
+    // show it — that is the line an operator takes to the provider.
     const errors = auditorSpansOf(stores, "trace-ids").flatMap((span) =>
       span.error ? [span.error] : [],
     );
-    expect(errors.length).toBeGreaterThan(1);
-    expect(new Set(errors).size).toBe(errors.length);
-    expect(errors.every((error) => error.includes("Request id:"))).toBe(true);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain("Request id: request-id-1");
   });
 
   it("degrades to the fallback model when the primary is not activated", async () => {
@@ -2360,35 +2366,21 @@ describe("AuditService conditional step checks", () => {
 });
 
 // The three always-on checks are given one step's evidence and differ only in
-// the question that trails it. That sameness is the whole reason a provider
-// cache can serve them, so it is asserted here rather than left to the prompts.
+// the question that trails it. That sameness is what lets the provider serve
+// all three from one cached prefix — but only if one of them has finished
+// before the others are sent, because the prefix is written on completion.
+// Both halves are asserted here rather than left to the prompts.
 describe("AuditService step evidence caching", () => {
   const ALWAYS_ON = ["summary", "intent", "injection"];
 
-  function cacheSpy(id: string | null) {
-    const opened: { model: string; system: string; prefix: string }[] = [];
-    return {
-      opened,
-      open: async (input: { model: string; system: string; prefix: string }) => {
-        opened.push(input);
-        return id;
-      },
-    };
-  }
-
-  async function auditWith(
-    traceId: string,
-    promptCache: PromptCache | undefined,
-  ) {
+  async function auditWith(traceId: string, client: FakeClient) {
     const stores = await makeStores();
-    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
     const service = new AuditService({
       traceStore: stores.traceStore,
       auditStore: stores.auditStore,
       traceService: stores.traceService,
       context: stores.contextStore,
-      runner: runnerFor(fakeClient(responder)),
-      ...(promptCache ? { promptCache } : {}),
+      runner: runnerFor(client),
       securityModel: "sec-model",
       intentModel: "intent-model",
       networkWhitelist: null,
@@ -2400,11 +2392,12 @@ describe("AuditService step evidence caching", () => {
     seedTrace(stores.traceStore, traceId);
     stores.traceStore.appendSpan(traceId, toolSpan(traceId, "ok"));
     await settle(service, stores, traceId);
-    return { stores, responder };
+    return stores;
   }
 
   it("asks the three always-on checks over one identical system turn and body", async () => {
-    const { responder } = await auditWith("trace-cache-1", undefined);
+    const responder: FakeResponder = { calls: [], respond: () => SAFE_VERDICT };
+    await auditWith("trace-cache-1", fakeClient(responder));
 
     const checks = responder.calls.filter((call) =>
       ALWAYS_ON.includes(call.check),
@@ -2427,30 +2420,27 @@ describe("AuditService step evidence caching", () => {
     expect(new Set(checks.map((call) => call.user)).size).toBe(3);
   });
 
-  it("opens one cache per step, before any check has asked", async () => {
-    const cache = cacheSpy("ctx-1");
-    const { responder } = await auditWith("trace-cache-2", cache);
+  it("lets the first check finish before sending the two that repeat it", async () => {
+    const events: string[] = [];
+    const stores = await auditWith("trace-cache-2", {
+      complete: async ({ system, user }) => {
+        const check = checkOf(system, user);
+        events.push("start:" + check);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        events.push("end:" + check);
+        return { content: SAFE_VERDICT };
+      },
+    });
 
-    // Racing this inside the fan-out would open three and hit none.
-    expect(cache.opened).toHaveLength(1);
-    expect(cache.opened[0]?.model).toBe("sec-model");
-    // The evidence, not any one check's question.
-    expect(cache.opened[0]?.prefix).toContain("## Step under audit");
-    expect(cache.opened[0]?.system).not.toContain("You are summarising");
-    expect(
-      responder.calls.filter((call) => ALWAYS_ON.includes(call.check)),
-    ).toHaveLength(3);
-  });
-
-  it("audits normally when the provider would not open a cache", async () => {
-    const cache = cacheSpy(null);
-    const { responder, stores } = await auditWith("trace-cache-3", cache);
-
-    expect(cache.opened).toHaveLength(1);
-    expect(
-      responder.calls.filter((call) => ALWAYS_ON.includes(call.check)),
-    ).toHaveLength(3);
-    expect(stores.auditStore.countStepsForTrace("trace-cache-3")).toBe(1);
+    // Sent together, as they used to be, all three can only miss: the provider
+    // writes the shared prefix into its cache when a request completes, so
+    // there is nothing to hit until one of them has.
+    const paid = events.indexOf("end:summary");
+    expect(paid).toBeGreaterThanOrEqual(0);
+    expect(paid).toBeLessThan(events.indexOf("start:intent"));
+    expect(paid).toBeLessThan(events.indexOf("start:injection"));
+    // And the step is still judged on all of them.
+    expect(stores.auditStore.countStepsForTrace("trace-cache-2")).toBe(1);
   });
 
   it("does not publish step findings until auditAll succeeds", async () => {

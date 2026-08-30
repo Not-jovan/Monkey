@@ -483,142 +483,32 @@ describe("createArkClient", () => {
   });
 });
 
-describe("createArkClient prompt cache", () => {
-  const cached = { ...ask, promptCache: { contextId: "ctx-1", tail: "ask me" } };
-
-  function answer(usage?: Record<string, unknown>) {
-    return Response.json({
-      id: "json-cached",
-      model: "served",
-      choices: [{ message: { content: '{"ok":true}' } }],
-      ...(usage ? { usage } : {}),
-    });
-  }
-
-  it("creates a common-prefix context and returns its id", async () => {
-    let url = "";
-    let body: unknown = null;
-    const ark = client(async (requested, init) => {
-      url = String(requested);
-      body = JSON.parse(String(init?.body));
-      return Response.json({ id: "ctx-9", model: "served", ttl: 3600 });
-    });
-
-    const id = await ark.createContext({
-      model: "flash",
-      system: "sys",
-      prefix: "the evidence",
-      ttlSeconds: 3600,
-    });
-
-    expect(id).toBe("ctx-9");
-    expect(url).toBe("https://ark.test/context/create");
-    expect(body).toEqual({
-      model: "flash",
-      mode: "common_prefix",
-      messages: [
-        { role: "system", content: "sys" },
-        { role: "user", content: "the evidence" },
-      ],
-      ttl: 3600,
-    });
-  });
-
-  it("reports a refused context as an Ark error, so the caller can remember it", async () => {
+// The provider caches a shared prompt prefix by itself and reports the hit
+// here. Nothing else says whether that happened, so this is the instrument the
+// staggered step checks are measured with — on both reply shapes, since
+// AUDIT_MODEL_STREAM decides which one arrives.
+describe("createArkClient cache reporting", () => {
+  it("reads cached tokens off a non-streamed reply", async () => {
     const ark = client(async () =>
-      Response.json(
-        { error: { code: "ModelNotOpen", message: "not activated" } },
-        { status: 404 },
-      ),
+      Response.json({
+        id: "json-cached",
+        model: "served",
+        choices: [{ message: { content: '{"ok":true}' } }],
+        usage: {
+          prompt_tokens: 18_000,
+          completion_tokens: 12,
+          prompt_tokens_details: { cached_tokens: 17_800 },
+        },
+      }),
     );
 
-    await expect(
-      ark.createContext({
-        model: "flash",
-        system: "sys",
-        prefix: "p",
-        ttlSeconds: 3600,
-      }),
-    ).rejects.toMatchObject({ name: "ArkApiError", code: "ModelNotOpen" });
-  });
+    const result = await ark.complete(ask);
 
-  it("sends only the tail against the context, and counts only what it sent", async () => {
-    let url = "";
-    let body: unknown = null;
-    const ark = client(async (requested, init) => {
-      url = String(requested);
-      body = JSON.parse(String(init?.body));
-      return answer({
-        prompt_tokens: 18_000,
-        completion_tokens: 12,
-        prompt_tokens_details: { cached_tokens: 17_800 },
-      });
-    });
-
-    const result = await ark.complete(cached);
-
-    expect(url).toBe("https://ark.test/context/chat/completions");
-    expect(body).toMatchObject({
-      context_id: "ctx-1",
-      mode: "common_prefix",
-      messages: [{ role: "user", content: "ask me" }],
-    });
     expect(result.usage).toEqual({
       inputTokens: 18_000,
       cachedInputTokens: 17_800,
       outputTokens: 12,
     });
-    expect(result.timing.promptBytes).toBe(
-      new TextEncoder().encode("ask me").length,
-    );
-  });
-
-  it("retries whole when the context is gone, and stops reporting it as cached", async () => {
-    const urls: string[] = [];
-    const bodies: unknown[] = [];
-    const ark = client(async (requested, init) => {
-      urls.push(String(requested));
-      bodies.push(JSON.parse(String(init?.body)));
-      if (urls.length === 1) {
-        return Response.json(
-          { error: { code: "ContextNotFound", message: "expired" } },
-          { status: 404 },
-        );
-      }
-      return answer({ prompt_tokens: 18_000, completion_tokens: 12 });
-    });
-
-    const result = await ark.complete(cached);
-
-    expect(urls).toEqual([
-      "https://ark.test/context/chat/completions",
-      "https://ark.test/chat/completions",
-    ]);
-    expect(bodies[1]).toMatchObject({
-      messages: [
-        { role: "system", content: "sys" },
-        { role: "user", content: "user" },
-      ],
-    });
-    expect(result.content).toBe('{"ok":true}');
-    expect(result.timing.promptBytes).toBe(
-      new TextEncoder().encode("sys").length +
-        new TextEncoder().encode("user").length,
-    );
-  });
-
-  it("does not retry a rejection that is about the request", async () => {
-    let calls = 0;
-    const ark = client(async () => {
-      calls += 1;
-      return Response.json(
-        { error: { code: "InvalidParameter", message: "max_tokens" } },
-        { status: 400 },
-      );
-    });
-
-    await expect(ark.complete(cached)).rejects.toBeInstanceOf(ArkApiError);
-    expect(calls).toBe(1);
   });
 
   it("reads cached tokens off the streamed usage event too", async () => {
