@@ -22,7 +22,7 @@ import {
 import type { TraceStore } from "../trace/trace-store.js";
 import { detectSecretBindings } from "../trace/secrets.js";
 import type { ContextStore } from "../context/context-store.js";
-import type { AgentRunner } from "../../types.js";
+import type { AgentRunner, PromptCache } from "../../types.js";
 import type { TraceService } from "../trace/trace-service.js";
 import {
   auditorCallSpan,
@@ -86,8 +86,10 @@ import {
   NETWORK_SYSTEM_PROMPT,
   SECRET_SYSTEM_PROMPT,
   SINK_SYSTEM_PROMPT,
+  STEP_AUDIT_SYSTEM_PROMPT,
   SUMMARY_SYSTEM_PROMPT,
   TOOL_MISUSE_SYSTEM_PROMPT,
+  stepCheckPrompt,
 } from "./step-checks.js";
 
 // How many of an auditor's own model-call spans a requested audit will judge.
@@ -132,6 +134,10 @@ interface AuditServiceDeps {
   // The auditor executes through the same interface an Agent does, so its own
   // work is recorded as a trace and can be audited in turn.
   runner: AgentRunner;
+  // Caches the evidence a step's checks share. Optional because it is a
+  // provider capability, not a requirement: without it every check pays for
+  // the evidence again, which is what happened before it existed.
+  promptCache?: PromptCache;
   // Opens and closes the auditor's own trace. Optional so a test that only
   // cares about findings does not have to stand up the trace pipeline.
   traceService?: TraceService;
@@ -607,6 +613,10 @@ export class AuditService {
         : "";
     const sinkTargets = sinkTargetsOf(activity);
 
+    // Opened before the fan-out, never inside it: three checks racing to cache
+    // the same evidence would create three contexts and hit none of them.
+    const stepCache = await this.openStepCache(stepPrompt);
+
     // Checks 0, 3 and 4 always run; the rest only when their subject exists.
     const [
       summaryCheck,
@@ -617,25 +627,34 @@ export class AuditService {
       toolCheck,
       sinkCheck,
     ] = await Promise.all([
+      // These three share the step's evidence byte for byte, which is what
+      // makes it worth caching: what differs between them is the question,
+      // and the question now trails the evidence rather than leading it.
       this.stepCheck(trace, spanId, {
         name: "audit.step.summary",
         label: "Summarize · " + span.label,
-        system: SUMMARY_SYSTEM_PROMPT,
-        user: stepPrompt,
+        system: STEP_AUDIT_SYSTEM_PROMPT,
+        user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
+        tail: SUMMARY_SYSTEM_PROMPT,
+        cache: stepCache,
         schema: summaryVerdict,
       }),
       this.stepCheck(trace, spanId, {
         name: "audit.step.intent",
         label: "Intent · " + span.label,
-        system: INTENT_STEP_SYSTEM_PROMPT,
-        user: stepPrompt,
+        system: STEP_AUDIT_SYSTEM_PROMPT,
+        user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
+        tail: INTENT_STEP_SYSTEM_PROMPT,
+        cache: stepCache,
         schema: intentStepVerdict,
       }),
       this.stepCheck(trace, spanId, {
         name: "audit.step.injection",
         label: "Injection · " + span.label,
-        system: INJECTION_SYSTEM_PROMPT,
-        user: stepPrompt,
+        system: STEP_AUDIT_SYSTEM_PROMPT,
+        user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
+        tail: INJECTION_SYSTEM_PROMPT,
+        cache: stepCache,
         schema: injectionVerdict,
       }),
       secretTypes.length === 0
@@ -727,6 +746,24 @@ export class AuditService {
     };
   }
 
+  // The evidence several of a step's checks share, held by the provider so
+  // only the first of them pays for it. Opened for the primary model alone:
+  // the fallback leg runs on another model, for which this context holds
+  // nothing, and opening a second one to serve a rare path would double the
+  // write it is trying to avoid.
+  private async openStepCache(stepPrompt: string) {
+    const cache = this.deps.promptCache;
+    if (!cache) return undefined;
+    const model = this.deps.securityModel;
+    const id = await cache.open({
+      model,
+      system: STEP_AUDIT_SYSTEM_PROMPT,
+      prefix: stepPrompt,
+    });
+    if (id === null) return undefined;
+    return { id, model };
+  }
+
   private async stepCheck<Schema extends z.ZodType>(
     trace: TraceRecord,
     spanId: string,
@@ -735,9 +772,18 @@ export class AuditService {
       label: string;
       system: string;
       user: string;
+      // The part of `user` that is this check's own, and the cache holding
+      // everything before it. Both or neither: a tail is only sendable on its
+      // own when the provider already holds what it follows.
+      tail?: string;
+      cache?: { id: string; model: string } | undefined;
       schema: Schema;
     },
   ) {
+    const context =
+      check.cache && check.tail !== undefined
+        ? { ...check.cache, tail: check.tail }
+        : undefined;
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
@@ -745,6 +791,7 @@ export class AuditService {
       check.system,
       check.user,
       check.schema,
+      context ? { context } : undefined,
     );
     this.recordAuditorAttempts(trace, {
       name: check.name,

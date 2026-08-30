@@ -69,6 +69,52 @@ const envSchema = z.object({
   AUDIT_NETWORK_WHITELIST: z.string().optional(),
   AUDIT_SECURITY_MODEL: z.string().default("gpt-oss-120b-250805"),
   AUDIT_INTENT_MODEL: z.string().default("deepseek-v4-flash-ga-260731"),
+  // Deadline for one audit model call. Streaming makes this a stall budget —
+  // the time allowed with no token arriving — rather than a cap on how long a
+  // whole answer may take, so a long verdict no longer races the clock.
+  AUDIT_MODEL_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(60_000),
+  // Streaming is what lets the deadline above tell a slow answer from a stuck
+  // one. It costs about 1.3x end to end (six alternating eval runs each way:
+  // 81.0s streamed against 62.0s not), measured from a dev machine over a WAN
+  // hop to Ark; expect less on a server colocated with the endpoint.
+  //
+  // It also scored slightly better, which is why it is the default rather than
+  // a tunable. Over those runs streaming held 95.0% on injected objectives in
+  // all six, where non-streamed fell to 90% in two, and streaming disagreed
+  // with itself far less run to run (1.7%/0.0% against 6.0%/2.7%). Recall was
+  // 100% either way, so nothing is missed by turning this off — but precision
+  // and stability both drop a little.
+  //
+  // Off restores the old behaviour, where the timeout caps total generation
+  // time and AUDIT_MODEL_TIMEOUT_MS must be raised to suit.
+  AUDIT_MODEL_STREAM: z.enum(["true", "false"]).default("true"),
+  // Reasoning models bill their thinking as output tokens, and call latency
+  // tracks output tokens almost exactly — on a measured audit, 87% of billed
+  // output never reached the answer. "disabled" reclaims that: the eval runs
+  // 3-4x faster.
+  //
+  // It defaults to "auto" anyway, because the speed is not free. Over three
+  // eval runs each, "auto" caught every injected objective (recall 100%, fn=0)
+  // while "disabled" missed one in two of the three runs and left a step
+  // without a summary. Missing an injected objective is the failure this
+  // auditor exists to prevent, so the default keeps recall and lets streaming
+  // absorb the latency instead. Re-measure with `npm run eval:audit` before
+  // changing it.
+  AUDIT_MODEL_THINKING: z.enum(["disabled", "enabled", "auto"]).default("auto"),
+  // Caches the evidence a step's checks share, so only the first of them pays
+  // for it. Off by default: the write and the residency are billed whether or
+  // not the hits materialise, and whether a given endpoint holds a context at
+  // all is an account-level question.
+  AUDIT_PROMPT_CACHE: z.enum(["true", "false"]).default("false"),
+  // Ark's floor. A step's checks finish in seconds, so the cache outlives its
+  // use by an hour no matter what — which is why the residency cost, not the
+  // write, is the thing to watch.
+  AUDIT_PROMPT_CACHE_TTL: z.coerce
+    .number()
+    .int()
+    .min(3_600)
+    .max(604_800)
+    .default(3_600),
   // Override for setups where the Runtime cannot reach the control plane via
   // the derived host (e.g. rootless engines without host-gateway support).
   OTEL_COLLECTOR_URL: z.string().url().optional(),
@@ -134,6 +180,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     auditEnabled: env.AUDIT_ENABLED === "true",
     auditSecurityModel: env.AUDIT_SECURITY_MODEL.trim(),
     auditIntentModel: env.AUDIT_INTENT_MODEL.trim(),
+    auditModelTimeoutMs: env.AUDIT_MODEL_TIMEOUT_MS,
+    auditModelThinking: env.AUDIT_MODEL_THINKING,
+    auditModelStream: env.AUDIT_MODEL_STREAM === "true",
+    auditPromptCache: env.AUDIT_PROMPT_CACHE === "true",
+    auditPromptCacheTtl: env.AUDIT_PROMPT_CACHE_TTL,
     auditNetworkWhitelist:
       env.AUDIT_NETWORK_WHITELIST === undefined
         ? null

@@ -1603,6 +1603,14 @@ textarea:focus {
   color: var(--paper);
 }
 
+/* The tabs and the one action that leaves this trace for the audit above it. */
+.trace-pane-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+
 .pane-toggle {
   align-self: flex-start;
 }

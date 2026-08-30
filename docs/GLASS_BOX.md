@@ -194,11 +194,22 @@ services are required.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AUDIT_ENABLED` | `true` | Set to `false` to stop auditing entirely. |
+| `AUDIT_ENABLED` | `true` | Set to `false` to stop the automatic pass. Audits asked for from a trace page still run. |
 | `AUDIT_SECURITY_MODEL` | `gpt-oss-120b-250805` | Judges each step. |
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
+| `AUDIT_PROMPT_CACHE` | `false` | Cache a step's shared evidence with Ark, so only the first of its three always-on checks pays for it. |
+| `AUDIT_PROMPT_CACHE_TTL` | `3600` | Seconds the cache is held, 3600–604800. Ark's floor is an hour. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Comma-separated hostnames the Agent may reach. |
 | `OTEL_COLLECTOR_URL` | Derived | Override when the Runtime cannot reach the host via `host.docker.internal`. |
+
+`AUDIT_PROMPT_CACHE` ships off. A step's three always-on checks are given the
+same evidence and differ only in the question that trails it, so Ark can hold
+the evidence once and serve all three from it — but the write and an hour of
+residency are billed whether the hits land or not, and whether an endpoint
+holds a context at all is an account-level question. Turn it on, audit one Run,
+and read `cachedTokens` on the auditor's own trace before leaving it on. If the
+context cannot be opened the auditor sends every prompt whole, exactly as it
+does today, and says so once in the log.
 
 Both audit models must be **activated on your Ark account** and must answer
 within the client's 60-second timeout. Neither default is guaranteed for a given

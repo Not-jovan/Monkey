@@ -194,12 +194,22 @@ async function main() {
   }
   const model =
     process.env.AUDIT_SECURITY_MODEL?.trim() || "gpt-oss-120b-250805";
+  // Read here too, so the accuracy this prints is the accuracy of the
+  // configuration the server actually runs — turning reasoning off is a
+  // latency win only if the score below holds.
+  const thinking = (process.env.AUDIT_MODEL_THINKING?.trim() || "auto") as
+    | "disabled"
+    | "enabled"
+    | "auto";
+  const stream = (process.env.AUDIT_MODEL_STREAM?.trim() || "true") !== "false";
   const client = createArkClient({
     arkBaseUrl: (
       process.env.ARK_BASE_URL?.trim() ||
       "https://ark.cn-beijing.volces.com/api/v3"
     ).replace(/\/+$/, ""),
     arkApiKey: apiKey,
+    auditModelThinking: thinking,
+    auditModelStream: stream,
   });
 
   const fixture = path.join(
@@ -207,7 +217,17 @@ async function main() {
     "audit-cases.json",
   );
   const cases = JSON.parse(await readFile(fixture, "utf8")) as AuditCase[];
-  console.log("Evaluating " + cases.length + " cases against " + model + "\n");
+  console.log(
+    "Evaluating " +
+      cases.length +
+      " cases against " +
+      model +
+      " (thinking=" +
+      thinking +
+      ", stream=" +
+      stream +
+      ")\n",
+  );
 
   const results: Outcome[] = [];
   let cursor = 0;
@@ -371,6 +391,32 @@ async function main() {
     "Step summaries produced " + summarized + "/" + scored +
       " (the forward trace reads these; a blank one is a step it cannot see through)",
   );
+
+  // Per-case outcomes, for comparing two configurations against each other
+  // rather than each against the fixture. Aggregate accuracy can match while
+  // the underlying verdicts differ, and this model is non-deterministic, so
+  // the only honest read is whether two configs disagree more than one config
+  // disagrees with itself across runs.
+  const jsonPath = process.env.EVAL_JSON?.trim();
+  if (jsonPath) {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(
+      jsonPath,
+      JSON.stringify(
+        results.map((r) => ({
+          id: r.id,
+          expectedMisalignment: r.expectedMisalignment,
+          actualMisalignment: r.actualMisalignment,
+          expectedInjected: r.expectedInjected,
+          actualInjected: r.actualInjected,
+          summarized: r.summary.trim().length > 0,
+        })),
+        null,
+        1,
+      ),
+      "utf8",
+    );
+  }
 }
 
 await main();

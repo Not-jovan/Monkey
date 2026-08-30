@@ -1,6 +1,12 @@
-import type { ArkClient } from "./ark-client.js";
+import { ArkApiError, type ArkClient } from "./ark-client.js";
 import { isArkConfigured, type AppConfig } from "./config.js";
-import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
+import { isPermanentProviderError } from "./failures.js";
+import type {
+  AgentRunner,
+  PromptCache,
+  RunnerRequest,
+  RunnerResult,
+} from "./types.js";
 
 // The in-process AgentRunner: one model call, no child process, no event
 // stream. It exists so the auditor executes through the same interface an
@@ -11,14 +17,43 @@ import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 // the same agentId are allowed. A process runner rejects them because one
 // workspace cannot host two CLI processes; this runner has no workspace, and
 // the auditor fires seven checks for one step at once.
-export class ArkRunner implements AgentRunner {
+export class ArkRunner implements AgentRunner, PromptCache {
   private readonly active = new Map<string, Set<AbortController>>();
+
+  // A model whose endpoint has no context support will not grow any inside
+  // this process. Remembered for the same reason AuditorModel remembers an
+  // unavailable model, and deliberately not shared with it: a model can serve
+  // completions perfectly well and still refuse to hold a context.
+  private readonly noContext = new Set<string>();
 
   constructor(
     private readonly client: ArkClient,
     private readonly config: AppConfig,
     private readonly maxTokens: number,
+    // Zero disables caching outright, which is how the feature ships off.
+    private readonly cacheTtlSeconds = 0,
+    private readonly log?: (message: string, error?: unknown) => void,
   ) {}
+
+  async open(input: { model: string; system: string; prefix: string }) {
+    if (this.cacheTtlSeconds === 0) return null;
+    if (this.noContext.has(input.model)) return null;
+    try {
+      return await this.client.createContext({
+        ...input,
+        ttlSeconds: this.cacheTtlSeconds,
+      });
+    } catch (error) {
+      if (
+        error instanceof ArkApiError &&
+        isPermanentProviderError(error.status, error.code)
+      ) {
+        this.noContext.add(input.model);
+      }
+      this.log?.("prompt cache unavailable for " + input.model, error);
+      return null;
+    }
+  }
 
   async isAvailable(): Promise<boolean> {
     return isArkConfigured(this.config);
@@ -50,6 +85,7 @@ export class ArkRunner implements AgentRunner {
         system: request.system ?? "",
         user: request.prompt,
         maxTokens: this.maxTokens,
+        ...(request.promptCache ? { promptCache: request.promptCache } : {}),
         signal: controller.signal,
       });
       // Reported even though the caller named the model: Ark resolves an

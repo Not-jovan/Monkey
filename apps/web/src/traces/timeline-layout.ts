@@ -1,7 +1,7 @@
 import type { TraceSpan } from "../types";
-import { orderedLaneIds, laneIdForSpan } from "./canvas-layout";
+import { orderedLaneIds } from "./canvas-layout";
 import { formatDuration } from "./format";
-import { isVisibleStep, sortTime } from "./steps";
+import { isVisibleStep, laneIdForSpan, sortTime } from "./steps";
 
 export interface TimelineBar {
   span: TraceSpan;

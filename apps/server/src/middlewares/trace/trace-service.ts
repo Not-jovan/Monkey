@@ -1197,10 +1197,16 @@ export class TraceService {
     if (!appended) return null;
     const input = span.attributes.inputTokens;
     const output = span.attributes.outputTokens;
-    if (typeof input === "number" || typeof output === "number") {
+    const cached = span.attributes.cachedTokens;
+    if (
+      typeof input === "number" ||
+      typeof output === "number" ||
+      typeof cached === "number"
+    ) {
       this.store.updateTrace(runId, (trace) => {
         if (typeof input === "number") trace.usage.inputTokens += input;
         if (typeof output === "number") trace.usage.outputTokens += output;
+        if (typeof cached === "number") trace.usage.cachedTokens += cached;
       });
     }
     return appended;

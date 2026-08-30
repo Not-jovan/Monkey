@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { ArkAbortError, ArkApiError } from "../../ark-client.js";
-import type { AgentRunner } from "../../types.js";
+import type { AgentRunner, RunnerRequest } from "../../types.js";
 import { AuditorModel, auditorCallSpan, auditorSubagentType, describeError, summarizeError } from "./auditor-model.js";
 
 const verdict = z.object({ ok: z.boolean() });
@@ -91,6 +91,82 @@ describe("summarizeError", () => {
 
     expect(summarizeError(first)).toBe(summarizeError(second));
     expect(describeError(first)).toContain("22 in flight");
+  });
+});
+
+describe("AuditorModel.complete prompt cache", () => {
+  // Records what the runner was actually asked for, which is the whole
+  // question here: the cache changes the request, not the answer.
+  function recordingRunner(): AgentRunner & { requests: RunnerRequest[] } {
+    const requests: RunnerRequest[] = [];
+    return {
+      requests,
+      run: async (request) => {
+        requests.push(request);
+        const named = request.model ?? "";
+        if (named === "primary-model") {
+          throw notActivated("request-id-" + requests.length);
+        }
+        return { output: ANSWER, threadId: null, usage: null, model: named };
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+  }
+
+  it("sends the cache and the tail when the context was opened for this model", async () => {
+    const runner = recordingRunner();
+    const model = new AuditorModel(runner);
+
+    await model.complete(RUN, "good-model", null, "s", "evidence\n\nq", verdict, {
+      context: { id: "ctx-1", model: "good-model", tail: "q" },
+    });
+
+    expect(runner.requests[0]?.promptCache).toEqual({
+      contextId: "ctx-1",
+      tail: "q",
+    });
+    // Still carried whole, because the client falls back to it if the
+    // provider says the context is gone.
+    expect(runner.requests[0]?.prompt).toBe("evidence\n\nq");
+    expect(runner.requests[0]?.system).toBe("s");
+  });
+
+  it("does not hand the fallback model a context opened for another", async () => {
+    const runner = recordingRunner();
+    const model = new AuditorModel(runner);
+
+    const answer = await model.complete(
+      RUN,
+      "primary-model",
+      "fallback-model",
+      "s",
+      "evidence\n\nq",
+      verdict,
+      { context: { id: "ctx-1", model: "primary-model", tail: "q" } },
+    );
+
+    expect(answer.status).toBe("degraded");
+    expect(runner.requests[0]?.promptCache).toEqual({
+      contextId: "ctx-1",
+      tail: "q",
+    });
+    expect(runner.requests[1]?.model).toBe("fallback-model");
+    expect(runner.requests[1]?.promptCache).toBeUndefined();
+  });
+
+  it("asks exactly as it did before when no context was opened", async () => {
+    const runner = recordingRunner();
+    const model = new AuditorModel(runner);
+
+    await model.complete(RUN, "good-model", null, "s", "u", verdict);
+
+    expect(runner.requests[0]).toMatchObject({
+      prompt: "u",
+      system: "s",
+      threadId: null,
+    });
+    expect(runner.requests[0]?.promptCache).toBeUndefined();
   });
 });
 
@@ -234,6 +310,42 @@ describe("auditorCallSpan", () => {
     expect(span.parentId).toBeNull();
     expect(span.attributes.laneId).toBeUndefined();
     expect(span.attributes.phase).toBe("step");
+  });
+
+  // The figure was parsed all the way from the provider and then dropped
+  // here, so an auditor read as uncached no matter what the provider did.
+  it("carries a cache hit onto the span under the name the trace page reads", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.step.summary",
+      label: "Summarize · Model · plan",
+      targetSpanId: "span-1",
+      prompt: "judge this",
+      attempt: {
+        ...attempt,
+        usage: {
+          inputTokens: 18_000,
+          cachedInputTokens: 17_800,
+          outputTokens: 12,
+        },
+      },
+      fallback: false,
+    });
+    expect(span.attributes.inputTokens).toBe(18_000);
+    expect(span.attributes.cachedTokens).toBe(17_800);
+  });
+
+  it("omits the cache attribute when the provider reported none", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.step.summary",
+      label: "Summarize · Model · plan",
+      targetSpanId: "span-1",
+      prompt: "judge this",
+      attempt: { ...attempt, usage: { inputTokens: 18_000 } },
+      fallback: false,
+    });
+    expect(span.attributes).not.toHaveProperty("cachedTokens");
   });
 
   it("marks run-level calls as the auditor's own work", () => {
