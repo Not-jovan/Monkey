@@ -38,13 +38,11 @@ import {
   buildMetaContext,
   describeFollowThrough,
   followThroughVerdict,
-  intentVerdict,
   metaVerdict,
   questionText,
   unresolvedFollowThrough,
   BACK_TRACE_SYSTEM_PROMPT,
   FORWARD_TRACE_SYSTEM_PROMPT,
-  INTENT_SYSTEM_PROMPT,
   META_STEP_SYSTEM_PROMPT,
   META_SYSTEM_PROMPT,
   type OpenQuestion,
@@ -72,14 +70,10 @@ import {
   SUMMARY_SYSTEM_PROMPT,
   TOOL_MISUSE_SYSTEM_PROMPT,
 } from "./step-checks.js";
-const MAX_STEP_AUDITS_PER_TRACE = 30;
 
-// The budget for an audit someone asked for, which is a different thing from
-// the automatic one above. That one runs alongside a live run and has to keep
-// up with it; this one is deliberate, one-shot, and judging an auditor means
-// judging every question it asked. An auditor's trace holds roughly seven spans
-// per Agent step, so the automatic cap would truncate anything past a four-step
-// run.
+// How many of an auditor's own model-call spans a requested audit will judge.
+// An auditor's trace holds roughly seven spans per Agent step, so this is
+// sized for a long Agent run rather than for a handful of checks.
 const MAX_REQUESTED_STEP_AUDITS = 150;
 
 // The forward-trace shows the model every directive against every later step,
@@ -235,8 +229,8 @@ export class AuditService {
   private readonly model: AuditorModel;
   // PLAN_AUDITOR's AgentChatAuditor, one per chat. Holds the identity its
   // findings are stamped with, the folder its artifacts go to, and the state
-  // the run-level checks need — the step budget, the meta-audit guard, and how
-  // many step audits are still in flight.
+  // the run-level checks need — the meta-audit guard, and how many step
+  // audits are still in flight.
   private readonly auditors = new Map<string, AgentChatAuditor>();
 
   constructor(private readonly deps: AuditServiceDeps) {
@@ -321,7 +315,7 @@ export class AuditService {
       this.deps.memory?.root ?? "",
       {
         runStepAudit: (chat, spanId) => this.stepAudit(chat, spanId),
-        runAll: (chat) => this.intentAudit(chat),
+        runAll: (chat) => this.auditAll(chat),
         runRequestedAudit: (chat) => this.requestedAudit(chat),
       },
     );
@@ -380,36 +374,6 @@ export class AuditService {
     // a bare tool name, so it waits for the payload — or, if the run ends
     // without one, for the sweep that re-announces it with the run's verdict.
     return hasJudgeableEvidence(span) || trace.status !== "running";
-  }
-
-  // Says once, on the trace itself, that auditing stopped early. Returning in
-  // silence made a long run's unaudited tail indistinguishable from a clean
-  // one — an audit reporting nothing has to mean it found nothing, never that
-  // it stopped looking.
-  private reportStepCap(chat: AgentChatAuditor, trace: TraceRecord) {
-    if (!chat.reportCap()) return;
-    this.deps.auditStore.recordRunFinding(
-      trace,
-      auditSteps(
-        {
-          id: randomUUID(),
-          traceId: trace.id,
-          agentId: trace.agentId,
-          spanId: null,
-        },
-        (push) =>
-          push(
-            "error",
-            "audit-health",
-            "Step auditing stopped after " +
-              MAX_STEP_AUDITS_PER_TRACE +
-              " steps in this run. Later steps were recorded but never judged, " +
-              "so this run's findings do not cover it end to end.",
-          ),
-      ),
-      this.deps.intent?.currentId(trace.agentId) ?? "",
-      "degraded",
-    );
   }
 
   // Waits for queued intent classification to drain. Failures there are the
@@ -516,13 +480,6 @@ export class AuditService {
     const trace = this.deps.traceStore.get(traceId);
     const span = trace?.spans.find((item) => item.id === spanId);
     if (!trace || !span) return;
-    if (
-      this.deps.auditStore.countStepsForTrace(traceId) >=
-      MAX_STEP_AUDITS_PER_TRACE
-    ) {
-      this.reportStepCap(chat, trace);
-      return;
-    }
 
     // Runs first and without a model, so a whitelist violation or a leaked
     // credential is still reported when the audit model is unreachable.
@@ -992,81 +949,18 @@ export class AuditService {
     });
   }
 
-  private async intentAudit(chat: AgentChatAuditor) {
+  // PLAN_AUDITOR's auditAll: repeated failures, then backtrace of open
+  // suspicions and forward trace of prompt injections, concurrently. There is
+  // no separate whole-run intent diagnosis — each step was already judged in
+  // isolation, and these three checks are how those suspicions are tied
+  // together once the chat has finished.
+  private async auditAll(chat: AgentChatAuditor) {
     const traceId = chat.chatId;
     await this.settledIntent();
     const trace = this.deps.traceStore.get(traceId);
     if (!trace) return;
-    const root = trace.spans.find((span) => span.name === "agent.run");
-    const instructions =
-      typeof root?.attributes.instructions === "string"
-        ? root.attributes.instructions
-        : "";
-    const prior = this.deps.context?.priorFor(traceId) ?? null;
-    const priorContext = prior?.summary ?? "";
-    const intent = pinnedState(chat, trace, () => this.captureIntent(trace));
-    // Captured with the spec, for the same reason the step audit does it.
     const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
 
-    const steps = trace.spans
-      .filter((span) => span.kind !== "run")
-      .map((span) => {
-        const parts = ["- [" + span.status + "] " + span.label];
-        if (typeof span.attributes.arguments === "string") {
-          parts.push("args: " + span.attributes.arguments.slice(0, 300));
-        }
-        if (span.error) parts.push("error: " + span.error.slice(0, 200));
-        return parts.join(" | ");
-      })
-      .join("\n")
-      .slice(0, 6_000);
-
-    const user = [
-      "Agent instructions: " + (instructions || "(none)"),
-      "User goal for this run: " + trace.prompt,
-      intent.objective ? "Standing objective: " + intent.objective : "",
-      intent.extended.length > 0
-        ? "Standing constraints:\n" +
-          intent.extended.map((entry) => "- " + entry).join("\n")
-        : "",
-      priorContext
-        ? "Context carried in from the previous run (" +
-          (prior?.source === "model" ? "model summary" : "derived from trace") +
-          "): " +
-          priorContext
-        : "",
-      "Run status: " + trace.status,
-      "Steps:",
-      steps,
-    ]
-      .filter((line) => line.length > 0)
-      .join("\n");
-
-    const { verdict, status, failure, attempts } = await this.model.complete(
-      this.auditorRun(trace),
-      this.deps.intentModel,
-      null,
-      INTENT_SYSTEM_PROMPT,
-      user,
-      intentVerdict,
-    );
-    this.recordAuditorAttempts(trace, {
-      name: "audit.run",
-      label: "Run audit",
-      targetSpanId: null,
-      prompt: user,
-      attempts,
-      usedFallback: status === "degraded",
-    });
-
-    // Upgrades the deterministic digest to the model's compression. A blank or
-    // failed verdict leaves the digest in place rather than erasing it.
-    this.deps.context?.enrich(traceId, verdict?.context_summary ?? "");
-
-    // The forward trace reads every step's record, so it must not start while
-    // step audits are still in flight — batches run concurrently, so being
-    // queued after them is not enough. Its own failure is reported and never
-    // allowed to lose the run audit that has already been paid for.
     let followThrough: AuditTraceStep[] = [];
     try {
       await chat.awaitSteps();
@@ -1105,9 +999,6 @@ export class AuditService {
           intentId,
         },
         (push) => {
-          if (verdict && !verdict.aligned && verdict.deviation) {
-            push("warning", "intent-check", verdict.deviation);
-          }
           // Needs no model, so it still reports when Ark is unreachable.
           for (const repeat of findRepeatedFailures(trace)) {
             push(
@@ -1121,12 +1012,11 @@ export class AuditService {
                 (repeat.attempt ? ": " + repeat.attempt : "."),
             );
           }
-          pushAuditorStatus(push, status, failure);
         },
       ).concat(followThrough),
-      verdict?.context_summary ?? "",
+      "",
       intentId,
-      healthOf(status),
+      "ok",
     );
     // The run-level pass is the last thing an auditor does for a chat, so this
     // is where its own run ends. Until it does the auditor's trace reads as
@@ -1253,7 +1143,7 @@ export class AuditService {
       // once per run and appends; this one can be repeated, so the previous
       // answer goes first rather than being doubled.
       this.deps.auditStore.clearRunAudit(trace.id);
-      await this.intentAudit(chat);
+      await this.auditAll(chat);
       return;
     }
     const { intentId } = chat.pinIntent(() => this.captureIntent(trace));
@@ -1379,10 +1269,9 @@ export class AuditService {
     trace: TraceRecord,
     auditorSpans: TraceSpan[],
     intentId: string,
-    // Steps the budget stopped this pass from judging. Reported here rather
-    // than through reportStepCap: that says its piece once per chat and writes
-    // where this pass then replaces, so a repeated audit would drop the notice
-    // and read as though it had looked at everything.
+    // Steps the requested-audit budget stopped this pass from judging.
+    // Reported here so a repeated audit cannot drop the notice and read as
+    // though it had looked at everything.
     unjudged = 0,
   ) {
     const identity = {
@@ -1426,9 +1315,8 @@ export class AuditService {
     // stack would stop dead at this level.
     this.recordAuditorAttempts(trace, {
       name: "audit.auditor",
-      // Named for symmetry with the Agent-level "Run audit": this is the pass
-      // over the whole run, sitting beneath the per-step rows rather than
-      // standing in for them.
+      // The pass over the auditor's whole trace, sitting beneath the per-step
+      // rows rather than standing in for them.
       label: "Auditor run audit",
       targetSpanId: null,
       prompt,

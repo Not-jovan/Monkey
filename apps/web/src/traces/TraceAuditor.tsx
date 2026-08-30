@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link } from "react-router";
 import { api, type IntentView } from "../api";
 import type {
   AuditHealth,
@@ -139,7 +139,7 @@ function HumanCorrection({
 export function healthCopy(
   health: AuditHealth,
   notes: AuditTraceStep[],
-): { title: string; body: string } {
+): { title: string; body: string; notes: string[] } {
   // One outage is reported separately by every audited step, so the same
   // sentence arrives once per step. How many steps it covered is worth saying;
   // printing it that many times is not.
@@ -148,31 +148,28 @@ export function healthCopy(
     if (note.finding.length === 0) continue;
     counts.set(note.finding, (counts.get(note.finding) ?? 0) + 1);
   }
-  const recorded = [...counts]
-    .map(([message, count]) => {
-      if (count === 1) return message;
-      return message + " (on " + count + " audited steps)";
-    })
-    .join(" ");
+  const recorded = [...counts].map(([message, count]) => {
+    if (count === 1) return message;
+    return message + " (on " + count + " audited steps)";
+  });
   if (health === "ok") {
     return {
       title: "Auditor completed",
       body: "The primary audit model judged this run.",
+      notes: [],
     };
   }
   if (health === "degraded") {
     return {
       title: "Auditor used a fallback model",
-      body:
-        recorded ||
-        "The primary audit model failed. A secondary model still produced a verdict; the original error was not stored for this run.",
+      body: "The primary audit model failed. A secondary model still produced a verdict; the original error was not stored for this run.",
+      notes: recorded,
     };
   }
   return {
     title: "Auditor did not complete",
-    body:
-      recorded ||
-      "Neither audit model produced a verdict. The original error was not stored for this run.",
+    body: "Neither audit model produced a verdict. The original error was not stored for this run.",
+    notes: recorded,
   };
 }
 
@@ -313,23 +310,13 @@ export function TraceAuditor({
   const [view, setView] = useState<AuditorView>("list");
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  // Judges the auditor whose steps are shown below — which is a trace like any
-  // other, so this is the same call at every depth. The answer lands on that
-  // trace, which is where we then go.
+  // Judges the trace on this page. The answer lands here, so we stay put and
+  // the auditor pane fills in. Going deeper is a click on the auditor's trace.
   const auditTheAuditor = useMutation({
-    mutationFn: () => {
-      if (auditTraceId === null) {
-        throw new Error("This run has not been audited yet.");
-      }
-      return api.audit(auditTraceId);
-    },
+    mutationFn: () => api.audit(trace.id),
     onSuccess: () => {
-      // Both keys, because the destination page reads under both and would
-      // otherwise show the state from before this audit ran.
-      void queryClient.invalidateQueries({ queryKey: ["audit", auditTraceId] });
-      void queryClient.invalidateQueries({ queryKey: ["trace", auditTraceId] });
-      void navigate("/traces/" + auditTraceId);
+      void queryClient.invalidateQueries({ queryKey: ["audit", trace.id] });
+      void queryClient.invalidateQueries({ queryKey: ["trace", trace.id] });
     },
   });
   const auditPending = auditTheAuditor.isPending;
@@ -366,7 +353,15 @@ export function TraceAuditor({
           Auditor
         </h2>
         <p className="auditor-health-title">{copy.title}</p>
-        <p className="auditor-health-body">{copy.body}</p>
+        {copy.notes.length > 0 ? (
+          <ul className="auditor-health-notes">
+            {copy.notes.map((note) => (
+              <li key={note}>{note}</li>
+            ))}
+          </ul>
+        ) : (
+          <p className="auditor-health-body">{copy.body}</p>
+        )}
       </section>
 
       {auditTheAuditor.isError && (
@@ -416,19 +411,21 @@ export function TraceAuditor({
                 Open this auditor&rsquo;s trace
               </Link>
             )}
-            {/* Deliberately a button and not something that happens on its own.
-                An auditor's steps are real trace spans, so judging them
-                produces more of the same; if this ran automatically it would
-                feed itself without limit. Every level is one click, and the
-                stack goes as deep as someone chooses to take it. */}
-            <button
-              type="button"
-              className="button button-ghost"
-              disabled={auditPending || auditTraceId === null}
-              onClick={() => auditTheAuditor.mutate()}
-            >
-              {auditPending ? "Auditing…" : "Audit this auditor"}
-            </button>
+            {/* Shown only on an auditor's own page. The automatic pass already
+                judged the agent run, and clicking here would mint a new
+                auditor of that run, re-pointing the stack. Deliberately a
+                button: if this ran on its own it would feed itself without
+                limit. Every level is one click. */}
+            {trace.auditOf !== null && (
+              <button
+                type="button"
+                className="button button-ghost"
+                disabled={auditPending}
+                onClick={() => auditTheAuditor.mutate()}
+              >
+                {auditPending ? "Auditing…" : "Audit this auditor"}
+              </button>
+            )}
             <a
               className="button button-ghost"
               href={api.auditArchiveUrl(trace.id)}

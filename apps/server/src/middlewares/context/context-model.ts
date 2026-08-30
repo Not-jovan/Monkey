@@ -9,8 +9,8 @@ import type { TraceRecord } from "../trace/trace-model.js";
 // disabled auditor, or an unactivated endpoint left the chain silently empty
 // and every later run was judged as if nothing had happened before it. The
 // digest below is derived from the trace alone, so a run always leaves
-// something behind; the model summary is an enrichment on top of it, never the
-// only source.
+// something behind. The auditor used to overlay a model compression on top;
+// that whole-run diagnosis is gone, so the digest is the only source.
 
 export const runDigestSchema = z.object({
   prompt: z.string(),

@@ -3,13 +3,13 @@ import type { IntentState } from "../intent/intent-model.js";
 
 // PLAN_AUDITOR's AgentChatAuditor: one auditor per (agentId, chatId). It owns
 // the identity every finding for that chat is stamped with, the folder its
-// artifacts are written to, and the per-chat state that used to live in three
-// parallel maps on the service — whether the step budget ran out, whether a
-// meta-audit is running, and how many step audits are still in flight.
+// artifacts are written to, and the per-chat state that used to live in
+// parallel maps on the service — whether a meta-audit is running, and how
+// many step audits are still in flight.
 //
-// Keying that state by chat *object* rather than by three lookups on a trace id
-// is the point: they are three facts about one thing, and the run-level checks
-// need all three to agree. The forward trace must not read the run back until
+// Keying that state by chat *object* rather than by lookups on a trace id
+// is the point: they are facts about one thing, and the run-level checks
+// need them to agree. The forward trace must not read the run back until
 // this chat's step audits have finished, and nothing outside this chat can tell
 // it that.
 //
@@ -55,7 +55,6 @@ export class AgentChatAuditor {
   // for by the run-level checks.
   private open = 0;
   private waiters: (() => void)[] = [];
-  private capped = false;
   private requestRunning = false;
   // This auditor's own run, as a trace. Opened lazily on the first model call
   // it makes, not at construction: a chat whose audits were all answered
@@ -109,14 +108,6 @@ export class AgentChatAuditor {
   awaitSteps(): Promise<void> {
     if (this.open === 0) return Promise.resolve();
     return new Promise<void>((resolve) => this.waiters.push(resolve));
-  }
-
-  // True the first time only, so a long run is told once that step auditing
-  // stopped rather than on every step past the budget.
-  reportCap() {
-    if (this.capped) return false;
-    this.capped = true;
-    return true;
   }
 
   auditStep(spanId: string) {

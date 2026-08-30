@@ -322,33 +322,14 @@ test.describe("A denied action is diagnosable", () => {
     expect(failure!.remedy.length).toBeGreaterThan(0);
   });
 
-  test("the trace answers what went wrong without hunting", async () => {
+  test("the failing step shows the envelope", async () => {
     await page.goto(`/traces/${outcome.detail.trace.id}`);
-
-    const summary = page.locator(".failure-summary");
-    await expect(summary).toBeVisible();
-    await expect(summary.locator(".failure-layer")).toBeVisible();
-    // The remedy and the jump to the failing step are what turn a recorded
-    // failure into an answer.
-    await expect(summary.locator(".failure-remedy")).not.toBeEmpty();
-
-    // A run that completed anyway has to say so, or the banner reads as though
-    // the run died.
-    if (outcome.run.status === "completed") {
-      await expect(summary).toHaveClass(/failure-recovered/);
-      await expect(summary).toContainText(/worked around/i);
-    }
-
-    await page.getByRole("button", { name: /^Failing step:/ }).click();
+    await page.getByRole("button", { name: "Call List" }).click();
+    await page.locator(".step-row-failing").click();
     await expect(page.locator(".span-panel-head")).toBeVisible();
-  });
-
-  test("the raw envelope is one click away from the diagnosis", async () => {
-    await page.goto(`/traces/${outcome.detail.trace.id}`);
     const block = page.locator(".failure-block").first();
     await expect(block).toBeVisible();
     await block.getByRole("button", { name: "Raw" }).click();
-    // The "before" half of the comparison: the untouched, unreadable original.
     await expect(block.locator(".failure-raw-view")).toBeVisible();
     await expect(block.locator(".failure-raw-note")).toContainText(/characters/);
   });

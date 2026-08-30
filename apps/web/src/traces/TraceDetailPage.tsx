@@ -10,9 +10,7 @@ import { TraceCanvas } from "./TraceCanvas";
 import { TraceAuditor } from "./TraceAuditor";
 import { SpanFindings, TraceIntent } from "./TraceIntent";
 import { parseCodexFailure, readCommand } from "./codex-error";
-import { buildDiagnosis, recoveryNote } from "./failure";
 import { FailureBlock } from "./FailureBlock";
-import { FailureSummary } from "./FailureSummary";
 import { TextBlock } from "./TextBlock";
 import { TraceStepList } from "./TraceStepList";
 import { TraceTimeline } from "./TraceTimeline";
@@ -261,16 +259,12 @@ export function TraceDetailPage() {
       (warningsBySpan.get(finding.spanId) ?? 0) + 1,
     );
   }
-  // Split for the same reason the list rows are: a suspicion is a question the
-  // auditor could not settle, and counting it as a warning states the very
-  // thing the severity exists to avoid stating.
-  const suspicionCount = agentFindings.filter(
-    (finding) => finding.type === "suspicion",
+  // A suspicion is a question the auditor could not settle, not a warning
+  // against the agent, so it is not in this count.
+  const warningCount = agentFindings.filter(
+    (finding) => finding.type !== "suspicion",
   ).length;
-  const warningCount = agentFindings.length - suspicionCount;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
-  const diagnosis = trace ? buildDiagnosis(trace) : null;
-  const recovered = trace ? recoveryNote(trace) : null;
 
   const selectedSpan =
     trace?.spans.find((span) => span.id === selectedSpanId) ?? null;
@@ -406,14 +400,6 @@ export function TraceDetailPage() {
                     {warningCount} Warning{warningCount === 1 ? "" : "s"}
                   </span>
                 )}
-                {suspicionCount > 0 && (
-                  <span className="suspicion-badge">
-                    {suspicionCount} Unresolved
-                  </span>
-                )}
-                {recovered && (
-                  <span className="recovered-badge">↺ {recovered}</span>
-                )}
                 {!trace.evidenceComplete && (
                   <span
                     className="failure-partial"
@@ -428,10 +414,6 @@ export function TraceDetailPage() {
             </>
           )}
         </>
-      )}
-
-      {pane === "run" && diagnosis && (
-        <FailureSummary diagnosis={diagnosis} onSelect={setSelectedSpanId} />
       )}
 
       {pane === "run" && trace && (

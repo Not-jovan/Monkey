@@ -27,35 +27,40 @@ describe("healthCopy", () => {
       note(OUTAGE, "c"),
     ]);
 
-    expect(copy.body).toBe(OUTAGE + " (on 3 audited steps)");
+    expect(copy.notes).toEqual([OUTAGE + " (on 3 audited steps)"]);
   });
 
   it("leaves a note reported by a single step uncounted", () => {
     const copy = healthCopy("failed", [note(OUTAGE)]);
 
-    expect(copy.body).toBe(OUTAGE);
+    expect(copy.notes).toEqual([OUTAGE]);
   });
 
   // Collapsing must not swallow a second, different reason the auditor failed.
-  it("keeps notes that say different things", () => {
+  it("keeps notes that say different things as separate entries", () => {
     const copy = healthCopy("degraded", [
       note("Primary model unavailable.", "a"),
       note("The verdict was unparseable.", "b"),
     ]);
 
-    expect(copy.body).toContain("Primary model unavailable.");
-    expect(copy.body).toContain("The verdict was unparseable.");
+    expect(copy.notes).toEqual([
+      "Primary model unavailable.",
+      "The verdict was unparseable.",
+    ]);
+    expect(copy.body).not.toContain("Primary model unavailable.");
   });
 
   it("falls back to the standing copy when nothing was recorded", () => {
-    expect(healthCopy("failed", []).body).toContain(
-      "Neither audit model produced a verdict",
-    );
-    expect(healthCopy("degraded", []).body).toContain(
-      "A secondary model still produced a verdict",
-    );
-    expect(healthCopy("ok", [note(OUTAGE)]).body).toBe(
-      "The primary audit model judged this run.",
-    );
+    const failed = healthCopy("failed", []);
+    expect(failed.notes).toEqual([]);
+    expect(failed.body).toContain("Neither audit model produced a verdict");
+
+    const degraded = healthCopy("degraded", []);
+    expect(degraded.notes).toEqual([]);
+    expect(degraded.body).toContain("A secondary model still produced a verdict");
+
+    const ok = healthCopy("ok", [note(OUTAGE)]);
+    expect(ok.notes).toEqual([]);
+    expect(ok.body).toBe("The primary audit model judged this run.");
   });
 });

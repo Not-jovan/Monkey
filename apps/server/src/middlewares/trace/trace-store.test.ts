@@ -141,19 +141,21 @@ describe("TraceStore", () => {
   it("walks the chain from any depth back to the agent run", async () => {
     const { store } = await makeStore();
     store.create(trace("level-0"));
-    store.create({ ...trace("level-1"), auditOf: "level-0", auditDepth: 1 });
-    store.create({ ...trace("level-2"), auditOf: "level-1", auditDepth: 2 });
-    store.create({ ...trace("level-3"), auditOf: "level-2", auditDepth: 3 });
+    for (let depth = 1; depth <= 5; depth += 1) {
+      store.create({
+        ...trace("level-" + depth),
+        auditOf: "level-" + (depth - 1),
+        auditDepth: depth,
+      });
+    }
 
-    expect(store.auditChain("level-3").map((entry) => entry.id)).toEqual([
-      "level-0",
-      "level-1",
-      "level-2",
-      "level-3",
-    ]);
-    expect(store.auditChain("level-0").map((entry) => entry.id)).toEqual([
-      "level-0",
-    ]);
+    for (let depth = 0; depth <= 5; depth += 1) {
+      const chain = store.auditChain("level-" + depth);
+      expect(chain).toHaveLength(depth + 1);
+      expect(chain.map((entry) => entry.id)).toEqual(
+        Array.from({ length: depth + 1 }, (_, index) => "level-" + index),
+      );
+    }
   });
 
   // A corrupted file pointing a trace at itself would otherwise hang the

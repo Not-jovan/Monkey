@@ -1658,6 +1658,14 @@ textarea:focus {
   line-height: 1.45;
 }
 
+.auditor-health-notes {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
 .auditor-findings {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -2260,34 +2268,6 @@ textarea:focus {
    whether the agent is at fault. Never the only cue — every chip also says its
    layer in words, and the blame note spells it out underneath. */
 
-.failure-summary {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  border-left: 3px solid var(--red);
-  border-radius: 16px;
-  padding: 16px 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.failure-summary.failure-blame-environment {
-  border-left-color: #b8860b;
-}
-
-.failure-summary h2 {
-  margin: 0;
-  font-size: 1.02rem;
-}
-
-.failure-summary-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.failure-layer,
 .failure-chip {
   display: inline-flex;
   align-items: center;
@@ -2301,44 +2281,20 @@ textarea:focus {
   white-space: nowrap;
 }
 
-.failure-blame-environment .failure-layer,
 .failure-chip.failure-blame-environment {
   background: #fdf6e3;
   color: #8a6a12;
   border-color: #eadfbe;
 }
 
-.failure-retry,
 .failure-partial {
   font-size: 0.72rem;
-  color: var(--muted);
-}
-
-.failure-partial {
   color: #8a6a12;
   border: 1px dashed #eadfbe;
   border-radius: 999px;
   padding: 1px 8px;
 }
 
-.failure-attribution {
-  margin: 0;
-  font-size: 0.82rem;
-  color: var(--muted);
-}
-
-.failure-remedy {
-  margin: 0;
-  font-size: 0.86rem;
-}
-
-.failure-jumps {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-
-.failure-raw,
 .failure-raw-view pre {
   margin: 0;
   background: #fbfaf7;
@@ -2367,34 +2323,6 @@ textarea:focus {
   border: 1px dashed var(--line);
   font-size: 0.72rem;
   color: var(--muted);
-  white-space: nowrap;
-}
-
-/* Deliberately quieter than .warning-badge, and dashed like the auditor badge:
-   both say "the middleware is telling you about itself" rather than making a
-   claim about the agent. */
-.suspicion-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px dashed #c9c8c0;
-  background: transparent;
-  font-size: 0.72rem;
-  color: #6f6f78;
-  white-space: nowrap;
-}
-
-.recovered-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 8px;
-  border-radius: 999px;
-  background: #fdf6e3;
-  border: 1px solid #eadfbe;
-  color: #8a6a12;
-  font-size: 0.72rem;
   white-space: nowrap;
 }
 
@@ -2687,17 +2615,3 @@ textarea:focus {
   font-weight: 600;
 }
 
-/* A run that absorbed a denial and carried on. Muted rather than red: nothing
-   failed in the end, but something was worth noticing and used to be silent. */
-.failure-summary.failure-recovered {
-  border-left-color: var(--muted);
-}
-
-.failure-outcome {
-  padding: 1px 8px;
-  border-radius: 999px;
-  border: 1px dashed var(--line);
-  font-size: 0.72rem;
-  color: var(--muted);
-  white-space: nowrap;
-}

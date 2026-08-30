@@ -63,15 +63,6 @@ describe("AgentChatAuditor", () => {
     await expect(chat.awaitSteps()).resolves.toBeUndefined();
   });
 
-  // Said once per chat: a long run would otherwise repeat "auditing stopped"
-  // on every step past the budget.
-  it("reports the step cap once", () => {
-    const { chat } = auditor();
-    expect(chat.reportCap()).toBe(true);
-    expect(chat.reportCap()).toBe(false);
-    expect(chat.reportCap()).toBe(false);
-  });
-
   // Auditing the same trace twice at once would judge a half-written record.
   it("refuses a second requested audit while the first is running", async () => {
     let release!: () => void;

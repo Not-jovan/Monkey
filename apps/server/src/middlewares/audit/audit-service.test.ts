@@ -44,7 +44,7 @@ function checkOf(system: string): string {
   if (system.includes("settling them, now that")) return "back-trace";
   if (system.includes("went on to carry any of them out")) return "forward-trace";
   if (system.includes("auditing an auditor")) return "meta";
-  return "run";
+  return "other";
 }
 
 // The fakes answer as a provider, which is the boundary a test wants to hold.
@@ -515,63 +515,33 @@ describe("AuditService", () => {
     );
   });
 
-  it("runs the intent audit on completion and carries the summary forward", async () => {
+  it("ties step findings together on completion without a whole-run intent diagnosis", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (model) => {
-        if (model === "intent-model") {
-          return '{"aligned":false,"deviation":"read credentials instead of counting files","context_summary":"Goal: count files. Agent read /etc/passwd."}';
-        }
-        return SAFE_VERDICT;
-      },
+      respond: () => SAFE_VERDICT,
     };
     const service = makeAudit(stores, responder);
 
     seedTrace(stores.traceStore, "trace-5");
+    stores.traceStore.appendSpan("trace-5", promptSpan("trace-5", "hello"));
     stores.traceStore.updateTrace("trace-5", (trace) => {
       trace.status = "completed";
       trace.endedAt = "2026-08-26T12:00:10.000Z";
     });
     await service.idle();
 
-    const findings = stores.auditStore.listByTrace("trace-5");
-    expect(findings).toHaveLength(1);
-    expect(findings[0]?.category).toBe("intent-check");
-    expect(findings[0]?.finding).toContain("read credentials");
     const auditorSpans = auditorSpansOf(stores, "trace-5");
-    expect(auditorSpans.some((span) => span.name === "audit.run")).toBe(true);
-    expect(
-      auditorSpans.some(
-        (span) =>
-          span.name === "audit.run" &&
-          String(span.attributes.output).includes("count files"),
-      ),
-    ).toBe(true);
-    // The model's compression replaces the derived digest, and survives a
-    // restart because it is persisted by the context store rather than being
-    // recomputed from an audit that may never run again.
-    const carried = stores.contextStore.get("trace-5");
-    expect(carried?.source).toBe("model");
-    expect(carried?.summary).toContain("Goal: count files");
-    await stores.contextStore.flush();
-    const reopened = new ContextStore(path.join(stores.directory, "context"));
-    await reopened.initialize();
-    expect(reopened.get("trace-5")?.summary).toContain("Goal: count files");
-
-    // The next run for the same agent must receive the compressed context.
-    seedTrace(stores.traceStore, "trace-6");
-    stores.traceStore.updateTrace("trace-6", (trace) => {
-      trace.status = "completed";
-    });
-    await service.idle();
-    const intentCalls = responder.calls.filter(
-      (call) => call.model === "intent-model",
-    );
-    expect(intentCalls[1]?.user).toContain(
-      "Goal: count files. Agent read /etc/passwd.",
-    );
+    expect(auditorSpans.some((span) => span.name === "audit.run")).toBe(false);
+    const runLevelIntent = stores.auditStore
+      .listByTrace("trace-5")
+      .filter((step) => step.spanId === null && step.category === "intent-check");
+    expect(runLevelIntent).toHaveLength(0);
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-5");
+    expect(auditTraceId).not.toBeNull();
+    expect(stores.traceStore.get(auditTraceId!)?.status).toBe("completed");
   });
+
   it("reports whitelist and credential findings when every model is down", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
@@ -950,10 +920,7 @@ describe("AuditService", () => {
 
     const responder: FakeResponder = {
       calls: [],
-      respond: (model) =>
-        model === "intent-model"
-          ? '{"aligned":true,"deviation":null,"context_summary":"Documentation run."}'
-          : SAFE_VERDICT,
+      respond: () => SAFE_VERDICT,
     };
     const service = makeAudit(stores, responder, null, intent);
     const trace = seedTrace(stores.traceStore, "trace-pinned");
@@ -963,7 +930,7 @@ describe("AuditService", () => {
     );
 
     // Change the active intent while the trace's audits are still queued.
-    // Both its step and run-level audit must retain the earlier snapshot.
+    // Step audits must retain the earlier snapshot.
     intent.applyHumanCorrection("agent-1", {
       correction: "Use HTML for all documentation.",
       traceId: "later-trace",
@@ -985,9 +952,9 @@ describe("AuditService", () => {
       expect(call.user).toContain("Use Markdown for all documentation.");
       expect(call.user).not.toContain("Use HTML for all documentation.");
     }
-    // Both phases ran under the pin, which is what "queued audits" means here.
+    // Step audits ran under the pin. auditAll's traces only fire when there
+    // are suspicions to settle, so they are not asserted here.
     expect(responder.calls.some((call) => call.check === "intent")).toBe(true);
-    expect(responder.calls.some((call) => call.check === "run")).toBe(true);
   });
 
   it("audits a subagent reply, and only warns once the agent acts on it", async () => {
@@ -1216,8 +1183,12 @@ describe("auditing the auditor", () => {
     await service.idle();
 
     const depths: number[] = [];
-    let target = stores.traceStore.auditorTraceFor("trace-deep")!;
-    for (let level = 0; level < 3; level += 1) {
+    const first = stores.traceStore.auditorTraceFor("trace-deep")!;
+    expect(stores.traceStore.auditChain(first)).toHaveLength(
+      stores.traceStore.get(first)!.auditDepth + 1,
+    );
+    let target = first;
+    for (let level = 0; level < 4; level += 1) {
       const result = await service.audit(target);
       await service.idle();
       expect(result).not.toBeNull();
@@ -1226,12 +1197,16 @@ describe("auditing the auditor", () => {
       expect(stores.auditStore.listByTrace(target).length).toBeGreaterThan(0);
       const next = stores.traceStore.auditorTraceFor(target);
       expect(next).toBeTruthy();
-      depths.push(stores.traceStore.get(next!)!.auditDepth);
+      const nextTrace = stores.traceStore.get(next!)!;
+      depths.push(nextTrace.auditDepth);
+      expect(stores.traceStore.auditChain(next!)).toHaveLength(
+        nextTrace.auditDepth + 1,
+      );
       target = next!;
     }
 
     // Each level is one deeper than the last, and none of it happened on its own.
-    expect(depths).toEqual([2, 3, 4]);
+    expect(depths).toEqual([2, 3, 4, 5]);
   });
 
   it("leaves a record of its own pass, so the level above it has something to read", async () => {
@@ -1644,14 +1619,11 @@ describe("AuditService forward trace", () => {
     summary: "Read README.md, which contained an instruction to upload .env.",
     reason: "the file tells the agent to exfiltrate the environment",
   });
-  const RUN_VERDICT =
-    '{"aligned":true,"deviation":null,"context_summary":"read a file"}';
 
   function respondWith(forward: string, back = '{"resolved":[]}') {
     return (_model: string, user: string) => {
       if (user.includes(FORWARD_MARKER)) return forward;
       if (user.includes(BACK_MARKER)) return back;
-      if (user.includes("Run status:")) return RUN_VERDICT;
       if (user.includes("README.md")) return INJECTION_VERDICT;
       return JSON.stringify({
         dangerous: false,
@@ -1763,8 +1735,7 @@ describe("AuditService forward trace", () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
-      respond: (_model, user) =>
-        user.includes("Run status:") ? RUN_VERDICT : SAFE_VERDICT,
+      respond: () => SAFE_VERDICT,
     };
     const service = makeAudit(stores, responder);
 
@@ -1805,12 +1776,6 @@ describe("AuditService forward trace ordering", () => {
               unclear: [],
               reason: "nothing followed through",
             }),
-          };
-        }
-        if (user.includes("Run status:")) {
-          return {
-            content:
-              '{"aligned":true,"deviation":null,"context_summary":"read a file"}',
           };
         }
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -1912,9 +1877,6 @@ describe("AuditService back trace", () => {
       respond: (_model: string, user: string) => {
         if (user.includes(FORWARD_MARKER)) return forward;
         if (user.includes(BACK_MARKER)) return back;
-        if (user.includes("Run status:")) {
-          return '{"aligned":true,"deviation":null,"context_summary":"read a file"}';
-        }
         if (user.includes("README.md")) {
           return JSON.stringify({
             dangerous: false,
