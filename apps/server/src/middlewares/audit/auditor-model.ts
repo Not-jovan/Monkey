@@ -196,13 +196,6 @@ export class AuditorModel {
     system: string,
     user: string,
     schema: Schema,
-    options?: {
-      // A cache the caller opened over `system` plus the leading, shared part
-      // of `user`, and the model it was opened for. Carried with its model
-      // because the fallback leg runs on a different one, for which the cache
-      // holds nothing.
-      context?: { id: string; model: string; tail: string } | undefined;
-    },
   ): Promise<AuditorAnswer<z.infer<Schema>>> {
     const attempts: AuditorCallAttempt[] = [];
     const runAttempt = async (model: string) => {
@@ -214,8 +207,6 @@ export class AuditorModel {
         // Through the runner rather than the provider client: an auditor that
         // executes the way an Agent does is one the trace pipeline can record,
         // and a recorded auditor is one that can itself be audited.
-        const context = options?.context;
-        const cached = context && context.model === model ? context : null;
         const result = await this.runner.run({
           agentId: run.agentId,
           workspacePath: run.workspacePath,
@@ -223,9 +214,6 @@ export class AuditorModel {
           threadId: null,
           system,
           model,
-          ...(cached
-            ? { promptCache: { contextId: cached.id, tail: cached.tail } }
-            : {}),
         });
         usage = result.usage;
         timing = result.timing ?? null;

@@ -94,9 +94,8 @@ describe("summarizeError", () => {
   });
 });
 
-describe("AuditorModel.complete prompt cache", () => {
-  // Records what the runner was actually asked for, which is the whole
-  // question here: the cache changes the request, not the answer.
+describe("AuditorModel.complete request shape", () => {
+  // Records what the runner was actually asked for.
   function recordingRunner(): AgentRunner & { requests: RunnerRequest[] } {
     const requests: RunnerRequest[] = [];
     return {
@@ -104,9 +103,6 @@ describe("AuditorModel.complete prompt cache", () => {
       run: async (request) => {
         requests.push(request);
         const named = request.model ?? "";
-        if (named === "primary-model") {
-          throw notActivated("request-id-" + requests.length);
-        }
         return { output: ANSWER, threadId: null, usage: null, model: named };
       },
       cancel: async () => false,
@@ -114,59 +110,24 @@ describe("AuditorModel.complete prompt cache", () => {
     };
   }
 
-  it("sends the cache and the tail when the context was opened for this model", async () => {
+  // The provider caches on a common leading prefix, so several checks can only
+  // share one if what reaches the runner is exactly what the caller composed:
+  // the shared system turn, then the shared evidence, then the question that
+  // trails it. Anything this model added of its own would sit in between.
+  it("passes the caller's system turn and prompt through untouched", async () => {
     const runner = recordingRunner();
     const model = new AuditorModel(runner);
 
-    await model.complete(RUN, "good-model", null, "s", "evidence\n\nq", verdict, {
-      context: { id: "ctx-1", model: "good-model", tail: "q" },
-    });
+    const composed = "evidence\n\nthe question";
+    await model.complete(RUN, "good-model", null, "s", composed, verdict);
 
-    expect(runner.requests[0]?.promptCache).toEqual({
-      contextId: "ctx-1",
-      tail: "q",
-    });
-    // Still carried whole, because the client falls back to it if the
-    // provider says the context is gone.
-    expect(runner.requests[0]?.prompt).toBe("evidence\n\nq");
-    expect(runner.requests[0]?.system).toBe("s");
-  });
-
-  it("does not hand the fallback model a context opened for another", async () => {
-    const runner = recordingRunner();
-    const model = new AuditorModel(runner);
-
-    const answer = await model.complete(
-      RUN,
-      "primary-model",
-      "fallback-model",
-      "s",
-      "evidence\n\nq",
-      verdict,
-      { context: { id: "ctx-1", model: "primary-model", tail: "q" } },
-    );
-
-    expect(answer.status).toBe("degraded");
-    expect(runner.requests[0]?.promptCache).toEqual({
-      contextId: "ctx-1",
-      tail: "q",
-    });
-    expect(runner.requests[1]?.model).toBe("fallback-model");
-    expect(runner.requests[1]?.promptCache).toBeUndefined();
-  });
-
-  it("asks exactly as it did before when no context was opened", async () => {
-    const runner = recordingRunner();
-    const model = new AuditorModel(runner);
-
-    await model.complete(RUN, "good-model", null, "s", "u", verdict);
-
+    expect(runner.requests).toHaveLength(1);
     expect(runner.requests[0]).toMatchObject({
-      prompt: "u",
       system: "s",
+      prompt: composed,
+      model: "good-model",
       threadId: null,
     });
-    expect(runner.requests[0]?.promptCache).toBeUndefined();
   });
 });
 

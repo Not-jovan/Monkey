@@ -112,13 +112,6 @@ export interface RunnerRequest {
   // process runners, which have no use for either, are unaffected.
   system?: string | undefined;
   model?: string | undefined;
-  // A provider-side cache already holding `system` and the leading, shared
-  // part of `prompt`. When it hits, only `tail` is sent. `prompt` and `system`
-  // stay populated regardless: they are what the provider client falls back to
-  // if the cache turns out to be gone. Only an in-process runner talking to a
-  // caching provider reads this — a CLI runtime owns its own cache and ignores
-  // it, which is why it is optional.
-  promptCache?: { contextId: string; tail: string } | undefined;
   // Names the failure transcript written when a run fails. Optional so tests
   // and any caller that does not need post-mortem logs can omit it.
   runId?: string | undefined;
@@ -148,17 +141,3 @@ export interface AgentRunner {
   isAvailable(): Promise<boolean>;
 }
 
-// Opening a cache for a prompt several calls are about to share. Separate from
-// AgentRunner because most runners have nothing to open: a CLI runtime already
-// caches on its own, and only a caller that knows two of its calls share a
-// prefix can say where the cache should start.
-export interface PromptCache {
-  // Null rather than a throw, and null rather than an error: a cache that
-  // could not be opened costs tokens, never a verdict, so no caller should
-  // have to handle it as a failure.
-  open(input: {
-    model: string;
-    system: string;
-    prefix: string;
-  }): Promise<string | null>;
-}
