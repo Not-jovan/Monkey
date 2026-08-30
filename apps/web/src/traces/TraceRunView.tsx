@@ -1,7 +1,5 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { TraceDetail } from "../api";
-import { api } from "../api";
 import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { isSuccessfulAudit } from "./audit-status";
 import { parseCodexFailure, readCommand } from "./codex-error";
@@ -133,7 +131,6 @@ export function TraceRunView({
   onSelectSpan: (spanId: string) => void;
   focusedFindingId?: string | null;
 }) {
-  const queryClient = useQueryClient();
   const { trace, intent } = detail;
   const isAuditor =
     typeof trace.auditOf === "string" && trace.auditOf.length > 0;
@@ -166,14 +163,6 @@ export function TraceRunView({
     (finding) => finding.spanId === selectedSpanId,
   );
 
-  const audit = useMutation({
-    mutationFn: () => api.audit(trace.id),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["trace", trace.id] });
-    },
-  });
-  const showAuditButton =
-    isAuditor && trace.status !== "running" && !auditedOk;
   const focusedSpanId =
     findings.find((finding) => finding.id === focusedFindingId)?.spanId ?? null;
 
@@ -225,16 +214,6 @@ export function TraceRunView({
             Steps
           </h2>
           <div className="trace-steps-controls">
-            {showAuditButton && (
-              <button
-                type="button"
-                className="button button-ghost"
-                disabled={audit.isPending}
-                onClick={() => audit.mutate()}
-              >
-                {audit.isPending ? "Auditing…" : "Audit"}
-              </button>
-            )}
             <div className="view-toggle" role="group" aria-label="Step view">
               <button
                 type="button"
@@ -263,13 +242,6 @@ export function TraceRunView({
             </div>
           </div>
         </div>
-        {audit.isError && (
-          <p className="intent-change-error" role="alert">
-            {audit.error instanceof Error
-              ? audit.error.message
-              : "The auditor could not be audited."}
-          </p>
-        )}
         {view === "list" && (
           <TraceStepList
             spans={trace.spans}

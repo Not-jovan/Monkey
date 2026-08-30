@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
 import {
@@ -8,6 +8,7 @@ import {
   type TraceDetail,
 } from "../api";
 import type { TraceRecord } from "../types";
+import { auditAction } from "./audit-action";
 import { TraceRunView, type StepView } from "./TraceRunView";
 
 type TracePane = "run" | "auditor";
@@ -130,6 +131,7 @@ function tracePollMs(data: TraceDetail | undefined) {
 export function TraceDetailPage() {
   const { traceId = "" } = useParams();
   const [searchParams] = useSearchParams();
+  const queryClient = useQueryClient();
   const [runSpanId, setRunSpanId] = useState<string | null>(null);
   const [auditorSpanId, setAuditorSpanId] = useState<string | null>(null);
   const [view, setView] = useState<StepView>(readStoredView);
@@ -167,6 +169,30 @@ export function TraceDetailPage() {
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
 
+  // The move one level deeper into the stack of audits, read from this page's
+  // own trace rather than from whichever pane is showing. Both tabs then mean
+  // the same thing by it: on the auditor tab, the pane is a preview of exactly
+  // the trace this opens as a page of its own.
+  const action = detailQuery.data
+    ? auditAction({
+        auditOf: detailQuery.data.trace.auditOf,
+        status: detailQuery.data.trace.status,
+        auditComplete: detailQuery.data.auditComplete,
+        auditHealth: detailQuery.data.auditHealth,
+        auditTraceId: detailQuery.data.auditTraceId,
+      })
+    : { view: null, run: false };
+
+  // Requested rather than automatic, so the whole pass runs inside this call
+  // and the button sits on "Auditing…" for as long as it takes. The refetch
+  // that follows turns it into the way in to the audit it just wrote.
+  const audit = useMutation({
+    mutationFn: () => api.audit(traceId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["trace", traceId] });
+    },
+  });
+
   const chooseView = (next: StepView) => {
     setView(next);
     persistView(next);
@@ -176,6 +202,13 @@ export function TraceDetailPage() {
     setPane(next);
     persistPane(next);
   };
+
+  // Following the audit deeper changes only the id in the route, so the page
+  // never unmounts and the tab would come along to a trace it does not
+  // describe — landing on the audit of the audit instead of the run just
+  // opened. Not choosePane: nobody picked this, so it must not overwrite the
+  // tab they did pick.
+  const followAudit = () => setPane("run");
 
   if (locked || detailQuery.error) {
     let message = "Could not load the trace.";
@@ -240,29 +273,61 @@ export function TraceDetailPage() {
       {trace && (
         <>
           <AuditChain chain={detailQuery.data?.auditChain ?? []} current={traceId} />
-          <div className="pane-toggle view-toggle" role="tablist" aria-label="Trace view">
-            <button
-              type="button"
-              role="tab"
-              className={pane === "run" ? "is-active" : ""}
-              aria-selected={pane === "run"}
-              onClick={() => choosePane("run")}
+          <div className="trace-pane-row">
+            <div
+              className="pane-toggle view-toggle"
+              role="tablist"
+              aria-label="Trace view"
             >
-              View Run
-            </button>
-            <button
-              type="button"
-              role="tab"
-              className={pane === "auditor" ? "is-active" : ""}
-              aria-selected={pane === "auditor"}
-              onClick={() => choosePane("auditor")}
-            >
-              View Auditor
-              {auditHealth !== "ok" && (
-                <span className="pane-mark">issue</span>
-              )}
-            </button>
+              <button
+                type="button"
+                role="tab"
+                className={pane === "run" ? "is-active" : ""}
+                aria-selected={pane === "run"}
+                onClick={() => choosePane("run")}
+              >
+                View Run
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={pane === "auditor" ? "is-active" : ""}
+                aria-selected={pane === "auditor"}
+                onClick={() => choosePane("auditor")}
+              >
+                View Auditor
+                {auditHealth !== "ok" && (
+                  <span className="pane-mark">issue</span>
+                )}
+              </button>
+            </div>
+            {action.view && (
+              <Link
+                className="button button-ghost"
+                to={"/traces/" + action.view}
+                onClick={followAudit}
+              >
+                View Audit
+              </Link>
+            )}
+            {action.run && (
+              <button
+                type="button"
+                className="button button-ghost"
+                disabled={audit.isPending}
+                onClick={() => audit.mutate()}
+              >
+                {audit.isPending ? "Auditing…" : "Audit"}
+              </button>
+            )}
           </div>
+          {audit.isError && (
+            <p className="intent-change-error" role="alert">
+              {audit.error instanceof Error
+                ? audit.error.message
+                : "The auditor could not be audited."}
+            </p>
+          )}
         </>
       )}
 

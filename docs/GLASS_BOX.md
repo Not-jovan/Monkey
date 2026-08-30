@@ -194,7 +194,7 @@ services are required.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `AUDIT_ENABLED` | `true` | Set to `false` to stop auditing entirely. |
+| `AUDIT_ENABLED` | `true` | Set to `false` to stop the automatic pass. Audits asked for from a trace page still run. |
 | `AUDIT_SECURITY_MODEL` | `gpt-oss-120b-250805` | Judges each step. |
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
 | `AUDIT_PROMPT_CACHE` | `false` | Cache a step's shared evidence with Ark, so only the first of its three always-on checks pays for it. |
