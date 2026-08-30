@@ -156,6 +156,20 @@ export class AuditStore {
     return structuredClone(this.docs.get(traceId)?.history ?? []);
   }
 
+  // A pass that answered for some steps and never reached the run-level
+  // question — which is where it is written, last of all. So this says the
+  // previous attempt stopped partway rather than finished, and the answers it
+  // did get are worth carrying on from rather than buying again.
+  interruptedPass(traceId: string) {
+    const doc = this.docs.get(traceId);
+    if (!doc) return false;
+    return Object.keys(doc.spanAudit).length > 0 && !this.isRunComplete(traceId);
+  }
+
+  hasSpanAudit(traceId: string, spanId: string) {
+    return (this.docs.get(traceId)?.spanAudit[spanId] ?? []).length > 0;
+  }
+
   // This span's answer, replacing whatever it said before rather than adding
   // to it. Asking an auditor the same question again produces the same shape
   // of answer, so appending would double every finding.

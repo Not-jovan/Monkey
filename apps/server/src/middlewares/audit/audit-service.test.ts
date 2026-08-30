@@ -2796,3 +2796,147 @@ describe("AuditService crash recovery", () => {
     await restarted.auditMemory.flush();
   });
 });
+
+// An auditor's own trace is the evidence a meta-audit reads. If the calls the
+// meta-audit makes land on that same trace, the next one judges the auditor on
+// work the auditor never did — it audits itself alongside its subject, and the
+// trace grows every time it is asked.
+describe("auditing the auditor twice", () => {
+  // destinationForAttempts writes onto an auditor subject when no run is open
+  // for it. That is right for a derivation about the auditor itself and wrong
+  // while that auditor is the thing being judged. identifyIntent pins its
+  // answer, so the second audit of the same auditor in one process skipped
+  // deriveBoth — the only thing that opened a run — and the meta-audit was
+  // appended to its own evidence. requestedAudit opens the run itself now, so
+  // the pass has somewhere of its own to write whatever identify did.
+  it("never writes its own calls onto the trace it is judging", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
+          ? '{"unsupportedFindings":[],"missedSignals":[],"reason":"r"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+
+    seedTrace(stores.traceStore, "trace-twice");
+    stores.traceStore.appendSpan(
+      "trace-twice",
+      promptSpan("trace-twice", "count the files"),
+    );
+    await service.idle();
+    const auditTraceId = stores.traceStore.auditorTraceFor("trace-twice")!;
+
+    const modelCalls = () =>
+      (stores.traceStore.get(auditTraceId)?.spans ?? []).filter(
+        (span) => span.kind === "model_call",
+      ).length;
+
+    const beforeAnyMetaAudit = modelCalls();
+    expect(beforeAnyMetaAudit).toBeGreaterThan(0);
+
+    await service.audit(auditTraceId);
+    await service.idle();
+    const afterFirst = modelCalls();
+
+    await service.audit(auditTraceId);
+    await service.idle();
+    const afterSecond = modelCalls();
+
+    // The auditor did no further work of its own between these, so the trace
+    // that records what it did must not have grown.
+    expect(afterFirst).toBe(beforeAnyMetaAudit);
+    expect(afterSecond).toBe(beforeAnyMetaAudit);
+  });
+});
+
+// A meta-audit stopped partway — a crash, a restart — has answers for some of
+// the auditor's steps and none for the rest. Asking again should finish the
+// job rather than buy the whole pass a second time.
+describe("resuming an interrupted audit of an auditor", () => {
+  async function auditorTraceWithSteps(traceId: string) {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (_model, user, system) =>
+        checkOf(system, user) === "meta"
+          ? '{"unsupportedFindings":[],"missedSignals":[],"reason":"r"}'
+          : SAFE_VERDICT,
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, traceId);
+    stores.traceStore.appendSpan(traceId, promptSpan(traceId, "count files"));
+    await service.idle();
+    const auditTraceId = stores.traceStore.auditorTraceFor(traceId)!;
+    const spans = (stores.traceStore.get(auditTraceId)?.spans ?? []).filter(
+      (span) => span.kind === "model_call",
+    );
+    expect(spans.length).toBeGreaterThan(1);
+    return { stores, responder, service, auditTraceId, spans };
+  }
+
+  // Both the per-step question and the run-level one are "meta", and every
+  // pass ends with exactly one of the latter — so a pass over N steps makes
+  // N + 1 of these.
+  const RUN_LEVEL_PASS = 1;
+  const metaCalls = (responder: FakeResponder) =>
+    responder.calls.filter((call) => call.check === "meta").length;
+
+  it("asks only for the steps the interrupted pass never reached", async () => {
+    const { stores, responder, service, auditTraceId, spans } =
+      await auditorTraceWithSteps("trace-resume");
+    const auditorTrace = stores.traceStore.get(auditTraceId)!;
+
+    // A pass that answered for the first step and stopped: no run-level
+    // answer, which is what marks it as interrupted rather than finished.
+    stores.auditStore.replaceSpan(
+      auditorTrace,
+      spans[0]!.id,
+      [
+        {
+          id: "already-judged",
+          traceId: auditTraceId,
+          agentId: auditorTrace.agentId,
+          spanId: spans[0]!.id,
+          intentId: "",
+          type: "warning",
+          category: "security",
+          finding: "answered before the crash",
+        },
+      ],
+      "",
+    );
+    expect(stores.auditStore.isRunComplete(auditTraceId)).toBe(false);
+    responder.calls.length = 0;
+
+    await service.audit(auditTraceId);
+    await service.idle();
+
+    // One step was already answered, so only the rest were asked.
+    expect(metaCalls(responder)).toBe(spans.length - 1 + RUN_LEVEL_PASS);
+    // And the answer it kept is still there, not replaced by a fresh one.
+    expect(
+      stores.auditStore
+        .listByTrace(auditTraceId)
+        .some((entry) => entry.id === "already-judged"),
+    ).toBe(true);
+  });
+
+  it("asks again for everything when the previous pass finished", async () => {
+    const { responder, service, auditTraceId, spans } =
+      await auditorTraceWithSteps("trace-fresh");
+
+    await service.audit(auditTraceId);
+    await service.idle();
+    const first = metaCalls(responder);
+    expect(first).toBe(spans.length + RUN_LEVEL_PASS);
+
+    responder.calls.length = 0;
+    await service.audit(auditTraceId);
+    await service.idle();
+
+    // A finished pass is not carried on from: asking again asks everything.
+    expect(metaCalls(responder)).toBe(spans.length + RUN_LEVEL_PASS);
+  });
+});

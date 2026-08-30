@@ -1449,16 +1449,29 @@ export class AuditService {
       await this.reauditAgent(chat, trace);
       return;
     }
+    // Opened before anything is asked, so every call this pass makes has a run
+    // of its own to be recorded on. Without it, destinationForAttempts falls
+    // back to writing onto the subject — and identifyIntent pins its answer,
+    // so the second audit of one auditor skipped deriveBoth, the only other
+    // thing that opens a run, and appended the meta-audit to the evidence it
+    // was judging. The pass after that read those calls as work the auditor
+    // had done.
+    this.openAuditTrace(trace);
     await this.identifyFor(chat, trace);
-    // The answers this trace already holds are filed as a superseded pass, and
-    // then left where they are: each is replaced as its new answer arrives.
+    // Carrying on rather than starting over, when the last attempt stopped
+    // partway: the steps that already have an answer are not asked again, so a
+    // crash halfway through a long auditor does not mean paying for the whole
+    // pass a second time.
     //
-    // Emptying the document up front, which is what this used to do, destroyed
-    // the previous verdicts before their replacements existed. Nothing resumes
-    // a requested audit of an auditor — it is asked for, never automatic — so
-    // a crash partway through left the trace with no findings at all and no
-    // prospect of getting them back.
-    this.deps.auditStore.beginPass(trace);
+    // Emptying the document up front, which is what a re-audit used to do,
+    // destroyed the previous verdicts before their replacements existed. They
+    // are filed as a superseded pass now instead.
+    //
+    // Only an interrupted pass is continued. Asking for an audit of an auditor
+    // that already finished one is asking the question again, and that gets a
+    // fresh pass with the finished one filed behind it.
+    const resuming = this.deps.auditStore.interruptedPass(trace.id);
+    if (!resuming) this.deps.auditStore.beginPass(trace);
 
     // A snapshot, taken once. Anything appended while this runs belongs to the
     // next audit of this trace, not to this one.
@@ -1468,16 +1481,23 @@ export class AuditService {
     const auditorSpans = trace.spans.filter(
       (span) => span.kind === "model_call",
     );
+    const pending = resuming
+      ? auditorSpans.filter(
+          (span) => !this.deps.auditStore.hasSpanAudit(trace.id, span.id),
+        )
+      : auditorSpans;
 
     // Judged one at a time, each attributed to the step it is about — the same
     // shape the automatic pass produces for an Agent's steps. Judging the trace
     // as a whole and nothing else made an auditor's entire run read as a single
     // step, however much work it had done.
-    const budget = auditorSpans.slice(
+    const budget = pending.slice(
       0,
       this.deps.requestedStepBudget ?? MAX_REQUESTED_STEP_AUDITS,
     );
-    const unjudged = auditorSpans.length - budget.length;
+    // Steps the budget could not reach. A step skipped because it already has
+    // an answer is judged, not unjudged.
+    const unjudged = pending.length - budget.length;
     for (const span of budget) {
       chat.openStep();
       this.enqueue(() =>
