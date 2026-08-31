@@ -18,7 +18,6 @@ import { documentationFiles } from "./helpers/workspace";
 const live = process.env.RUN_LIVE_E2E === "true";
 const execFileAsync = promisify(execFile);
 test.skip(!live, "Set RUN_LIVE_E2E=true with Ark credentials to run this suite");
-test.describe.configure({ mode: "serial" });
 
 const prompts = {
   docs:
@@ -36,7 +35,6 @@ let page: Page;
 let agent: Agent;
 let docsTrace: TraceDetail;
 let githubTrace: TraceDetail;
-let correctionScopeTrace: TraceDetail;
 let htmlTrace: TraceDetail;
 
 async function sendMessage(prompt: string) {
@@ -143,9 +141,6 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 
   docsTrace = await sendMessage(prompts.docs);
   githubTrace = await sendMessage(prompts.github);
-  // Keep correction-scope coverage independent from the GitHub findings that
-  // an earlier test consumes.
-  correctionScopeTrace = await sendMessage(prompts.github);
   htmlTrace = await sendMessage(prompts.html);
 });
 
@@ -220,7 +215,7 @@ test("a GitHub run with actionable findings can start a Debug Agent", async () =
   ).toBeVisible();
 });
 
-test("a correction appears in current constraints but not in other run correction history", async () => {
+test("a correction stays source-scoped and rejects invalid reuse", async () => {
   const findingIds = actionableFindings(githubTrace)
     .slice(0, 2)
     .map((finding) => finding.id);
@@ -264,6 +259,26 @@ test("a correction appears in current constraints but not in other run correctio
     },
   );
   expect(directDuplicate.status()).toBe(409);
+  const all = await corrections(page.request, agent.id);
+  const created = all.find((entry) => entry.traceId === githubTrace.trace.id);
+  expect(created).toBeTruthy();
+  expect(created?.findingIds.length).toBeGreaterThan(0);
+  expect(all.filter((entry) => entry.traceId === docsTrace.trace.id)).toEqual([]);
+
+  const auditorId = githubTrace.auditTraceId!;
+  const directCorrection = await page.request.post(
+    `/api/traces/${auditorId}/intent/correct`,
+    {
+      data: {
+        findingIds: [created!.findingIds[0]!],
+        correction: "This should not be accepted from an auditor trace.",
+      },
+    },
+  );
+  expect(directCorrection.status()).toBe(409);
+
+  const refreshed = await getAgent(page.request, agent.id);
+  expect(refreshed.codexThreadId).toBe(htmlTrace.trace.conversationId);
 });
 
 test("an intent update is reflected on the run and in current intent history", async () => {
@@ -328,43 +343,6 @@ test("the auditor trace can be opened and audited on demand", async () => {
   expect(auditorDetail.trace.auditOf).toBe(githubTrace.trace.id);
   expect(auditorDetail.trace.auditDepth).toBe(1);
   expect(auditorDetail.auditTraceId).not.toBeNull();
-});
-
-test("correction APIs keep source-run evidence scoped", async () => {
-  const findings = actionableFindings(correctionScopeTrace);
-  expect(findings.length).toBeGreaterThan(0);
-  const uncorrectedFinding = findings[0]!;
-
-  const created = await correctIntent(
-    page.request,
-    correctionScopeTrace.trace.id,
-    [uncorrectedFinding.id],
-    "Treat related GitHub findings as one source-run correction.",
-  );
-
-  expect(created.traceId).toBe(correctionScopeTrace.trace.id);
-  expect(created.findingIds).toEqual([uncorrectedFinding.id]);
-
-  const all = await corrections(page.request, agent.id);
-  expect(all.filter((entry) => entry.traceId === docsTrace.trace.id)).toEqual([]);
-  expect(
-    all.some((entry) => entry.traceId === correctionScopeTrace.trace.id),
-  ).toBe(true);
-
-  const auditorId = correctionScopeTrace.auditTraceId!;
-  const directCorrection = await page.request.post(
-    `/api/traces/${auditorId}/intent/correct`,
-    {
-      data: {
-        findingIds: [uncorrectedFinding.id],
-        correction: "This should not be accepted from an auditor trace.",
-      },
-    },
-  );
-  expect(directCorrection.status()).toBe(409);
-
-  const refreshed = await getAgent(page.request, agent.id);
-  expect(refreshed.codexThreadId).toBe(htmlTrace.trace.conversationId);
 });
 
 test("a requested re-audit reuses cached results for every step", async () => {

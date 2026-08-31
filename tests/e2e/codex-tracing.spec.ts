@@ -11,7 +11,6 @@ import {
 const live = process.env.RUN_LIVE_E2E === "true";
 const execFileAsync = promisify(execFile);
 test.skip(!live, "Set RUN_LIVE_E2E=true with Ark credentials to run this suite");
-test.describe.configure({ mode: "serial" });
 
 async function activeRuntimeContainer(
   request: import("@playwright/test").APIRequestContext,
