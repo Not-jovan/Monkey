@@ -34,7 +34,6 @@ export class ProcessRuntimeRunner implements AgentRunner {
   constructor(
     private readonly config: AppConfig,
     private readonly runtime: RuntimeDefinition,
-    private readonly collectorToken: string,
   ) {}
 
   async isAvailable(): Promise<boolean> {
@@ -288,7 +287,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
     ] as const;
     const environment: NodeJS.ProcessEnv = {
       NO_COLOR: "1",
-      ...this.runtime.processEnv(this.config, this.collectorToken),
+      ...this.runtime.processEnv(this.config),
     };
     for (const name of inheritedNames) {
       if (process.env[name] !== undefined) environment[name] = process.env[name];

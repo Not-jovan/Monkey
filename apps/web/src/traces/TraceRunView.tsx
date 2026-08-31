@@ -16,7 +16,37 @@ import { TraceTimeline } from "./TraceTimeline";
 import { UsageBars } from "./UsageBars";
 import { spanUsage } from "./usage";
 
-export type StepView = "graph" | "list" | "timeline";
+export type StepView = "graph" | "list" | "timeline" | "events";
+
+function RuntimeEventLog({ trace }: { trace: TraceRecord }) {
+  return (
+    <div className="runtime-event-log">
+      {trace.runtimeEvents.length === 0 ? (
+        <p className="muted-cell">No runtime events recorded.</p>
+      ) : (
+        trace.runtimeEvents.map((entry, index) => {
+          const type =
+            typeof entry.event.type === "string" ? entry.event.type : "event";
+          return (
+            <article className="runtime-event-card" key={entry.at + ":" + index}>
+              <div className="runtime-event-head">
+                <strong>
+                  {index + 1}. {type}
+                </strong>
+                <span className="muted-cell">
+                  {new Date(entry.at).toLocaleTimeString()}
+                </span>
+              </div>
+              <pre className="runtime-event-json">
+                {JSON.stringify(entry.event, null, 2)}
+              </pre>
+            </article>
+          );
+        })
+      )}
+    </div>
+  );
+}
 
 function SpanDetails({
   span,
@@ -246,6 +276,14 @@ export function TraceRunView({
               >
                 Timeline
               </button>
+              <button
+                type="button"
+                className={view === "events" ? "is-active" : ""}
+                aria-pressed={view === "events"}
+                onClick={() => onViewChange("events")}
+              >
+                Event Log
+              </button>
             </div>
           </div>
         </div>
@@ -276,9 +314,10 @@ export function TraceRunView({
             onSelect={onSelectSpan}
           />
         )}
+        {view === "events" && <RuntimeEventLog trace={trace} />}
       </section>
 
-      {selectedSpan && (
+      {view !== "events" && selectedSpan && (
         <SpanDetails
           findings={selectedFindings}
           span={selectedSpan}

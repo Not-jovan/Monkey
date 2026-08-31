@@ -6,6 +6,7 @@ import { z } from "zod";
 // through the injected trace adapter instead.
 import { readStreamError } from "../../runtimes/codex.js";
 import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
+import { runtimeEventRecordSchema } from "./trace-model.js";
 import type { PartialUsage, RuntimeTraceAdapter } from "./runtime-events.js";
 import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
@@ -73,6 +74,7 @@ interface RunState {
   scopes: Map<string, ConversationScope>;
   conversationSpawn: Map<string, string>;
   completed: boolean;
+  rawModelCallStartedAt: string | null;
 }
 
 function emptyConversationScope(spawnSpanId: string | null): ConversationScope {
@@ -87,6 +89,39 @@ function emptyConversationScope(spawnSpanId: string | null): ConversationScope {
 }
 
 const OUTPUT_CLIP = 4_000;
+
+function isTerminalRuntimeEvent(event: Record<string, unknown>): boolean {
+  return (
+    event.type === "turn.completed" ||
+    event.type === "turn.failed" ||
+    event.type === "turn.cancelled" ||
+    event.type === "result"
+  );
+}
+
+function rawRuntimeUsage(event: Record<string, unknown>): PartialUsage | null {
+  if (!event.usage || typeof event.usage !== "object") return null;
+  const usage = event.usage as Record<string, unknown>;
+  const number = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  const inputTokens = number(usage.input_tokens);
+  const outputTokens = number(usage.output_tokens);
+  const cachedTokens = number(
+    usage.cached_input_tokens ?? usage.cache_read_input_tokens,
+  );
+  if (
+    inputTokens === undefined &&
+    outputTokens === undefined &&
+    cachedTokens === undefined
+  ) {
+    return null;
+  }
+  return {
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(cachedTokens === undefined ? {} : { cachedTokens }),
+  };
+}
 const ARGUMENT_CLIP = 2_000;
 const PENDING_TTL_MS = 5 * 60_000;
 const PENDING_CAP = 1_000;
@@ -235,6 +270,41 @@ const runnerCompletedItemSchema = z.object({
   receiver_thread_ids: z.array(z.string()).optional(),
 });
 
+const rawRunnerItemSchema = z.object({
+  id: z.string(),
+  type: z.string().optional(),
+  item_type: z.string().optional(),
+  status: z.string().optional(),
+  text: z.string().optional(),
+  message: z.string().optional(),
+  tool: z.string().optional(),
+  server: z.string().optional(),
+  command: z.union([z.string(), z.array(z.string())]).optional(),
+  aggregated_output: z.string().optional(),
+  exit_code: z.number().nullable().optional(),
+  arguments: z.unknown().optional(),
+  result: z.unknown().optional(),
+  error: z.unknown().optional(),
+});
+
+function rawRunnerItemKind(
+  item: z.infer<typeof rawRunnerItemSchema>,
+): string | null {
+  return item.type ?? item.item_type ?? null;
+}
+
+function rawRunnerCommand(
+  item: z.infer<typeof rawRunnerItemSchema>,
+): string | null {
+  if (typeof item.command === "string" && item.command.length > 0) {
+    return item.command;
+  }
+  if (Array.isArray(item.command) && item.command.every((entry) => typeof entry === "string")) {
+    return item.command.join(" ");
+  }
+  return null;
+}
+
 function modelCallLabel(scope: ConversationScope, attempt: number | undefined) {
   const nested = scope.spawnSpanId !== null || scope.subagentStack.length > 0;
   const prefix = nested ? "Subagent model" : "Model";
@@ -345,6 +415,64 @@ export class TraceService {
     if (spoke) this.store.emitSpan(runId, spanId);
   }
 
+  private openRawModelSpan(
+    runId: string,
+    state: RunState,
+    timestamp: string,
+    output?: string,
+  ) {
+    const scope = this.rootScope(state);
+    const turnSpanId = this.ensureTurn(runId, state, timestamp);
+    const spanId = randomUUID();
+    scope.lastModelCallSpanId = spanId;
+    state.rawModelCallStartedAt = timestamp;
+    this.store.appendSpan(runId, {
+      id: spanId,
+      traceId: runId,
+      parentId: this.activeParent(scope, turnSpanId),
+      name: this.traceAdapter.runtimeId + ".turn",
+      label: modelCallLabel(scope, undefined),
+      kind: "model_call",
+      actor: "agent",
+      status: "running",
+      startedAt: timestamp,
+      endedAt: null,
+      durationMs: null,
+      attributes: {
+        laneId: this.laneIdFor(scope, false),
+        phase:
+          scope.toolsSinceLastModelCall.length === 0
+            ? scope.modelCallsInTurn === 0
+              ? "plan"
+              : "continue"
+            : "after_tool",
+        ...(scope.toolsSinceLastModelCall.length > 0
+          ? { afterTool: scope.toolsSinceLastModelCall.at(-1)! }
+          : {}),
+        ...(output ? { output: this.redactor.redactText(output) } : {}),
+      },
+      error: null,
+    });
+    scope.modelCallsInTurn += 1;
+    scope.toolsSinceLastModelCall = [];
+    return spanId;
+  }
+
+  private closeRawModelSpan(runId: string, state: RunState, timestamp: string) {
+    const startedAt = state.rawModelCallStartedAt;
+    const spanId = this.rootScope(state).lastModelCallSpanId;
+    if (!spanId || !startedAt) return;
+    this.store.updateSpan(runId, spanId, (span) => {
+      span.status = "ok";
+      span.endedAt = timestamp;
+      span.durationMs = Math.max(
+        0,
+        new Date(timestamp).getTime() - new Date(startedAt).getTime(),
+      );
+    });
+    state.rawModelCallStartedAt = null;
+  }
+
   onRunStart(agent: RunStartAgent, run: RunStartInput) {
     const startedAt = this.now().toISOString();
     const prompt = this.redactor.redactText(run.prompt);
@@ -370,6 +498,7 @@ export class TraceService {
       unrecognizedEvents: 0,
       auditOf: run.auditOf ?? null,
       auditDepth: run.auditDepth ?? 0,
+      runtimeEvents: [],
       spans: [],
     });
     this.store.appendSpan(run.id, {
@@ -429,6 +558,7 @@ export class TraceService {
       scopes: new Map(),
       conversationSpawn: new Map(),
       completed: false,
+    rawModelCallStartedAt: null,
     });
     // An auditor's run shares the Agent's id but is not the Agent running, so
     // it must not become what "the Agent's active run" resolves to. Terminating
@@ -465,10 +595,167 @@ export class TraceService {
     const state = this.runs.get(runId);
     if (!state) return;
 
+    const timestamp = this.now().toISOString();
+    this.store.appendRuntimeEvent(
+      runId,
+      runtimeEventRecordSchema.parse({
+        at: timestamp,
+        event: this.redactor.redactDeep(event),
+      }),
+    );
+    const scope = this.rootScope(state);
+
     const streamError = readStreamError(event);
     if (streamError !== null) {
       this.recordStreamError(runId, state, streamError);
       return;
+    }
+
+    if (event.type === "result" && typeof event.result === "string" && event.result.length > 0) {
+      if (!state.rawModelCallStartedAt) {
+        this.openRawModelSpan(runId, state, timestamp);
+      }
+      this.appendModelOutput(runId, scope.lastModelCallSpanId, event.result);
+    }
+
+    if (
+      (event.type === "item.started" ||
+        event.type === "item.completed" ||
+        event.type === "item.updated") &&
+      event.item &&
+      typeof event.item === "object"
+    ) {
+      const item = rawRunnerItemSchema.safeParse(event.item);
+      if (item.success) {
+        const kind = rawRunnerItemKind(item.data);
+        if (kind === "reasoning" && event.type === "item.completed" && item.data.text) {
+          this.closeRawModelSpan(runId, state, timestamp);
+          this.openRawModelSpan(runId, state, timestamp, item.data.text);
+          return;
+        }
+
+        if (kind === "command_execution") {
+          const turnSpanId = this.ensureTurn(runId, state, timestamp);
+          const command = rawRunnerCommand(item.data);
+          const argumentsJson = command ? JSON.stringify({ cmd: command }) : "";
+          if (event.type === "item.started") {
+            this.closeRawModelSpan(runId, state, timestamp);
+            const spanId = randomUUID();
+            state.toolSpans.set(item.data.id, spanId);
+            this.store.appendSpan(runId, {
+              id: spanId,
+              traceId: runId,
+              parentId: this.activeParent(scope, turnSpanId),
+              name: "tool.exec_command",
+              label: "Tool · exec_command",
+              kind: "tool_call",
+              actor: "agent",
+              status: "running",
+              startedAt: timestamp,
+              endedAt: null,
+              durationMs: null,
+              attributes: {
+                toolName: "exec_command",
+                callId: item.data.id,
+                laneId: this.laneIdFor(scope, false),
+                ...(scope.lastModelCallSpanId
+                  ? { causedBySpanId: scope.lastModelCallSpanId }
+                  : {}),
+                ...(argumentsJson ? { arguments: argumentsJson } : {}),
+              },
+              error: null,
+            });
+            if (argumentsJson && scope.lastModelCallSpanId) {
+              this.appendModelOutput(
+                runId,
+                scope.lastModelCallSpanId,
+                JSON.stringify({
+                  name: "exec_command",
+                  arguments: { cmd: command ?? "" },
+                }),
+              );
+            }
+            return;
+          }
+
+          if (event.type === "item.completed") {
+            const existing = state.toolSpans.get(item.data.id);
+            const rawOutput = item.data.aggregated_output ?? "";
+            const output = rawOutput
+              ? this.redactor.redactText(clip(rawOutput, OUTPUT_CLIP))
+              : "";
+            const outputTruncated = rawOutput.length > OUTPUT_CLIP;
+            const exitCode =
+              typeof item.data.exit_code === "number" ? item.data.exit_code : readExitCode(rawOutput);
+            const commandFailure = readCommandFailure(rawOutput);
+            const succeeded =
+              item.data.status !== "failed" &&
+              (exitCode === null || exitCode === 0) &&
+              commandFailure === null;
+            if (existing) {
+              this.store.updateSpan(
+                runId,
+                existing,
+                (span) => {
+                  span.status = succeeded ? "ok" : "error";
+                  span.endedAt = timestamp;
+                  span.durationMs = Math.max(
+                    0,
+                    new Date(timestamp).getTime() -
+                      new Date(span.startedAt).getTime(),
+                  );
+                  if (output) span.attributes.output = output;
+                  if (outputTruncated) {
+                    span.attributes.outputTruncated = true;
+                    span.attributes.outputLength = rawOutput.length;
+                  }
+                  if (exitCode !== null) span.attributes.exitCode = exitCode;
+                  span.error = succeeded
+                    ? null
+                    : clip(output, 400) || "Tool failed";
+                },
+                { emit: true },
+              );
+            }
+            if (succeeded) {
+              scope.toolsSinceLastModelCall.push("exec_command");
+              if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
+            }
+            return;
+          }
+        }
+
+        if (kind === "agent_message" && event.type === "item.completed" && item.data.text) {
+          if (!state.rawModelCallStartedAt) {
+            this.openRawModelSpan(runId, state, timestamp);
+          }
+          this.appendModelOutput(runId, scope.lastModelCallSpanId, item.data.text);
+          return;
+        }
+
+        if (kind === "error" && event.type === "item.completed" && item.data.message) {
+          const turnSpanId = this.ensureTurn(runId, state, timestamp);
+          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+            name: this.traceAdapter.runtimeId + ".error",
+            label: this.traceAdapter.displayName + " error",
+            kind: "system",
+            actor: "system",
+            status: "error",
+            startedAt: timestamp,
+            endedAt: timestamp,
+            durationMs: 0,
+            attributes: { laneId: this.laneIdFor(scope, false) },
+            error: this.redactor.redactText(item.data.message),
+          });
+          return;
+        }
+      }
+    }
+
+    if (isTerminalRuntimeEvent(event)) {
+      this.closeRawModelSpan(runId, state, timestamp);
+      const usage = rawRuntimeUsage(event);
+      if (usage) this.applyUsage(runId, scope, usage);
     }
 
     if (event.type !== "item.completed") return;
@@ -491,8 +778,8 @@ export class TraceService {
       return;
     }
 
-    const timestamp = this.now().toISOString();
-    const turnSpanId = this.ensureTurn(runId, state, timestamp);
+    const spawnTimestamp = this.now().toISOString();
+    const turnSpanId = this.ensureTurn(runId, state, spawnTimestamp);
     const caller = this.rootScope(state);
     const callId = item.data.id ?? randomUUID();
     const existing = state.toolSpans.get(callId);
@@ -539,8 +826,8 @@ export class TraceService {
       kind: "tool_call",
       actor: "agent",
       status: completed ? "ok" : "running",
-      startedAt: timestamp,
-      endedAt: completed ? timestamp : null,
+      startedAt: spawnTimestamp,
+      endedAt: completed ? spawnTimestamp : null,
       durationMs: completed ? 0 : null,
       attributes: {
         toolName: "spawn_agent",

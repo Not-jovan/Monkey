@@ -50,7 +50,9 @@ function openJson(fileName: string, data: unknown) {
 function readStoredView(): StepView {
   try {
     const stored = localStorage.getItem("trace-view");
-    if (stored === "list" || stored === "timeline") return stored;
+    if (stored === "list") return "list";
+    if (stored === "timeline") return "timeline";
+    if (stored === "events") return "events";
     if (stored === "graph" || stored === "flow") return "graph";
   } catch {
     // Private windows and blocked site data throw on access.

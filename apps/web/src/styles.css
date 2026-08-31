@@ -186,6 +186,42 @@ button {
   background: #f1d9d6;
 }
 
+.runtime-event-log {
+  display: grid;
+  gap: 12px;
+}
+
+.runtime-event-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+  padding: 14px 16px;
+}
+
+.runtime-event-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.runtime-event-head strong {
+  font-size: 13px;
+}
+
+.runtime-event-json {
+  margin: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: #f3f2ed;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .create-button {
   width: 100%;
   justify-content: flex-start;
@@ -2137,6 +2173,7 @@ textarea:focus {
 .trace-instruction {
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
   margin: 0;

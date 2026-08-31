@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { blamesAgent } from "../../failures.js";
@@ -23,33 +22,6 @@ export function registerTraceRoutes(
   app: FastifyInstance,
   deps: MiddlewareDeps,
 ) {
-  const tokenMatches = (candidate: string) => {
-    const expected = Buffer.from(deps.collectorToken);
-    const received = Buffer.from(candidate);
-    return (
-      expected.length > 0 &&
-      expected.length === received.length &&
-      timingSafeEqual(expected, received)
-    );
-  };
-
-  app.post(
-    "/collector/v1/logs",
-    { bodyLimit: 16 * 1024 * 1024 },
-    async (request, reply) => {
-      const token = request.headers["x-collector-token"];
-      if (typeof token !== "string" || !tokenMatches(token)) {
-        return reply.code(401).send({ error: "Invalid collector token" });
-      }
-      const result = deps.traceService.ingestLogs(request.body);
-      if (result === null) {
-        return reply.code(400).send({ error: "Not an OTLP logs payload" });
-      }
-      request.log.debug(result, "otlp logs ingested");
-      return reply.code(200).send({ partialSuccess: {} });
-    },
-  );
-
   app.get("/api/agents/:id/traces", async (request) => {
     const { id } = idParams.parse(request.params);
     const auditCounts = deps.auditStore.countsByTrace();

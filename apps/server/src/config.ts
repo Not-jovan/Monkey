@@ -110,9 +110,6 @@ const envSchema = z.object({
   AUDIT_MODEL_THINKING: z
     .enum(["disabled", "enabled", "auto"])
     .default("disabled"),
-  // Override for setups where the Runtime cannot reach the control plane via
-  // the derived host (e.g. rootless engines without host-gateway support).
-  OTEL_COLLECTOR_URL: z.string().url().optional(),
   NODE_ENV: z
     .enum(["development", "test", "production"])
     .default("development"),
@@ -195,7 +192,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
         : env.AUDIT_NETWORK_WHITELIST.split(",")
             .map((entry) => entry.trim().toLowerCase())
             .filter((entry) => entry.length > 0),
-    otelCollectorUrl: env.OTEL_COLLECTOR_URL?.replace(/\/+$/, "") ?? "",
     nodeEnv: env.NODE_ENV,
   };
 }
@@ -209,19 +205,6 @@ export function secretValues(config: AppConfig): string[] {
     config.anthropicApiKey,
     config.claudeCodeOauthToken,
   ].filter((value) => value.length > 0);
-}
-
-export function collectorLogsUrl(config: AppConfig): string {
-  if (config.otelCollectorUrl) {
-    return config.otelCollectorUrl + "/collector/v1/logs";
-  }
-  // The Runtime container reaches the control plane through the Docker host
-  // alias; the local-process runner shares the host loopback.
-  const host =
-    config.runtimeProvider === "container"
-      ? "host.docker.internal"
-      : "127.0.0.1";
-  return "http://" + host + ":" + config.port + "/collector/v1/logs";
 }
 
 export function isArkConfigured(config: AppConfig): boolean {

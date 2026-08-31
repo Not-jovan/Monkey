@@ -7,9 +7,8 @@ import type { AgentRunner } from "./types.js";
 export function createRunner(
   config: AppConfig,
   runtime: RuntimeDefinition,
-  collectorToken: string,
 ): AgentRunner {
   return config.runtimeProvider === "container"
-    ? new ContainerRuntimeRunner(config, runtime, collectorToken)
-    : new ProcessRuntimeRunner(config, runtime, collectorToken);
+    ? new ContainerRuntimeRunner(config, runtime)
+    : new ProcessRuntimeRunner(config, runtime);
 }

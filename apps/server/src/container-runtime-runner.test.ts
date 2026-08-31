@@ -28,7 +28,6 @@ describe("Container runtime runner", () => {
       },
       config,
       codexRuntime,
-      "collector-token",
     );
 
     expect(containerName("agent/unsafe", "test-instance")).toBe(
@@ -62,7 +61,6 @@ describe("Container runtime runner", () => {
       },
       config,
       codexRuntime,
-      "collector-token",
     );
 
     expect(args.slice(-3)).toEqual(["resume", "thread-123", "continue"]);

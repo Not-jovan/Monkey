@@ -19,13 +19,10 @@ flowchart LR
     Container --> Ark["Volcengine Ark Responses API"]
     Codex --> Ark
     API -->|run start / stop| Tracer["Tracer"]
-    Runtime -->|writes stdout JSONL| EventFile[("Event File (events.jsonl)")]
+    Runtime -->|launches| Runner["Agent runner"]
+    Runner -->|captures stdout JSONL| EventFile[("Event File (events.jsonl)")]
     EventFile -->|reads new bytes| Scraper["Event scraper"]
     Scraper -->|writes scraped events| Tracer["Tracer"]
-    API --- Collector["Collector /collector/v1/logs"]
-    Container -->|OTLP logs| Collector
-    Codex -->|OTLP logs| Collector
-    Collector --> Tracer
     Scraper -.->|persists checkpoint| ScrapeState[("scrape-state.json")]
     Tracer --> Traces[("Traces\nagent + auditor")]
     Traces -->|read only| Auditor["Auditor"]
@@ -36,7 +33,6 @@ flowchart LR
     Traces --> UI
     Audits --> UI
 
-    style Collector fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style EventFile fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Scraper fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Tracer fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
@@ -262,7 +258,7 @@ When `APP_AUTH_TOKEN` is set, every `/api/` route except `/api/health` and
 `/api/auth` requires `Authorization: Bearer <token>`. Errors return
 `{ "error": "..." }`. Validation failures add `details`.
 
-The Runtime posts OTLP to `/collector/v1/logs`. That route is not under
-`/api/` and uses `x-collector-token`, not the bearer token. Operators and
-diagnosing agents should not call it.
+The Agent runner writes runtime JSONL to the local event file. The durable
+scraper reads that file, checkpoints its byte position, and sends the parsed
+events to the Tracer. Runtime event collection does not use an HTTP collector.
 

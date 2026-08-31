@@ -38,11 +38,10 @@ export function buildContainerRunArgs(
   request: RunnerRequest,
   config: AppConfig,
   runtime: RuntimeDefinition,
-  collectorToken: string,
 ): string[] {
   const name = containerName(request.agentId, config.runtimeInstanceId);
   const engineName = config.containerEngine.split(/[\\/]/).at(-1)?.toLowerCase();
-  const env = runtime.processEnv(config, collectorToken);
+  const env = runtime.processEnv(config);
   // The home-dir var gets its own explicit --env below, pointed at the
   // container-side mount path rather than the host path processEnv
   // returns; every other var is forwarded by name from the docker/podman
@@ -107,7 +106,6 @@ export class ContainerRuntimeRunner implements AgentRunner {
   constructor(
     private readonly config: AppConfig,
     private readonly runtime: RuntimeDefinition,
-    private readonly collectorToken: string,
   ) {}
 
   async isAvailable(): Promise<boolean> {
@@ -165,7 +163,6 @@ export class ContainerRuntimeRunner implements AgentRunner {
       request,
       this.config,
       this.runtime,
-      this.collectorToken,
     );
     const transcript = new RunTranscript();
     const child = spawn(this.config.containerEngine, argv, {
@@ -359,7 +356,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
   private childEnvironment(): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = {
       NO_COLOR: "1",
-      ...this.runtime.processEnv(this.config, this.collectorToken),
+      ...this.runtime.processEnv(this.config),
     };
     for (const name of [
       "PATH",

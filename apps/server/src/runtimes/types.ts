@@ -42,7 +42,7 @@ export interface RuntimeDefinition {
 
   // One-time side effects at boot (Codex: writes config.toml into homeDir;
   // Claude Code: no-op, it's configured entirely through env vars).
-  bootstrap(config: AppConfig, collectorToken: string): Promise<void>;
+  bootstrap(config: AppConfig): Promise<void>;
 
   // All env vars this runtime's process needs beyond PATH/HOME passthrough:
   // provider credential, home-dir var (host path — callers that need the
@@ -50,7 +50,7 @@ export interface RuntimeDefinition {
   // Computed fresh per run; used both as local child-process env and as the
   // source for container --env flags, so neither runner implementation
   // needs runtime-specific knowledge of what env vars matter.
-  processEnv(config: AppConfig, collectorToken: string): NodeJS.ProcessEnv;
+  processEnv(config: AppConfig): NodeJS.ProcessEnv;
 
   // The event that semantically closes one turn in the runtime's JSONL stream.
   isTerminalEvent(event: Record<string, unknown>): boolean;

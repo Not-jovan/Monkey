@@ -1,4 +1,4 @@
-import { collectorLogsUrl, type AppConfig } from "../config.js";
+import type { AppConfig } from "../config.js";
 import { parseClaudeCodeEvent } from "../middlewares/trace/claude-code-events.js";
 import type { NormalizedRuntimeEvent } from "../middlewares/trace/runtime-events.js";
 import type { ParsedEvents, RuntimeDefinition } from "./types.js";
@@ -287,7 +287,7 @@ export const claudeCodeRuntime: RuntimeDefinition = {
   // config.toml file.
   async bootstrap() {},
 
-  processEnv: (config, collectorToken) => ({
+  processEnv: (config) => ({
     CLAUDE_CONFIG_DIR: config.claudeCodeHome,
     // Exactly one credential, never both: Claude Code ranks
     // ANTHROPIC_API_KEY (a Console key, billed against Console credit)
@@ -298,23 +298,6 @@ export const claudeCodeRuntime: RuntimeDefinition = {
     ...(config.claudeCodeOauthToken
       ? { CLAUDE_CODE_OAUTH_TOKEN: config.claudeCodeOauthToken }
       : { ANTHROPIC_API_KEY: config.anthropicApiKey }),
-    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
-    OTEL_LOGS_EXPORTER: "otlp",
-    OTEL_METRICS_EXPORTER: "none",
-    OTEL_TRACES_EXPORTER: "none",
-    OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
-    // Used verbatim, unlike OTEL_EXPORTER_OTLP_ENDPOINT which gets
-    // /v1/logs auto-suffixed — our collector route isn't at that path.
-    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: collectorLogsUrl(config),
-    OTEL_EXPORTER_OTLP_LOGS_HEADERS: "x-collector-token=" + collectorToken,
-    // Prompts/tool details are captured deliberately, same rationale as
-    // Codex's log_user_prompt=true — the collector masks secrets before
-    // anything is persisted or displayed. Confirmed live: with this flag on,
-    // the logs signal carries tool call *input* (tool_parameters/tool_input)
-    // but never output content, only its byte size — see
-    // claude-code-events.ts's header note 2.
-    OTEL_LOG_USER_PROMPTS: "1",
-    OTEL_LOG_TOOL_DETAILS: "1",
   }),
 
   isTerminalEvent: isClaudeCodeTerminalEvent,

@@ -112,6 +112,19 @@ export interface TraceUsage {
   toolTokens: number;
 }
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export interface RuntimeEventRecord {
+  at: string;
+  event: { [key: string]: JsonValue };
+}
+
 export interface TraceSummary {
   id: string;
   agentId: string;
@@ -154,6 +167,7 @@ export interface TraceRecord {
   // that makes it. An agent's own run is depth 0 with no target.
   auditOf: string | null;
   auditDepth: number;
+  runtimeEvents: RuntimeEventRecord[];
   spans: TraceSpan[];
 }
 

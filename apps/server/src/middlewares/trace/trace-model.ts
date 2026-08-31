@@ -51,6 +51,26 @@ export const traceUsageSchema = z.object({
 
 export type TraceUsage = z.infer<typeof traceUsageSchema>;
 
+const jsonValueSchema: z.ZodType<
+  string | number | boolean | null | Record<string, unknown> | unknown[]
+> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number(),
+    z.boolean(),
+    z.null(),
+    z.array(jsonValueSchema),
+    z.record(z.string(), jsonValueSchema),
+  ]),
+);
+
+export const runtimeEventRecordSchema = z.object({
+  at: z.string(),
+  event: z.record(z.string(), jsonValueSchema),
+});
+
+export type RuntimeEventRecord = z.infer<typeof runtimeEventRecordSchema>;
+
 export const traceRecordSchema = z.object({
   version: z.literal(1),
   id: z.string(),
@@ -85,6 +105,7 @@ export const traceRecordSchema = z.object({
   // otherwise, which is the whole reason auditing an auditor cannot run away.
   auditOf: z.string().nullable().default(null),
   auditDepth: z.number().default(0),
+  runtimeEvents: z.array(runtimeEventRecordSchema).default([]),
   spans: z.array(traceSpanSchema),
 });
 

@@ -16,8 +16,9 @@ flowchart LR
     API --> Intent["Intent classifier"]
     API --> Runtime["Agent Runtime\n(Codex or Claude Code)"]
     Intent -->|standing spec| Runtime
-    Runtime -->|OTLP/HTTP JSON| Collector["/collector/v1/logs"]
-    Collector --> Redact["Secret detection + masking"]
+    Runtime -->|writes stdout JSONL| EventFile[("events.jsonl")]
+    EventFile --> Scraper["Durable event scraper"]
+    Scraper --> Redact["Secret detection + masking"]
     Redact --> Traces[("Traces")]
     Traces -->|span events| Audit["Auditor"]
     Intent --> Audit
@@ -199,7 +200,6 @@ services are required.
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Comma-separated hostnames the Agent may reach. |
 | `AUDIT_MODEL_THINKING` | `disabled` | Step audits are JSON. `auto` is also sent as disabled; set `enabled` only if you are measuring recall. |
-| `OTEL_COLLECTOR_URL` | Derived | Override when the Runtime cannot reach the host via `host.docker.internal`. |
 
 There is nothing to configure for the auditor's prompt cache. Ark caches a
 common leading prefix by itself on the Chat API, free to store and impossible
@@ -522,7 +522,7 @@ the continuation of earlier work is not flagged as unmotivated.
 
 | Route | Purpose |
 | --- | --- |
-| `POST /collector/v1/logs` | OTLP ingest. Requires `x-collector-token`; outside `/api` by design. |
+| Local event scraper | Reads runtime `events.jsonl` and forwards parsed events to the Tracer. |
 | `GET /api/agents/:id/traces` | Trace list rows with failure attribution, warning counts, and audit health. |
 | `GET /api/agents/:id/failures` | The Agent's failures grouped by kind, newest first. |
 | `GET /api/agents/:id/intent` | Current objective, standing constraints, the ordered version list, and current intentId. |

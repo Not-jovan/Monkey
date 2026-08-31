@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   traceRecordSchema,
+  type RuntimeEventRecord,
   type TraceRecord,
   type TraceSpan,
 } from "./trace-model.js";
@@ -207,6 +208,14 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
     this.persistTrace(traceId);
     this.emit("span", { trace: structuredClone(trace), span: structuredClone(span) });
     return span;
+  }
+
+  appendRuntimeEvent(traceId: string, runtimeEvent: RuntimeEventRecord) {
+    const trace = this.traces.get(traceId);
+    if (!trace) return null;
+    trace.runtimeEvents.push(runtimeEvent);
+    this.persistTrace(traceId);
+    return runtimeEvent;
   }
 
   updateSpan(
