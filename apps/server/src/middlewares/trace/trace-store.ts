@@ -15,10 +15,11 @@ interface TraceStoreEvents {
 export class TraceStore extends EventEmitter<TraceStoreEvents> {
   private readonly traces = new Map<string, TraceRecord>();
   private readonly writeQueues = new Map<string, Promise<void>>();
-  // audited trace id -> the auditor trace that judged it. An index rather than
-  // a scan because every trace detail request asks the question, and the answer
-  // is one entry per audit.
-  private readonly auditorOf = new Map<string, string>();
+  // audited trace id -> the auditor traces that judged it, in insertion order.
+  // Re-auditing used to keep only the newest id, so a pass that failed partway
+  // hid every earlier one. Newest-first is decided at read time from startedAt,
+  // because boot reads files in directory order, not chronological order.
+  private readonly auditorOf = new Map<string, string[]>();
 
   constructor(
     private readonly directory: string,
@@ -67,10 +68,36 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
     return trace;
   }
 
-  // The auditor trace that judged this one, if any. Re-auditing replaces the
-  // previous answer rather than accumulating, so this is the newest audit.
+  // The newest auditor trace that judged this one, if any.
   auditorTraceFor(traceId: string) {
-    return this.auditorOf.get(traceId) ?? null;
+    return this.auditorAttemptsFor(traceId)[0]?.id ?? null;
+  }
+
+  // Every auditor pass over this trace, newest first. A retry after a mid-run
+  // failure is a second pass, not a replacement — both have to stay readable.
+  auditorAttemptsFor(traceId: string) {
+    const ids = this.auditorOf.get(traceId) ?? [];
+    const attempts: {
+      id: string;
+      status: TraceRecord["status"];
+      startedAt: string;
+      endedAt: string | null;
+    }[] = [];
+    for (const id of ids) {
+      const trace = this.traces.get(id);
+      if (!trace) continue;
+      attempts.push({
+        id: trace.id,
+        status: trace.status,
+        startedAt: trace.startedAt,
+        endedAt: trace.endedAt,
+      });
+    }
+    attempts.sort((left, right) => {
+      const byStart = right.startedAt.localeCompare(left.startedAt);
+      return byStart !== 0 ? byStart : right.id.localeCompare(left.id);
+    });
+    return attempts;
   }
 
   // The chain from this trace up to the agent run at the root of it, oldest
@@ -90,7 +117,10 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
 
   private indexAudit(trace: TraceRecord) {
     if (trace.auditOf === null) return;
-    this.auditorOf.set(trace.auditOf, trace.id);
+    const existing = this.auditorOf.get(trace.auditOf) ?? [];
+    if (existing.includes(trace.id)) return;
+    existing.push(trace.id);
+    this.auditorOf.set(trace.auditOf, existing);
   }
 
   get(traceId: string) {

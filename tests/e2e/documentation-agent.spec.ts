@@ -132,7 +132,7 @@ test("a normal run records trace evidence, documentation output, and an auditor 
     "true",
   );
   await expect(page.getByRole("tab", { name: /View Auditor/ })).toBeVisible();
-  await expect(page.getByRole("link", { name: "View Audit" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Get Debug Prompt" })).toBeVisible();
 });
 
 test("a non-whitelisted GitHub run exposes an actionable correction workflow", async () => {
@@ -241,7 +241,7 @@ test("the auditor trace can be opened and audited on demand", async () => {
   await expect(page.getByText(/Audit of trace/i)).toBeVisible();
   await expect(page.locator(".trace-correction")).toHaveCount(0);
 
-  await page.getByRole("link", { name: "View Audit" }).click();
+  await page.goto(`/traces/${auditorId}?pane=run`);
   await expect(page.getByRole("tab", { name: /View Run/ })).toHaveAttribute(
     "aria-selected",
     "true",

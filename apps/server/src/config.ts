@@ -70,8 +70,10 @@ const envSchema = z.object({
   AUDIT_SECURITY_MODEL: z.string().default("gpt-oss-120b-250805"),
   AUDIT_INTENT_MODEL: z.string().default("deepseek-v4-flash-ga-260731"),
   // Deadline for one audit model call. Streaming makes this a stall budget —
-  // the time allowed with no token arriving — rather than a cap on how long a
-  // whole answer may take, so a long verdict no longer races the clock.
+  // the time allowed with no answer text arriving — rather than a cap on how
+  // long a whole answer may take, so a long verdict no longer races the clock.
+  // Reasoning tokens do not reset it; a model that never leaves thinking dies
+  // at this deadline instead of running until the 5x ceiling.
   AUDIT_MODEL_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(60_000),
   // Streaming is what lets the deadline above tell a slow answer from a stuck
   // one. It costs about 1.3x end to end (six alternating eval runs each way:

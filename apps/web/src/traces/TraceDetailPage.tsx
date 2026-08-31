@@ -7,8 +7,10 @@ import {
   isApiErrorWithStatus,
   type TraceDetail,
 } from "../api";
-import type { TraceRecord } from "../types";
-import { auditAction, showDegradedRetry, type TracePane } from "./audit-action";
+import type { AuditAttempt, TraceRecord } from "../types";
+import { auditAction, auditInFlight, showFailedAlert, type TracePane } from "./audit-action";
+import { attemptsOldestFirst, auditAttemptLabel } from "./audit-attempts";
+import { debugPrompt } from "./debug-prompt";
 import { TraceRunView, type StepView } from "./TraceRunView";
 
 function download(fileName: string, data: unknown) {
@@ -117,6 +119,50 @@ export function auditChainLabel(depth: number) {
   return depth === 0 ? "Agent run" : "Audit";
 }
 
+function AuditAttempts({
+  attempts,
+  selectedId,
+  onSelect,
+}: {
+  attempts: AuditAttempt[];
+  selectedId: string;
+  onSelect: (id: string | null) => void;
+}) {
+  if (attempts.length < 2) return null;
+  const latestId = attempts[0]?.id;
+  return (
+    <>
+      <span className="audit-attempts-label">Attempts</span>
+      <div
+        className="pane-toggle view-toggle"
+        role="tablist"
+        aria-label="Auditor attempts"
+      >
+        {attemptsOldestFirst(attempts).map((attempt, index) => {
+          const selected = attempt.id === selectedId;
+          const latest = attempt.id === latestId;
+          return (
+            <button
+              key={attempt.id}
+              type="button"
+              role="tab"
+              className={selected ? "is-active" : ""}
+              aria-selected={selected}
+              onClick={() => onSelect(latest ? null : attempt.id)}
+            >
+              {auditAttemptLabel({
+                number: index + 1,
+                latest,
+                status: attempt.status,
+              })}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
 function tracePollMs(data: TraceDetail | undefined) {
   if (!data) return 4_000;
   if (data.trace.status === "running") return 1_200;
@@ -132,7 +178,11 @@ export function TraceDetailPage() {
   const queryClient = useQueryClient();
   const [runSpanId, setRunSpanId] = useState<string | null>(null);
   const [auditorSpanId, setAuditorSpanId] = useState<string | null>(null);
+  // null means follow the newest pass. Pinning an earlier one is how a retry
+  // does not yank the reader off the attempt they were looking at.
+  const [pinnedAttemptId, setPinnedAttemptId] = useState<string | null>(null);
   const [view, setView] = useState<StepView>(readStoredView);
+  const [showDebugPrompt, setShowDebugPrompt] = useState(false);
   const [pane, setPane] = useState<TracePane>(() =>
     searchParams.get("pane") === "auditor"
       ? "auditor"
@@ -156,10 +206,16 @@ export function TraceDetailPage() {
   });
 
   const auditTraceId = detailQuery.data?.auditTraceId ?? null;
+  const auditAttempts: AuditAttempt[] = detailQuery.data?.auditAttempts ?? [];
+  const viewingAttemptId =
+    pinnedAttemptId !== null &&
+    auditAttempts.some((attempt) => attempt.id === pinnedAttemptId)
+      ? pinnedAttemptId
+      : auditTraceId;
   const auditorDetailQuery = useQuery({
-    queryKey: ["trace", auditTraceId],
-    queryFn: (): Promise<TraceDetail> => api.trace(auditTraceId!),
-    enabled: !locked && auditTraceId !== null,
+    queryKey: ["trace", viewingAttemptId],
+    queryFn: (): Promise<TraceDetail> => api.trace(viewingAttemptId!),
+    enabled: !locked && viewingAttemptId !== null,
     refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
       tracePollMs(query.state.data),
   });
@@ -167,10 +223,9 @@ export function TraceDetailPage() {
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
   const auditHealth = detailQuery.data?.auditHealth ?? "ok";
 
-  // The move one level deeper into the stack of audits, read from this page's
-  // own trace rather than from whichever pane is showing. Both tabs then mean
-  // the same thing by it: on the auditor tab, the pane is a preview of exactly
-  // the trace this opens as a page of its own.
+  // Offered on either tab: the auditor pane is a preview, so the trigger to
+  // run (or retry) an audit has to live at page level or it vanishes the
+  // moment you look at the pass you want to retry.
   const action = detailQuery.data
     ? auditAction({
         auditOf: detailQuery.data.trace.auditOf,
@@ -201,14 +256,13 @@ export function TraceDetailPage() {
     persistPane(next);
   };
 
-  // Following the audit deeper changes only the id in the route, so the page
-  // never unmounts and the tab would come along to a trace it does not
-  // describe — landing on the audit of the audit instead of the run just
-  // opened. Not choosePane: nobody picked this, so it must not overwrite the
-  // tab they did pick.
-  const followAudit = () => setPane("run");
-
-  const degraded = showDegradedRetry({ pane, auditHealth });
+  const auditComplete = detailQuery.data?.auditComplete ?? false;
+  const auditBusy = audit.isPending || auditInFlight(auditAttempts);
+  const canRetryAudit =
+    pane === "auditor" &&
+    auditAttempts.length > 0 &&
+    (auditHealth !== "ok" || !auditComplete);
+  const failed = showFailedAlert({ pane, auditHealth }) && !auditBusy;
 
   if (locked || detailQuery.error) {
     let message = "Could not load the trace.";
@@ -237,6 +291,13 @@ export function TraceDetailPage() {
           ← Back
         </Link>
         <div className="glassbox-topbar-actions">
+          <button
+            className="button button-ghost"
+            disabled={!trace}
+            onClick={() => setShowDebugPrompt(true)}
+          >
+            Get Debug Prompt
+          </button>
           <button
             className="button button-ghost"
             disabled={!trace}
@@ -294,46 +355,26 @@ export function TraceDetailPage() {
                 )}
               </button>
             </div>
-            {action.run && (
+            {action.run && !canRetryAudit && (
               <button
                 type="button"
                 className="button button-ghost"
-                disabled={audit.isPending}
+                disabled={auditBusy}
                 onClick={() => audit.mutate()}
               >
                 {audit.isPending ? "Auditing…" : "Audit"}
               </button>
             )}
-            {action.view && (
-              <Link
-                className="button button-ghost"
-                to={"/traces/" + action.view}
-                onClick={followAudit}
-              >
-                View Audit
-              </Link>
-            )}
           </div>
-          {degraded && (
+          {failed && (
             <div
-              className="auditor-health auditor-health-degraded"
-              role="status"
+              className="auditor-health auditor-health-failed"
+              role="alert"
             >
-              <p className="auditor-health-title">This audit is degraded</p>
+              <p className="auditor-health-title">This audit failed</p>
               <p className="auditor-health-body">
-                The primary audit model failed; a fallback model still produced
-                a verdict.
+                The auditor could not complete.
               </p>
-              <div className="auditor-health-actions">
-                <button
-                  type="button"
-                  className="button button-ghost"
-                  disabled={audit.isPending}
-                  onClick={() => audit.mutate()}
-                >
-                  {audit.isPending ? "Auditing…" : "Retry Audit"}
-                </button>
-              </div>
             </div>
           )}
           {audit.isError && (
@@ -357,6 +398,30 @@ export function TraceDetailPage() {
         />
       )}
 
+      {pane === "auditor" &&
+        (auditAttempts.length > 1 || canRetryAudit) && (
+          <div className="audit-attempts">
+            <AuditAttempts
+              attempts={auditAttempts}
+              selectedId={viewingAttemptId ?? ""}
+              onSelect={(id) => {
+                setAuditorSpanId(null);
+                setPinnedAttemptId(id);
+              }}
+            />
+            {canRetryAudit && (
+              <button
+                type="button"
+                className="button button-ghost"
+                disabled={auditBusy}
+                onClick={() => audit.mutate()}
+              >
+                {audit.isPending ? "Auditing…" : "Retry Audit"}
+              </button>
+            )}
+          </div>
+        )}
+
       {pane === "auditor" && auditorDetailQuery.data && (
         <TraceRunView
           detail={auditorDetailQuery.data}
@@ -370,11 +435,66 @@ export function TraceDetailPage() {
 
       {pane === "auditor" &&
         !auditorDetailQuery.data &&
-        (!auditTraceId || auditorDetailQuery.error) && (
+        (!viewingAttemptId || auditorDetailQuery.error) && (
           <p className="muted-cell">
             The auditor has not recorded any steps yet.
           </p>
         )}
+
+      {showDebugPrompt && trace && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={() => setShowDebugPrompt(false)}
+        >
+          <div
+            className="modal debug-prompt-modal"
+            role="dialog"
+            aria-labelledby="debug-prompt-heading"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-heading">
+              <div>
+                <span className="eyebrow">This run</span>
+                <h2 id="debug-prompt-heading">Debug Prompt</h2>
+                <p>
+                  Paste into a diagnosing agent. Paths are filled in for this
+                  run.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowDebugPrompt(false)}
+              >
+                ×
+              </button>
+            </div>
+            <label>
+              Prompt
+              <textarea
+                readOnly
+                rows={16}
+                value={debugPrompt({
+                  origin: window.location.origin,
+                  traceId,
+                  agentId: trace.agentId,
+                  auditOf: trace.auditOf,
+                  auditTraceId,
+                })}
+                onFocus={(event) => event.currentTarget.select()}
+              />
+            </label>
+            <div className="modal-footer">
+              <button
+                type="button"
+                className="button button-ghost"
+                onClick={() => setShowDebugPrompt(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

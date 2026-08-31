@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auditAction, showDegradedRetry } from "./audit-action";
+import { auditAction, showFailedAlert, auditInFlight } from "./audit-action";
 
 const agentRun = {
   auditOf: null,
@@ -79,19 +79,32 @@ describe("auditAction", () => {
   });
 });
 
-describe("showDegradedRetry", () => {
-  it("is true only on the auditor tab of a degraded pass", () => {
+describe("showFailedAlert", () => {
+  it("is true only on the auditor tab of a failed pass", () => {
     expect(
-      showDegradedRetry({ pane: "auditor", auditHealth: "degraded" }),
+      showFailedAlert({ pane: "auditor", auditHealth: "failed" }),
     ).toBe(true);
-    expect(showDegradedRetry({ pane: "run", auditHealth: "degraded" })).toBe(
+    expect(showFailedAlert({ pane: "run", auditHealth: "failed" })).toBe(
       false,
     );
-    expect(showDegradedRetry({ pane: "auditor", auditHealth: "ok" })).toBe(
+    expect(showFailedAlert({ pane: "auditor", auditHealth: "ok" })).toBe(
       false,
     );
-    expect(showDegradedRetry({ pane: "auditor", auditHealth: "failed" })).toBe(
-      false,
-    );
+    expect(
+      showFailedAlert({ pane: "auditor", auditHealth: "degraded" }),
+    ).toBe(false);
+  });
+});
+
+describe("auditInFlight", () => {
+  it("is true while any auditor pass is still running", () => {
+    expect(
+      auditInFlight([
+        { status: "running" as const },
+        { status: "failed" as const },
+      ]),
+    ).toBe(true);
+    expect(auditInFlight([{ status: "completed" as const }])).toBe(false);
+    expect(auditInFlight([])).toBe(false);
   });
 });

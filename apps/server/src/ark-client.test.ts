@@ -481,6 +481,86 @@ describe("createArkClient", () => {
     expect(result.content).toBe("xxxxxx");
     expect(result.timing.chunkCount).toBe(6);
   });
+
+  // The stall timer used to restart on every reasoning frame, so a model that
+  // never left reasoning_content could think until the 5x ceiling. Answer text
+  // still buys extra budgets; thinking does not.
+  it("does not let reasoning-only chunks buy extra stall budgets", async () => {
+    const stallMs = 200;
+    const gapMs = 40;
+    let sent = 0;
+    const ark = createArkClient(
+      { arkBaseUrl: "https://ark.test", arkApiKey: "k" },
+      stallMs,
+      async (_url, init) => {
+        const signal = init?.signal;
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const onAbort = () => {
+              try {
+                controller.error(abortError());
+              } catch {
+                // already closed or errored
+              }
+            };
+            if (signal?.aborted) {
+              onAbort();
+              return;
+            }
+            signal?.addEventListener("abort", onAbort, { once: true });
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  sseEvent({
+                    choices: [{ delta: { reasoning_content: "x" } }],
+                  }),
+                ),
+              );
+              sent += 1;
+              for (let i = 0; i < 19; i += 1) {
+                if (signal?.aborted) return;
+                await new Promise((resolve) => setTimeout(resolve, gapMs));
+                if (signal?.aborted) return;
+                sent += 1;
+                controller.enqueue(
+                  encoder.encode(
+                    sseEvent({
+                      choices: [{ delta: { reasoning_content: "x" } }],
+                    }),
+                  ),
+                );
+              }
+              controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+              controller.close();
+            } catch {
+              // aborted mid-stream
+            }
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      },
+    );
+
+    const started = Date.now();
+    try {
+      await ark.complete(ask);
+      throw new Error("expected timeout");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ArkAbortError);
+      if (!(error instanceof ArkAbortError)) return;
+      expect(error.kind).toBe("timeout");
+      expect(error.timing.ttftMs).toBeNull();
+      expect(error.content.length).toBeGreaterThan(0);
+      expect(Date.now() - started).toBeLessThan(stallMs * 2.5);
+      // Under the old rule this would have completed after ~800ms of
+      // reasoning. It has to die around one stall budget instead.
+      expect(sent).toBeLessThan(20);
+    }
+  });
 });
 
 // The provider caches a shared prompt prefix by itself and reports the hit

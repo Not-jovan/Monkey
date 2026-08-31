@@ -3238,7 +3238,7 @@ describe("resuming an interrupted audit of an auditor at boot", () => {
 
   // The reason the run-level sweep excludes auditor traces outright. Auditing
   // an auditor is always requested, so an auditor trace with no document is
-  // the normal case, not a pending one — resuming on "no run-level answer"
+  // the normal case, not a pending one â€” resuming on "no run-level answer"
   // would buy a full pass for every auditor trace ever recorded.
   it("leaves an auditor nobody ever audited alone", async () => {
     const { stores, auditTraceId } = await seedAuditorTrace("trace-untouched");

@@ -245,6 +245,48 @@ describe("AuditorModel.complete", () => {
     expect(answer.attempts[0]?.timing).toEqual(timing);
     expect(answer.attempts[0]?.error).toContain("3 in flight");
   });
+
+  it("uses a verdict that was already in the reasoning when the stall fired", async () => {
+    const timing = {
+      promptBytes: 12,
+      inFlightAtStart: 1,
+      headersMs: 12,
+      ttftMs: null,
+      lastChunkMs: 60_000,
+      chunkCount: 100,
+      requestId: "req-think",
+      abortPhase: "streaming" as const,
+    };
+    const runner: AgentRunner = {
+      run: async () => {
+        throw new ArkAbortError(
+          "Audit model reasoned for 60.0s without an answer; headers at 0.0s, 100 chunks (1 in flight)",
+          "timeout",
+          "Audit model timed out after 60s; stream opened, no answer text",
+          timing,
+          'scratching around\n{"ok":true}',
+          null,
+        );
+      },
+      cancel: async () => false,
+      isAvailable: async () => true,
+    };
+    const model = new AuditorModel(runner);
+
+    const answer = await model.complete(
+      RUN,
+      "flash",
+      null,
+      "s",
+      "u",
+      verdict,
+    );
+
+    expect(answer.status).toBe("completed");
+    expect(answer.verdict).toEqual({ ok: true });
+    expect(answer.attempts[0]?.error).toBeNull();
+    expect(answer.attempts[0]?.content).toContain('{"ok":true}');
+  });
 });
 
 describe("auditorCallSpan", () => {

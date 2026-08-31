@@ -61,6 +61,13 @@ export interface TraceRecord {
   spans: TraceSpan[];
 }
 
+export interface AuditAttempt {
+  id: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export interface AuditTraceStep {
   id: string;
   traceId: string;
@@ -99,6 +106,7 @@ export interface TraceDetail {
   } | null;
   context: ContextView | null;
   auditTraceId: string | null;
+  auditAttempts: AuditAttempt[];
   auditChain: { id: string; auditDepth: number }[];
 }
 

@@ -224,6 +224,7 @@ export function registerTraceRoutes(
       intent: deps.auditStore.intentOf(id),
       context: deps.contextService?.view(id) ?? null,
       auditTraceId: deps.traceStore.auditorTraceFor(id),
+      auditAttempts: deps.traceStore.auditorAttemptsFor(id),
       auditChain: deps.traceStore.auditChain(id).map((entry) => ({
         id: entry.id,
         auditDepth: entry.auditDepth,
@@ -242,8 +243,11 @@ export function registerTraceRoutes(
       auditHealth: deps.auditStore.health(id),
       intent: deps.auditStore.intentOf(id),
       context: deps.contextService?.view(id) ?? null,
-      // The auditor that judged this trace, if it has been judged.
+      // The newest auditor that judged this trace, if it has been judged.
       auditTraceId: deps.traceStore.auditorTraceFor(id),
+      // Every auditor pass over this trace, newest first. A pass that failed
+      // partway used to replace the index, so earlier attempts vanished.
+      auditAttempts: deps.traceStore.auditorAttemptsFor(id),
       // Everything this trace is an audit of, up to the Agent run at the root,
       // oldest first. Resolved here rather than by the client walking auditOf
       // one request at a time — the chain has no ceiling, and the breadcrumb

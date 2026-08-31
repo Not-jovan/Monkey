@@ -34,9 +34,13 @@ export function auditAction(input: {
 
 export type TracePane = "run" | "auditor";
 
-export function showDegradedRetry(input: {
+export function showFailedAlert(input: {
   pane: TracePane;
   auditHealth: AuditHealth;
 }): boolean {
-  return input.pane === "auditor" && input.auditHealth === "degraded";
+  return input.pane === "auditor" && input.auditHealth === "failed";
+}
+
+export function auditInFlight(attempts: { status: TraceStatus }[]): boolean {
+  return attempts.some((attempt) => attempt.status === "running");
 }

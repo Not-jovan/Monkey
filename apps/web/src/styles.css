@@ -949,6 +949,16 @@ textarea:focus {
   margin-top: 20px;
 }
 
+.debug-prompt-modal {
+  width: min(720px, 100%);
+}
+
+.debug-prompt-modal textarea {
+  min-height: 280px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -1603,7 +1613,6 @@ textarea:focus {
   color: var(--paper);
 }
 
-/* The tabs and the one action that leaves this trace for the audit above it. */
 .trace-pane-row {
   display: flex;
   flex-wrap: wrap;
@@ -2088,6 +2097,19 @@ textarea:focus {
 .audit-chain-current {
   color: var(--ink);
   font-weight: 600;
+}
+
+.audit-attempts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 8px;
+}
+
+.audit-attempts-label {
+  font-size: 0.8rem;
+  color: var(--muted);
 }
 
 .trace-instruction {

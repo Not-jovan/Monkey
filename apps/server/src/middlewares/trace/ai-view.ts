@@ -120,6 +120,12 @@ export interface AgentTraceCase {
   auditComplete: boolean;
   auditHealth: AuditHealth;
   auditTraceId: string | null;
+  auditAttempts: {
+    id: string;
+    status: TraceStatus;
+    startedAt: string;
+    endedAt: string | null;
+  }[];
   auditChain: { id: string; auditDepth: number; status: TraceStatus }[];
 }
 
@@ -298,6 +304,12 @@ export function agentTraceCase(input: {
   intent: IntentState | null;
   context: ContextView | null;
   auditTraceId: string | null;
+  auditAttempts: {
+    id: string;
+    status: TraceStatus;
+    startedAt: string;
+    endedAt: string | null;
+  }[];
   auditChain: { id: string; auditDepth: number; status: TraceStatus }[];
 }): AgentTraceCase {
   const { trace } = input;
@@ -347,6 +359,7 @@ export function agentTraceCase(input: {
     auditComplete: input.auditComplete,
     auditHealth: input.auditHealth,
     auditTraceId: input.auditTraceId,
+    auditAttempts: input.auditAttempts,
     auditChain: input.auditChain,
   };
 }

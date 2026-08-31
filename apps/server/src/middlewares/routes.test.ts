@@ -433,6 +433,14 @@ describe("Glassbox routes", () => {
     expect(agentBody).not.toHaveProperty("spans");
     expect(JSON.stringify(agentBody)).not.toContain("Step audit · Prompt");
     expect(agentBody.auditTraceId).toBe(AUDIT_TRACE_ID);
+    expect(agentBody.auditAttempts).toEqual([
+      {
+        id: AUDIT_TRACE_ID,
+        status: "completed",
+        startedAt: "2026-08-28T00:00:00.100Z",
+        endedAt: "2026-08-28T00:00:00.400Z",
+      },
+    ]);
 
     const auditor = await app.inject({
       method: "GET",
@@ -442,11 +450,25 @@ describe("Glassbox routes", () => {
     const auditorBody = auditor.json<{
       auditedTraceId: string;
       auditTraceId: string;
+      auditAttempts: {
+        id: string;
+        status: string;
+        startedAt: string;
+        endedAt: string | null;
+      }[];
       auditor: { id: string; auditOf: string | null; spans: { label: string; traceId: string; attributes: { context?: string } }[] };
       spans?: unknown;
     }>();
     expect(auditorBody.auditedTraceId).toBe(RUN_ID);
     expect(auditorBody.auditTraceId).toBe(AUDIT_TRACE_ID);
+    expect(auditorBody.auditAttempts).toEqual([
+      {
+        id: AUDIT_TRACE_ID,
+        status: "completed",
+        startedAt: "2026-08-28T00:00:00.100Z",
+        endedAt: "2026-08-28T00:00:00.400Z",
+      },
+    ]);
     expect(auditorBody).not.toHaveProperty("spans");
     expect(auditorBody.auditor.id).toBe(AUDIT_TRACE_ID);
     expect(auditorBody.auditor.auditOf).toBe(RUN_ID);
@@ -471,6 +493,75 @@ describe("Glassbox routes", () => {
       url: "/api/audits/cccccccc-cccc-4ccc-8ccc-cccccccccccc",
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  // A retry after a mid-run failure is a second auditor trace, not a
+  // replacement. The newest is still the one auditTraceId names; the earlier
+  // one has to stay listed or the UI has nowhere to send someone who wants it.
+  it("lists every auditor pass over a trace, newest first", async () => {
+    const { app, traceStore } = await makeApp();
+    cleanups.push(async () => {
+      await app.close();
+    });
+    createCompletedTrace(traceStore, RUN_ID, "2026-08-28T00:00:00.000Z");
+    const firstId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    const secondId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    traceStore.create({
+      version: 1,
+      id: firstId,
+      agentId: AGENT_ID,
+      conversationId: null,
+      status: "failed",
+      startedAt: "2026-08-28T00:00:10.000Z",
+      endedAt: "2026-08-28T00:00:20.000Z",
+      prompt: "Audit of trace " + RUN_ID,
+      model: null,
+      usage: emptyUsage(),
+      failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      auditOf: RUN_ID,
+      auditDepth: 1,
+      spans: [],
+    });
+    traceStore.create({
+      version: 1,
+      id: secondId,
+      agentId: AGENT_ID,
+      conversationId: null,
+      status: "completed",
+      startedAt: "2026-08-28T00:00:30.000Z",
+      endedAt: "2026-08-28T00:00:40.000Z",
+      prompt: "Audit of trace " + RUN_ID,
+      model: null,
+      usage: emptyUsage(),
+      failingSpanId: null,
+      failure: null,
+      recoveredErrorCount: 0,
+      evidenceComplete: true,
+      unrecognizedEvents: 0,
+      auditOf: RUN_ID,
+      auditDepth: 1,
+      spans: [],
+    });
+
+    const detail = await app.inject({
+      method: "GET",
+      url: "/api/traces/" + RUN_ID,
+    });
+    expect(detail.statusCode).toBe(200);
+    const body = detail.json<{
+      auditTraceId: string;
+      auditAttempts: { id: string; status: string }[];
+    }>();
+    expect(body.auditTraceId).toBe(secondId);
+    expect(body.auditAttempts.map((entry) => entry.id)).toEqual([
+      secondId,
+      firstId,
+    ]);
+    expect(body.auditAttempts[1]?.status).toBe("failed");
   });
   it("serves intent history from per-audit derivations", async () => {
     const { app, auditStore, traceStore } = await makeApp();

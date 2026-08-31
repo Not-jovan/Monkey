@@ -81,6 +81,13 @@ export type SpanKind =
 export type SpanStatus = "running" | "ok" | "error";
 export type TraceStatus = "running" | "completed" | "failed" | "cancelled";
 
+export interface AuditAttempt {
+  id: string;
+  status: TraceStatus;
+  startedAt: string;
+  endedAt: string | null;
+}
+
 export interface TraceSpan {
   id: string;
   traceId: string;
@@ -190,6 +197,8 @@ export interface AuditorTrace {
   health: AuditHealth;
   auditTraceId: string | null;
   auditor: TraceRecord | null;
+  // Every auditor pass over this run, newest first. `auditor` is the latest.
+  auditAttempts: AuditAttempt[];
   legacyAuditorSpans: TraceSpan[];
   // An audit of the auditor recorded before that run had a trace of its own.
   // Read-only: nothing writes here any more, but a finding already recorded

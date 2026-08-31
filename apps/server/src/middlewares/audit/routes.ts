@@ -75,6 +75,7 @@ export function registerAuditRoutes(
           agentId: trace.agentId,
           findings: deps.auditStore.listByTrace(id),
           auditTraceId,
+          auditAttempts: deps.traceStore.auditorAttemptsFor(id),
           auditor,
           legacyAuditorSpans: auditor
             ? []
@@ -109,6 +110,10 @@ export function registerAuditRoutes(
       health: deps.auditStore.health(id),
       auditTraceId,
       auditor,
+      // Every auditor pass over this run, newest first. The `auditor` field
+      // is still the latest; earlier attempts are how a mid-run failure stays
+      // readable after a retry.
+      auditAttempts: deps.traceStore.auditorAttemptsFor(id),
       // Pre-trace auditors stored their model calls on the run's audit
       // document. Kept only when there is no auditor trace to read instead.
       legacyAuditorSpans: auditor ? [] : deps.auditStore.listAuditorSpans(id),

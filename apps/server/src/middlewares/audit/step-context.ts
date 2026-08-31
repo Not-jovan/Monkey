@@ -166,10 +166,9 @@ export function buildStepContext(input: StepContextInput): string {
     );
   }
   if (input.priorPromptInjections && input.priorPromptInjections.length > 0) {
+    const unique = [...new Set(input.priorPromptInjections)];
     observed.push(
-      "Previously detected external directives: " +
-        input.priorPromptInjections
-          .join("; "),
+      "Previously detected external directives: " + unique.join("; "),
     );
   }
   if (deterministic.suspiciousActions.length > 0) {

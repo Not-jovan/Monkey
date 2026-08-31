@@ -214,16 +214,13 @@ function formatTimeout(
         seconds +
         "s; stream opened, no answer text",
       message:
-        "Audit model streamed for " +
+        "Audit model reasoned for " +
         spent +
-        " without reaching an answer, then stalled for " +
-        seconds +
-        "s; headers at " +
+        " without an answer; headers at " +
         headers +
         ", " +
         timing.chunkCount +
-        " chunks. The budget went on reasoning; AUDIT_MODEL_THINKING=disabled " +
-        "buys speed at the cost of recall" +
+        " chunks" +
         load,
     };
   }
@@ -296,6 +293,7 @@ export function createArkClient(
     let chunkCount = 0;
     let requestId: string | null = null;
     let content = "";
+    let reasoning = "";
     let usage: RunUsage | null = null;
     let model: string | null = null;
 
@@ -314,8 +312,10 @@ export function createArkClient(
     const abort = () => controller.abort();
     input.signal?.addEventListener("abort", abort, { once: true });
     // Two deadlines, because "slow" and "stuck" are different failures. The
-    // stall timer restarts on every chunk, so a long answer is fine as long as
-    // it keeps arriving; the ceiling still bounds a stream that never ends.
+    // stall timer restarts on answer text, so a long verdict is fine as long
+    // as it keeps arriving; the ceiling still bounds a stream that never ends.
+    // Reasoning does not restart it. A thinking model can otherwise sit in
+    // reasoning_content until the 5x ceiling and never emit a verdict.
     // Without streaming these collapse into one total-generation cap, which is
     // what made a verbose verdict indistinguishable from a hung request.
     const ceiling = started + timeoutMs * TOTAL_BUDGET_MULTIPLIER;
@@ -331,6 +331,7 @@ export function createArkClient(
     };
 
     const failAbort = (kind: "timeout" | "cancelled"): never => {
+      if (content.length === 0 && reasoning.length > 0) content = reasoning;
       const timing = snapshot();
       if (kind === "cancelled") {
         throw new ArkAbortError(
@@ -357,13 +358,13 @@ export function createArkClient(
       chunkCount += 1;
       lastChunkMs = at;
       if (abortPhase === "waiting_for_first_token") abortPhase = "streaming";
-      restartStallTimer();
     };
 
     const takeContent = (piece: string) => {
       if (piece.length === 0) return;
       if (ttftMs === null) ttftMs = Date.now() - started;
       content += piece;
+      restartStallTimer();
     };
 
     const send = () =>
@@ -452,7 +453,6 @@ export function createArkClient(
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
-      let reasoning = "";
       const consume = (raw: string) => {
         if (raw === "[DONE]") return;
         let value: unknown = null;

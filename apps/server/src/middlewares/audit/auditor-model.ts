@@ -247,19 +247,41 @@ export class AuditorModel {
         });
         return parsed.data as z.infer<Schema>;
       } catch (error) {
-        if (attempts.length === 0 || attempts[attempts.length - 1]?.model !== model) {
-          const aborted = error instanceof ArkAbortError ? error : null;
+        if (attempts.length > 0 && attempts[attempts.length - 1]?.model === model) {
+          throw error;
+        }
+        const aborted = error instanceof ArkAbortError ? error : null;
+        usage = aborted?.usage ?? usage;
+        timing = aborted?.timing ?? timing;
+        // A stall can cut the socket after the JSON is already in the
+        // reasoning buffer. The client copies that into the abort; parse it
+        // here so the thinking is not thrown away for want of a closing frame.
+        const salvage = aborted?.content ?? "";
+        const parsed =
+          salvage.length > 0 ? schema.safeParse(extractJson(salvage)) : null;
+        if (parsed?.success) {
           attempts.push({
             model,
             startedAt,
             endedAt: new Date().toISOString(),
             durationMs: Date.now() - startedMs,
-            content: aborted?.content ?? "",
-            error: describeError(error),
-            usage: aborted?.usage ?? usage,
-            timing: aborted?.timing ?? timing,
+            content: salvage,
+            error: null,
+            usage,
+            timing,
           });
+          return parsed.data as z.infer<Schema>;
         }
+        attempts.push({
+          model,
+          startedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: Date.now() - startedMs,
+          content: salvage,
+          error: describeError(error),
+          usage,
+          timing,
+        });
         throw error;
       }
     };

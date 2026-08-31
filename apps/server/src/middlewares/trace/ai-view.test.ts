@@ -262,6 +262,14 @@ describe("agentTraceCase", () => {
       },
       context: emptyContext,
       auditTraceId: "auditor-1",
+      auditAttempts: [
+        {
+          id: "auditor-1",
+          status: "completed",
+          startedAt: "2026-08-28T00:00:01.000Z",
+          endedAt: "2026-08-28T00:00:02.000Z",
+        },
+      ],
       auditChain: [{ id: "trace-1", auditDepth: 0, status: "failed" }],
     });
 

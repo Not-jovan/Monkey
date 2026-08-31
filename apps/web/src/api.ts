@@ -1,6 +1,7 @@
 import type {
   Agent,
   AgentRun,
+  AuditAttempt,
   AuditHealth,
   AuditorTrace,
   AuditTraceStep,
@@ -23,8 +24,10 @@ export interface TraceDetail {
   auditHealth: AuditHealth;
   intent: TraceIntentView | null;
   context: ContextView | null;
-  // The auditor that judged this trace, if it has been judged.
+  // The newest auditor that judged this trace, if it has been judged.
   auditTraceId: string | null;
+  // Every auditor pass over this trace, newest first.
+  auditAttempts: AuditAttempt[];
   // Everything this trace is an audit of, up to the Agent run at the root of
   // it, oldest first. Resolved server-side because the chain has no ceiling and
   // the breadcrumb needs all of it at once.

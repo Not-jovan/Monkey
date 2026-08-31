@@ -137,6 +137,43 @@ describe("TraceStore", () => {
     expect(reopened.auditorTraceFor("agent-run")).toBe("audit-run");
   });
 
+  // Re-auditing used to overwrite the index, so a pass that failed partway
+  // hid the one it was replacing. Both have to stay, and the newest is still
+  // the one auditorTraceFor names.
+  it("keeps every auditor pass over a trace, not only the newest", async () => {
+    const { store, directory } = await makeStore();
+    store.create(trace("agent-run"));
+    store.create({
+      ...trace("audit-first"),
+      auditOf: "agent-run",
+      auditDepth: 1,
+      status: "failed",
+      startedAt: "2026-08-26T12:00:00.000Z",
+      endedAt: "2026-08-26T12:00:30.000Z",
+    });
+    store.create({
+      ...trace("audit-second"),
+      auditOf: "agent-run",
+      auditDepth: 1,
+      status: "completed",
+      startedAt: "2026-08-26T12:01:00.000Z",
+      endedAt: "2026-08-26T12:01:20.000Z",
+    });
+
+    expect(store.auditorTraceFor("agent-run")).toBe("audit-second");
+    expect(store.auditorAttemptsFor("agent-run").map((entry) => entry.id)).toEqual(
+      ["audit-second", "audit-first"],
+    );
+
+    await store.flush();
+    const reopened = new TraceStore(directory);
+    await reopened.initialize();
+    expect(reopened.auditorTraceFor("agent-run")).toBe("audit-second");
+    expect(
+      reopened.auditorAttemptsFor("agent-run").map((entry) => entry.id),
+    ).toEqual(["audit-second", "audit-first"]);
+  });
+
   // The stack has no ceiling, so the walk back to the Agent run must not either.
   it("walks the chain from any depth back to the agent run", async () => {
     const { store } = await makeStore();
