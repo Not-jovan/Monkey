@@ -24,6 +24,51 @@ Value Proposition:
 - Visibility of run progress to ensure policies are not violated.
 - Loop feedback of agent runs for agent self checking.
 
+Out of scope / Limitations:
+
+| Limitation | Remark | Remediation |
+| --- | --- | --- |
+| Integration with log collection tools such as Loki | Log collection is simulated with our Scraper implementation. | Add a log sink or adapter that forwards runtime events to Loki. **The Auditor just needs to have the normalized traces from whatever log store you use.** |
+| Bindings to other runtimes or custom agent runners | The current integration supports the runtimes and runners described in this README. | Implement adapters for additional runtime providers and custom agent runners. In our demo, we implemented the tracing of the Auditor. **You can audit the Auditor** | 
+| Auditing every chat run | Auditing all runs can be extremely costly. The auditor is intended for full-fledged auditing, such as agent development and security audits. | Use sampling, or a heuristic/classifier to select which runs require auditing. |
+
+## Setup
+
+### Requirements
+```
+Node.js 22+
+npm 10+
+Docker, Colima, or Podman
+A Volcengine Ark API key and endpoint that supports the Responses API
+```
+Codex CLI is included in the Runtime image and is not required on the host.
+
+### Local browser SOP
+Install Node.js 22+ and one supported container engine, then verify them:
+```
+node --version
+npm --version
+docker --version        # Docker Desktop, Docker Engine, or Colima
+podman --version        # Use this instead when running Podman
+```
+Only one container engine is required. Codex CLI is already included in the Runtime image.
+
+### 3. Start the POC
+
+```bash
+export ARK_API_KEY=your-ark-api-key 
+export ARK_MODEL=ep-your-endpoint-id 
+export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
+npm run poc
+```
+
+The first run installs Node.js dependencies and builds the Runtime image. The
+script automatically selects Docker, Colima, or Podman.
+
+The control plane listens on `PORT` (default `3000`). In development the UI is
+Vite on `5173` and talks to that API. In production the same process serves the
+built SPA at `/`.
+
 ### High Level Architecture
 ```mermaid
 flowchart TB
@@ -244,42 +289,6 @@ Audit Step States
 #### Try it out yourself
 Shut off the poc container while the auditor runs. Restart it, it **should recover**.
 
-## Setup
-
-### Requirements
-```
-Node.js 22+
-npm 10+
-Docker, Colima, or Podman
-A Volcengine Ark API key and endpoint that supports the Responses API
-```
-Codex CLI is included in the Runtime image and is not required on the host.
-
-### Local browser SOP
-Install Node.js 22+ and one supported container engine, then verify them:
-```
-node --version
-npm --version
-docker --version        # Docker Desktop, Docker Engine, or Colima
-podman --version        # Use this instead when running Podman
-```
-Only one container engine is required. Codex CLI is already included in the Runtime image.
-
-### 3. Start the POC
-
-```bash
-export ARK_API_KEY=your-ark-api-key 
-export ARK_MODEL=ep-your-endpoint-id 
-export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
-npm run poc
-```
-
-The first run installs Node.js dependencies and builds the Runtime image. The
-script automatically selects Docker, Colima, or Podman.
-
-The control plane listens on `PORT` (default `3000`). In development the UI is
-Vite on `5173` and talks to that API. In production the same process serves the
-built SPA at `/`.
 
 ### Testing
 ```bash
