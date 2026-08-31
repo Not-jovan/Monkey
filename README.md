@@ -31,6 +31,8 @@ Out of scope / Limitations:
 | Integration with log collection tools such as Loki | Log collection is simulated with our Scraper implementation. | Add a log sink or adapter that forwards runtime events to Loki. **The Auditor just needs to have the normalized traces from whatever log store you use.** |
 | Bindings to other runtimes or custom agent runners | The current integration supports the runtimes and runners described in this README. | Implement adapters for additional runtime providers and custom agent runners. In our demo, we implemented the tracing of the Auditor. **You can audit the Auditor** | 
 | Auditing every chat run | Auditing all runs can be extremely costly. The auditor is intended for full-fledged auditing, such as agent development and security audits. | Use sampling, or a heuristic/classifier to select which runs require auditing. |
+| Enforcement | We **DO NOT** automatically enforce policies. Mutation to the agent run creates side effects, it creates variability in intent. False positivie triggers can ruin your agent's performance. | You as the agent builder implement the policies and validate against the traces to determine whether it works |
+| Runner Boundary | We treat the runners as owning the environment it is in. It will have access to the environment secrets. We have no control over it. | Similar to enforcement, you as the agent builder is responsible for this. |
 
 ## Setup
 
@@ -289,6 +291,7 @@ Audit Step States
 #### Try it out yourself
 Shut off the poc container while the auditor runs. Restart it, it **should recover**.
 
+See [https://youtu.be/cAqrO3ge7R8?t=76](Demo)
 
 ### Testing
 ```bash
@@ -307,28 +310,10 @@ and container integration test. It is skipped unless `RUN_LIVE_E2E=true` is
 set and requires valid Ark credentials, activated audit models, and Docker,
 Colima, or Podman.
 
+See [https://youtu.be/cAqrO3ge7R8?t=103](Demo)
+
 ### Demo
 Refer to `DEMO.md` for a sample demo.
-
-## Known limitations
-
-- This is audit and observability, not enforcement. Network destinations are
-  inferred from recorded tool activity; the whitelist reports but does not
-  block egress.
-- Redaction masks configured values and recognized credential shapes. An
-  unconfigured secret in an unknown format may not be detected.
-- Codex CLI can persist its process environment, including the Ark key, in
-  `CODEX_HOME/shell_snapshots`. These files are outside trace/audit storage but
-  remain plaintext on disk; use a scoped demo key, clear snapshots before the
-  demo, and rotate the key afterwards.
-- Claude Code's direct `stream-json` path currently produces coarser tool-step
-  evidence than Codex, and judged audit findings can contain false positives or
-  false negatives.
-- The POC uses a single control-plane process and ordinary containers; it is not
-  hardened multi-tenant isolation.
-
-See [Glass Box limitations](docs/GLASS_BOX.md#limitations) for the complete
-list, including audit caps, recovery caveats, and model-degradation behavior.
 
 ## HTTP API
 
