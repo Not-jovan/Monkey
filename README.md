@@ -10,44 +10,57 @@ We create agents to achieve some desired goal. As the agent progresses, we may i
 ## Middleware Solution
 We propose a middleware that traces through agent runs and audit it.
 
-### Integration Points
+Features:
+- **Preserved** Starter Baseline, to create Agent Runs
+- Tracer to trace Agent Runs (Tool call, Input/Output, Thought)
+- Scraper to scrape traces, processes (e.g. Redaciton, normalization) them for Auditor.
+- Auditor uses scraped results to Audit the Agent Run
+- Failsafe mechanisms (See "Try it yourself" for Scraper and Auditor)
+
+### High Level Architecture
 ```mermaid
-flowchart LR
-    subgraph Control["Control plane / trust boundary"]
-        UI["React Web UI"] --> API["Fastify API / AgentService"]
-        API --> Store["JSON metadata and Agent workspaces"]
-        API --> Runner["Agent runner"]
-        Runner -->|detect names + redact + append| EventFile[("runtime-events/<runId>/events.jsonl")]
-        Scraper["Resumable event scraper"] --> Tracer["TraceService\nredact + assemble spans"]
-        Tracer --> Traces[("traces/<traceId>.json\nagent + auditor")]
-        Traces -->|complete evidence only| Auditor["Auditor"]
-        Auditor --> Audits[("audits + auditor memory")]
+flowchart TB
+    UI["React Web UI"] --> API["Fastify control plane"]
+    API --> Store["JSON metadata and Agent workspaces"]
+    API --> Runtime{"Runtime provider"}
+    Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
+    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
+    Container --> Ark["Volcengine Ark Responses API"]
+    Codex --> Ark["Volcengine Ark Responses API"]
+    API --> Runner["Agent runner<br/>agent-runner.ts"]
+    Container -->|JSONL stdout pipe| Runner
+    Codex -->|JSONL stdout pipe| Runner
+    Runner -->|record stdout; redact + append| Events
+
+    subgraph ParentGroup [Main System Container · Persisted run artifacts]
+        subgraph EventPipeline [Scraper]
+            Events[("Events File<br/>runtime-events/&lt;runId&gt;/events.jsonl")]
+            Events -->|read new bytes| EventScraper["Event Scraper<br/>runtime-event-scraper.ts"]
+            Events -.->|replay incomplete terminal trace| EventScraper
+            EventScraper -.->|durable byte offset + partial line| ScrapeState[("runtime-events/&lt;runId&gt;/scrape-state.json")]
+            EventScraper --> Tracer["TraceService<br/>trace-service.ts<br/>re-redact prompts, arguments, outputs, errors"]
+            Tracer --> Traces[("Trace File<br/>traces/&lt;traceId&gt;.json")]
+        end
         Traces --> UI
-        Audits --> UI
-    end
 
-    subgraph RuntimeBoundary["Agent Runtime / failure boundary"]
-        Runner --> Container["Disposable local container\nor ECS application container"]
-        Container --> Ark["Volcengine Ark Responses API"]
-        Container -->|stdout JSONL pipe| Runner
+        Traces -->|complete evidence only| Auditor
+        subgraph AuditorFlow [Auditor]
+            Auditor["Auditor<br/>audit-service.ts"] --> ArkRunner["ArkRunner<br/>auditor-model.ts"]
+            Auditor --> Audits[("Audit File<br/>audits/&lt;traceId&gt;.json")]
+            Auditor --> Memory[("Audit Run Cache File<br/>agent-runs/&lt;agentId&gt;/&lt;traceId&gt;/")]
+            Auditor -->|audit run| Tracer
+        end
     end
-
-    EventFile -->|read new bytes| Scraper
-    EventFile -.->|replay incomplete terminal trace| Scraper
-    ScrapeState[("scrape-state.json")] -.->|durable byte offset| Scraper
-    Auditor --> ArkRunner["ArkRunner"]
     ArkRunner --> Ark
-    Auditor -->|audit run| Tracer
+    Audits --> UI
+    Memory --> UI
 
-    style EventFile fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style Scraper fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style Tracer fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style Traces fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style Auditor fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style ArkRunner fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
-    style Audits fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    classDef added fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    class Runner,Events,ScrapeState,Traces,EventScraper,Tracer,Auditor,ArkRunner,Audits,Memory added
+    style ParentGroup fill:none,stroke:none,color:#000
 ```
 
+### Scraper
 The runner buffers complete Runtime JSONL lines, detects credential names,
 masks their values, and only then appends them to
 `runtime-events/<runId>/events.jsonl` with mode `0600`. Safe secret-type names
