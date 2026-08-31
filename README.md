@@ -304,7 +304,7 @@ Audit Step States
 #### Try it out yourself
 Shut off the poc container while the auditor runs. Restart it, it **should recover**.
 
-See [https://youtu.be/cAqrO3ge7R8?t=76](Demo)
+See [Demo](https://youtu.be/cAqrO3ge7R8?t=76)
 
 ### Testing
 ```bash
@@ -323,7 +323,7 @@ and container integration test. It is skipped unless `RUN_LIVE_E2E=true` is
 set and requires valid Ark credentials, activated audit models, and Docker,
 Colima, or Podman.
 
-See [https://youtu.be/cAqrO3ge7R8?t=103](Demo)
+See [Demo](https://youtu.be/cAqrO3ge7R8?t=103)
 
 ### Demo
 Refer to `DEMO.md` for a sample demo.
