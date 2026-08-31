@@ -19,6 +19,11 @@ Features:
 - Auditor uses scraped results to Audit the Agent Run
 - Failsafe mechanisms (See "Try it yourself" for Scraper and Auditor)
 
+Value Proposition:
+- Feedback of agent runs for agent development, providing traces to diagnose issues. We used this flow during development.
+- Visibility of run progress to ensure policies are not violated.
+- Loop feedback of agent runs for agent self checking.
+
 ### High Level Architecture
 ```mermaid
 flowchart TB
@@ -281,15 +286,20 @@ built SPA at `/`.
 export ARK_API_KEY=your-ark-api-key 
 export ARK_MODEL=ep-your-endpoint-id 
 export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
+# Optional: comma-separated hostnames allowed by the network whitelist
+# export AUDIT_NETWORK_WHITELIST=api.github.com,.githubusercontent.com,registry.npmjs.org
 npm run check
 RUN_LIVE_E2E=true npm run test:e2e
 ```
 
-`npm run check` is the credential-free submission gate: it runs typecheck, the
+`npm run check` is the credential free submission gate: it runs typecheck, the
 server tests, and both production builds. The Playwright suite is a live Ark
 and container integration test. It is skipped unless `RUN_LIVE_E2E=true` is
 set and requires valid Ark credentials, activated audit models, and Docker,
 Colima, or Podman.
+
+### Demo
+Refer to `DEMO.md` for a sample demo.
 
 ## Known limitations
 
