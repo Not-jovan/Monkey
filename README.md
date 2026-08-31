@@ -267,8 +267,34 @@ export ARK_API_KEY=your-ark-api-key
 export ARK_MODEL=ep-your-endpoint-id 
 export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
 npm run check
-npm run test:e2e
+RUN_LIVE_E2E=true npm run test:e2e
 ```
+
+`npm run check` is the credential-free submission gate: it runs typecheck, the
+server tests, and both production builds. The Playwright suite is a live Ark
+and container integration test. It is skipped unless `RUN_LIVE_E2E=true` is
+set and requires valid Ark credentials, activated audit models, and Docker,
+Colima, or Podman.
+
+## Known limitations
+
+- This is audit and observability, not enforcement. Network destinations are
+  inferred from recorded tool activity; the whitelist reports but does not
+  block egress.
+- Redaction masks configured values and recognized credential shapes. An
+  unconfigured secret in an unknown format may not be detected.
+- Codex CLI can persist its process environment, including the Ark key, in
+  `CODEX_HOME/shell_snapshots`. These files are outside trace/audit storage but
+  remain plaintext on disk; use a scoped demo key, clear snapshots before the
+  demo, and rotate the key afterwards.
+- Claude Code's direct `stream-json` path currently produces coarser tool-step
+  evidence than Codex, and judged audit findings can contain false positives or
+  false negatives.
+- The POC uses a single control-plane process and ordinary containers; it is not
+  hardened multi-tenant isolation.
+
+See [Glass Box limitations](docs/GLASS_BOX.md#limitations) for the complete
+list, including audit caps, recovery caveats, and model-degradation behavior.
 
 ## HTTP API
 
