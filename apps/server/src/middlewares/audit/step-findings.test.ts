@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { emitPolicyFindings } from "./audit-model.js";
+import { checkNetworkWhitelist } from "./deterministic.js";
 import type { DeterministicFindings } from "./deterministic.js";
+import { emptyActivity } from "./step-activity.js";
 import {
   mergePromptInjections,
   reportForStep,
@@ -141,6 +144,40 @@ describe("reportForStep", () => {
         reason: "",
       },
     ]);
+  });
+
+  // The live e2e suite's GitHub scenario used to be the only place proving an
+  // out-of-whitelist GitHub call becomes an actionable finding, which made
+  // that assertion depend on the model choosing to actually issue the
+  // request. This pins the same policy deterministically: given the exact
+  // whitelist the e2e suite configures (playwright.config.ts), a step that
+  // contacted github.com always turns into a "security" warning naming
+  // GitHub, whether or not the network-verification model check ran.
+  it("turns an out-of-whitelist GitHub call into an actionable security finding", () => {
+    const activity = {
+      ...emptyActivity(),
+      networkCalls: [{ url: "https://github.com/Acrylic125" }],
+    };
+    const networkViolations = checkNetworkWhitelist(activity, [
+      "tanstack.com",
+      "youtube.com",
+      ".youtube.com",
+    ]);
+    expect(networkViolations).toEqual(["https://github.com/Acrylic125"]);
+
+    const report = reportForStep(
+      { ...nothingFound(), networkViolations },
+      checks({ network: unanswered("Network") }),
+    );
+
+    const findings: string[] = [];
+    emitPolicyFindings(
+      (type, category, finding) => {
+        if (type === "warning" && category === "security") findings.push(finding);
+      },
+      report.policies,
+    );
+    expect(findings.join(" ")).toMatch(/github/i);
   });
 
   it("keeps only judged tool misuse flags and sensitive sink writes", () => {
