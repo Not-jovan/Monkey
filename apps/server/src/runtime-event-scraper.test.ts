@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { createRedactor } from "./middlewares/trace/redaction.js";
 import {
   runtimeEventFilePath,
   runtimeEventStatePath,
@@ -139,5 +140,42 @@ describe("Runtime event scraper", () => {
     };
     expect(stored.done).toBe(true);
     expect(stored.ptr).toBe(Buffer.byteLength('{"type":"thread.started"}\n'));
+  });
+
+  it("redacts secrets before events.jsonl is written, including split chunks", async () => {
+    const root = await makeRoot();
+    const secret = "ark-PIPELINE-FAKE-SECRET-0000001";
+    const seen: Record<string, unknown>[] = [];
+    const pipeline = await startRuntimeEventPipeline({
+      dataDirectory: root,
+      runId: "run-redacted",
+      onEvent: (event) => {
+        seen.push(event);
+      },
+      isTerminalEvent,
+      redact: createRedactor([secret]).redactText,
+    });
+
+    const event = JSON.stringify({
+      type: "item.started",
+      item: {
+        type: "command_execution",
+        command: "export ARK_API_KEY=" + secret,
+      },
+    });
+    const split = event.indexOf(secret) + 8;
+    pipeline.record(event.slice(0, split));
+    pipeline.record(event.slice(split) + "\n");
+    await pipeline.close();
+
+    const persisted = await readFile(
+      runtimeEventFilePath(root, "run-redacted"),
+      "utf8",
+    );
+    expect(persisted).not.toContain(secret);
+    expect(persisted).toContain("***");
+    expect(persisted).toContain("_launchpadSecretTypes");
+    expect(JSON.stringify(seen)).not.toContain(secret);
+    expect(seen[0]?._launchpadSecretTypes).toEqual(["ARK_API_KEY"]);
   });
 });

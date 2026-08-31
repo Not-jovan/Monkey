@@ -17,7 +17,7 @@ flowchart LR
         UI["React Web UI"] --> API["Fastify API / AgentService"]
         API --> Store["JSON metadata and Agent workspaces"]
         API --> Runner["Agent runner"]
-        Runner -->|append| EventFile[("runtime-events/<runId>/events.jsonl")]
+        Runner -->|detect names + redact + append| EventFile[("runtime-events/<runId>/events.jsonl")]
         Scraper["Resumable event scraper"] --> Tracer["TraceService\nredact + assemble spans"]
         Tracer --> Traces[("traces/<traceId>.json\nagent + auditor")]
         Traces -->|complete evidence only| Auditor["Auditor"]
@@ -48,11 +48,13 @@ flowchart LR
     style Audits fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
 ```
 
-The runner appends Runtime stdout to `runtime-events/<runId>/events.jsonl` with
-mode `0600`. The scraper reads only complete JSONL records and persists its byte
-offset and partial line in `scrape-state.json`. `TraceService` masks the raw
-event and every derived prompt, argument, output, and error before `TraceStore`
-persists it or the API returns it to the browser.
+The runner buffers complete Runtime JSONL lines, detects credential names,
+masks their values, and only then appends them to
+`runtime-events/<runId>/events.jsonl` with mode `0600`. Safe secret-type names
+remain on the event for policy evaluation. The scraper persists its byte offset
+and partial line in `scrape-state.json`, and `TraceService` applies the same
+redactor again to every derived prompt, argument, output, and error before
+`TraceStore` persists it or the API returns it to the browser.
 
 If the scraper is disrupted, the event file remains the durable evidence
 source. On restart, an incomplete terminal trace is reset to its root evidence,

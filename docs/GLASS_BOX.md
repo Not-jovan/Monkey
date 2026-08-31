@@ -18,7 +18,7 @@ flowchart LR
     Runner -->|launch| Runtime["Agent Runtime\n(Codex or Claude Code)"]
     Intent -->|standing spec| Runtime
     Runtime -->|stdout JSONL pipe| Runner
-    Runner -->|append| EventFile[("runtime-events/<runId>/events.jsonl")]
+    Runner -->|detect names + redact + append| EventFile[("runtime-events/<runId>/events.jsonl")]
     EventFile -->|complete records| Scraper["Resumable event scraper"]
     State[("scrape-state.json")] -.->|byte offset + partial line| Scraper
     Scraper --> TraceService["TraceService\nsecret detection + masking + span assembly"]
@@ -32,16 +32,16 @@ flowchart LR
 
 The trust boundary is the child process's stdout pipe. The Runtime does not call
 a control-plane collector and never receives the operator bearer token. The
-control-plane runner owns that pipe and appends stdout to a host-side
-`events.jsonl` file with mode `0600`. The scraper reads only complete lines and
-stores its durable byte offset and any partial line in the adjacent
-`scrape-state.json` file.
+control-plane runner owns that pipe, buffers incomplete lines in memory,
+detects credential names, masks their values, and only then appends JSONL to a
+host-side `events.jsonl` file with mode `0600`. The scraper stores its durable
+byte offset and any partial line in the adjacent `scrape-state.json` file.
 
-The untrusted boundary ends inside `TraceService`. It detects credential names
-before masking, retains only those names for policy evaluation, recursively
-masks raw runtime events, and separately masks every derived prompt, tool
-argument, output, and error before handing the record to `TraceStore`. The
-auditor consequently reads persisted, already-masked evidence and cannot put a
+Only secret-type names cross the persistence boundary alongside the masked
+event. `TraceService` carries those names into policy evidence and applies the
+same redactor again to every raw event and derived prompt, tool argument,
+output, and error before handing the record to `TraceStore`. The auditor
+consequently reads persisted, already-masked evidence and cannot put a
 plaintext credential back into an audit.
 
 If collection is interrupted, stdout continues to accumulate in the event

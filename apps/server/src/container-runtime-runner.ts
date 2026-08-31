@@ -201,6 +201,7 @@ export class ContainerRuntimeRunner implements AgentRunner {
             onProblem: request.onEventStreamProblem,
             isTerminalEvent: this.runtime.isTerminalEvent,
             disrupted: request.eventPipeline?.disrupted,
+            redact: request.redact,
           })
         : null;
     let stdout = "";

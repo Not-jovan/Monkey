@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
+import { detectSecretBindings } from "./middlewares/trace/secrets.js";
 import type { RuntimeEventStreamProblem } from "./types.js";
 
 const POLL_INTERVAL_MS = 1_000;
@@ -350,14 +351,17 @@ class RuntimeEventScraper {
 
 class RuntimeEventFile {
   private queue: Promise<void> = Promise.resolve();
-  private sawOutput = false;
-  private endsWithNewline = true;
+  private partialLine = "";
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    private readonly redact: (text: string) => string,
+  ) {}
 
   static async create(
     dataDirectory: string,
     runId: string,
+    redact: (text: string) => string,
   ): Promise<RuntimeEventFile> {
     const directory = runtimeEventDirectory(dataDirectory, runId);
     await mkdir(directory, { recursive: true });
@@ -366,29 +370,60 @@ class RuntimeEventFile {
       encoding: "utf8",
       mode: 0o600,
     });
-    return new RuntimeEventFile(filePath);
+    return new RuntimeEventFile(filePath, redact);
   }
 
   append(chunk: string): Promise<void> {
     if (chunk.length === 0) return Promise.resolve();
-    this.sawOutput = true;
-    this.endsWithNewline = chunk.endsWith("\n");
+    const lines = (this.partialLine + chunk).split("\n");
+    this.partialLine = lines.pop() ?? "";
+    const sanitized = lines
+      .map((line) => this.sanitizeLine(line) + "\n")
+      .join("");
+    if (sanitized.length === 0) return Promise.resolve();
     const queued = this.queue.then(() =>
-      appendFile(this.filePath, chunk, { encoding: "utf8" }),
+      appendFile(this.filePath, sanitized, { encoding: "utf8" }),
     );
     this.queue = queued.catch(() => undefined);
     return queued;
   }
 
   async close(): Promise<void> {
+    const finalLine = this.partialLine;
+    this.partialLine = "";
+    if (finalLine.length > 0) {
+      const sanitized = this.sanitizeLine(finalLine) + "\n";
+      const queued = this.queue.then(() =>
+        appendFile(this.filePath, sanitized, { encoding: "utf8" }),
+      );
+      this.queue = queued.catch(() => undefined);
+      await queued;
+      return;
+    }
     await this.queue;
-    if (!this.sawOutput || this.endsWithNewline) return;
-    await appendFile(this.filePath, "\n", { encoding: "utf8" });
-    this.endsWithNewline = true;
   }
 
   path(): string {
     return this.filePath;
+  }
+
+  private sanitizeLine(line: string): string {
+    const secretTypes = [
+      ...new Set(
+        detectSecretBindings(line).map((binding) => binding.secretType),
+      ),
+    ];
+    const redacted = this.redact(line);
+    if (secretTypes.length === 0) return redacted;
+    try {
+      const event = runtimeEventSchema.parse(JSON.parse(redacted));
+      return JSON.stringify({
+        ...event,
+        _launchpadSecretTypes: secretTypes,
+      });
+    } catch {
+      return redacted;
+    }
   }
 }
 
@@ -438,10 +473,12 @@ export async function startRuntimeEventPipeline(input: {
     | undefined;
   isTerminalEvent: (event: Record<string, unknown>) => boolean;
   disrupted?: boolean | undefined;
+  redact?: ((text: string) => string) | undefined;
 }): Promise<RuntimeEventPipeline> {
   const writer = await RuntimeEventFile.create(
     input.dataDirectory,
     input.runId,
+    input.redact ?? ((text) => text),
   );
   const scraper = new RuntimeEventScraper({
     runId: input.runId,

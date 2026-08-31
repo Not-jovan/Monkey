@@ -100,6 +100,14 @@ function isTerminalRuntimeEvent(event: Record<string, unknown>): boolean {
   );
 }
 
+function runtimeEventSecretTypes(event: Record<string, unknown>): string[] {
+  const value = event._launchpadSecretTypes;
+  if (!Array.isArray(value)) return [];
+  return value.filter(
+    (entry): entry is string => typeof entry === "string" && entry.length > 0,
+  );
+}
+
 function rawRuntimeUsage(event: Record<string, unknown>): PartialUsage | null {
   if (!event.usage || typeof event.usage !== "object") return null;
   const usage = event.usage as Record<string, unknown>;
@@ -709,7 +717,12 @@ export class TraceService {
           const rawArgumentsJson = command
             ? JSON.stringify({ cmd: command })
             : "";
-          const requestSecrets = this.secretNames(rawArgumentsJson);
+          const requestSecrets = [
+            ...new Set([
+              ...this.secretNames(rawArgumentsJson),
+              ...runtimeEventSecretTypes(event),
+            ]),
+          ];
           const argumentsJson = rawArgumentsJson
             ? this.redactor.redactText(clip(rawArgumentsJson, ARGUMENT_CLIP))
             : "";
