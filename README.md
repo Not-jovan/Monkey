@@ -2,7 +2,7 @@
 
 ![Monkey Overview](docs/overview.png)
 
-**Selected track: Track A — The Glass Box (Trace and Audit).**
+**Selected track: Track A — Agent Launchpad: Design and Build Lightweight Agent Middleware**
 
 ## Problem
 You cannot improve what you cannot trace.
