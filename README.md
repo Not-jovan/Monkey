@@ -146,21 +146,22 @@ The tracer should reconcile, and trigger the auditor.
 
 ```mermaid
 flowchart TB
-    Traces[("traces/")] -->|judgeable span| Spec["Have standing spec?"]
+    Traces[("traces/")] -->|judgeable span| Evidence{"Evidence complete?"}
+    Evidence -->|no| Skip["Skip audit"]
+    Evidence -->|yes| Auditor["Auditor"]
+    Auditor --> Identify["identifyFor<br/>once per chat"]
+    Identify --> Intent["Pinned intent"]
+    Intent --> Step[auditStep]
 
-    Spec -->|no| Identify[identifyIntent]
-    Spec -->|yes| Step[auditStep]
-    Identify --> Step
-
-    Agents[("launchpad.json")] -->|Agent instructions| Identify
+    RunSpan[("run span")] -->|Recorded agent instructions| Identify
     Traces -->|user prompt| Identify
     AuditsIn[("audits/")] -->|prior derivation| Identify
 
-    subgraph stepPhase ["auditStep — each step, concurrent"]
+    subgraph stepPhase ["auditStep — summarize, then applicable checks in parallel"]
         direction LR
         S0["Summarize"]
         S1["Secret exposure"]
-        S2["Network whitelist"]
+        S2["Network whitelist<br/>if network call"]
         S3["Intent alignment"]
         S4["Prompt injection"]
         S5["Tool misuse if tool call"]
@@ -168,12 +169,12 @@ flowchart TB
     end
 
     Step --> S0
-    Step --> S1
-    Step --> S2
-    Step --> S3
-    Step --> S4
-    Step --> S5
-    Step --> S6
+    S0 --> S1
+    S0 --> S2
+    S0 --> S3
+    S0 --> S4
+    S0 --> S5
+    S0 --> S6
 
     subgraph memory ["agent-runs/{agentId}/{chatId}/"]
         direction LR
@@ -181,29 +182,34 @@ flowchart TB
         Meta["steps-meta.json"]
     end
 
-    stepPhase --> StepMd
-    stepPhase --> Meta
+    Step --> StepMd
+    Step --> Meta
+    Step --> StepFindings[("audits/<traceId>.json<br/>step findings")]
 
     Ended["chat complete or terminated"] --> Gate["wait for every auditStep"]
-    Meta --> Gate
+    StepTracker["AgentChatAuditor<br/>open/close step counter"] --> Gate
     Gate --> All[auditAll]
 
-    subgraph runPhase ["auditAll — once, concurrent"]
+    subgraph runPhase ["auditAll — deterministic + parallel model analyses"]
         direction LR
-        A1["Repeated failure"]
-        A2["Backtrace"]
-        A3["Forward-trace"]
+        A1["Repeated failure<br/>(deterministic)"]
+        A2["Backtrace<br/>(parallel)"]
+        A3["Forward-trace<br/>(parallel)"]
     end
 
     All --> A1
     All --> A2
     All --> A3
     Meta -->|which steps| All
-    StepMd -->|workpad| All
+    StepMd -->|workpad, metadata fallback| All
 
-    A1 --> Findings[("audits/")]
+    A1 --> Findings[("audits/<traceId>.json<br/>run findings")]
     A2 --> Findings
     A3 --> Findings
+
+    Auditor --> ModelCalls["Auditor model calls"]
+    ModelCalls --> AuditorTrace[("auditor trace<br/>traces/<traceId>.json")]
+    AuditorTrace -->|on-demand audit| Evidence
 
     style Identify fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Step fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
@@ -217,7 +223,10 @@ flowchart TB
 #### Intent Derivation
 An intent is the desired goal (i.e. Instruction) of your agent. As agent progresses, you introduce it new constraints/guardrails. The Auditor reidentifies the Intent of the agent for every chat. The Auditor then track whether the agent conforms to this intent when auditing, as well as attempts to deviate.
 
-Runs only when this chat has no standing spec yet. Agent instructions from `launchpad.json`, user prompt from `traces/`, prior derivation from `audits/`. Later spans skip it and go to `auditStep`. Intent alignment uses that spec.
+The auditor derives intent once per chat and pins the result for later steps. It uses
+the recorded agent instructions from the run span, the user prompt from `traces/`,
+and any prior derivation from `audits/`. Later spans reuse the pinned intent and go
+directly to `auditStep`. Intent alignment uses that pinned intent.
 
 #### Artifacts
 | Action | Remark |
