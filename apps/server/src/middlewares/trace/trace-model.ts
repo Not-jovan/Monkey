@@ -72,6 +72,7 @@ export const traceRecordSchema = z.object({
   // False once the output cap truncated the stream. A diagnosis must never
   // silently rest on evidence the platform knows it discarded.
   evidenceComplete: z.boolean().default(true),
+  evidenceProblem: z.string().nullable().default(null),
   unrecognizedEvents: z.number(),
   // The trace this one audits, and how many audits deep that makes it. An
   // agent's own run is depth 0 with no target; the auditor that judged it is

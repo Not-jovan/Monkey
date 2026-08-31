@@ -202,7 +202,10 @@ export function TraceRunView({
         {!trace.evidenceComplete && (
           <span
             className="failure-partial"
-            title="The output cap truncated this run's stream, so some evidence was discarded"
+            title={
+              trace.evidenceProblem ??
+              "Some runtime evidence was discarded, so this trace is incomplete."
+            }
           >
             partial evidence
           </span>

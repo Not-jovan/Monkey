@@ -102,6 +102,17 @@ export interface RunnerResult {
   timing?: ProviderCallTiming | undefined;
 }
 
+export interface RuntimeEventStreamProblem {
+  runId: string;
+  filePath: string;
+  reason: string;
+  line?: string | undefined;
+}
+
+export interface RuntimeEventPipelineOptions {
+  disrupted?: boolean | undefined;
+}
+
 export interface RunnerRequest {
   agentId: string;
   workspacePath: string;
@@ -133,6 +144,11 @@ export interface RunnerRequest {
   // Streams every parsed runtime JSONL event to the caller while the run is
   // still in flight.
   onEvent?: ((event: Record<string, unknown>) => void) | undefined;
+  // Reports that the persisted runtime event file could not be scraped safely.
+  onEventStreamProblem?:
+    | ((problem: RuntimeEventStreamProblem) => void | Promise<void>)
+    | undefined;
+  eventPipeline?: RuntimeEventPipelineOptions | undefined;
 }
 
 export interface AgentRunner {

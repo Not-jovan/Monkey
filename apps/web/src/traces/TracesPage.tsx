@@ -36,7 +36,9 @@ const columns = [
     id: "duration",
     header: "Duration",
     cell: ({ row }) =>
-      formatDuration(spanDuration(row.original.startedAt, row.original.endedAt)),
+      formatDuration(
+        spanDuration(row.original.startedAt, row.original.endedAt),
+      ),
   }),
   columnHelper.display({
     id: "tokens",
@@ -74,8 +76,7 @@ export function TracesPage() {
     refetchInterval: 5_000,
   });
   const agents: Agent[] = agentsQuery.data?.agents ?? [];
-  const selectedAgentId =
-    searchParams.get("agent") ?? agents[0]?.id ?? "";
+  const selectedAgentId = searchParams.get("agent") ?? agents[0]?.id ?? "";
 
   const tracesQuery = useQuery({
     queryKey: ["traces", selectedAgentId],

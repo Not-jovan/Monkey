@@ -350,6 +350,7 @@ export class AgentService {
       // Codex's inner sandbox; meaningless for other runtimes, so the UI
       // only surfaces it when Codex is the selected runtime.
       codexSandboxMode: this.config.codexSandboxMode,
+      mockDisruptTracer: this.config.mockDisruptTracer,
       runtimeProvider: this.config.runtimeProvider,
       containerEngine:
         this.config.runtimeProvider === "container"
@@ -415,6 +416,11 @@ export class AgentService {
         },
         onThread: (threadId) => this.traces?.onConversation(run.id, threadId),
         onEvent: (event) => this.traces?.onRunnerEvent(run.id, event),
+        onEventStreamProblem: (problem) =>
+          this.traces?.onEventStreamProblem(run.id, problem),
+        eventPipeline: {
+          disrupted: this.config.mockDisruptTracer,
+        },
       });
       const completedAt = now();
       const safeOutput = this.redact(result.output);

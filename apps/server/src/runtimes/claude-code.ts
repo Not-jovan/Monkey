@@ -267,6 +267,10 @@ function normalizeClaudeCodeEvent(
   }
 }
 
+function isClaudeCodeTerminalEvent(event: Record<string, unknown>): boolean {
+  return event.type === "result";
+}
+
 export const claudeCodeRuntime: RuntimeDefinition = {
   id: "claude-code",
   bin: (config) => config.claudeCodeBin,
@@ -312,6 +316,8 @@ export const claudeCodeRuntime: RuntimeDefinition = {
     OTEL_LOG_USER_PROMPTS: "1",
     OTEL_LOG_TOOL_DETAILS: "1",
   }),
+
+  isTerminalEvent: isClaudeCodeTerminalEvent,
 
   trace: {
     runtimeId: "claude-code",

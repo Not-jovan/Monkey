@@ -16,7 +16,11 @@ export async function createTraceMiddleware(input: {
     input.onStoreError,
   );
   await traceStore.initialize();
-  const traceService = new TraceService(traceStore, redactor, input.runtime.trace);
+  const traceService = new TraceService(
+    traceStore,
+    redactor,
+    input.runtime.trace,
+  );
 
   return {
     traceStore,

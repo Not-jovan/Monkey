@@ -148,6 +148,7 @@ export interface TraceRecord {
   failure: RunFailure | null;
   recoveredErrorCount: number;
   evidenceComplete: boolean;
+  evidenceProblem: string | null;
   unrecognizedEvents: number;
   // Set when this run is an audit of another trace, and how many audits deep
   // that makes it. An agent's own run is depth 0 with no target.
@@ -278,6 +279,7 @@ export interface SystemInfo {
   agentModel: string | null;
   runtimeAvailable: boolean;
   codexSandboxMode: string;
+  mockDisruptTracer: boolean;
   runtimeProvider: "local-process" | "container";
   containerEngine: string | null;
   runtime: string;

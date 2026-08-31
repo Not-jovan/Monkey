@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { z } from "zod";
 // Codex-specific, and deliberately so: its only consumer is onRunnerEvent,
 // which reads Codex's own stdout stream. Runtime-agnostic span building goes
@@ -120,7 +121,10 @@ function auditorCallSubject(label: string) {
 // Drop the Model/Tool kind so the spawn can name the step in the space a
 // canvas box actually has. "Model · after update_plan" → "after update_plan".
 function shortAuditorTarget(subject: string) {
-  const parts = subject.split(" · ").map((part) => part.trim()).filter(Boolean);
+  const parts = subject
+    .split(" · ")
+    .map((part) => part.trim())
+    .filter(Boolean);
   const rest =
     parts.length >= 2 && (parts[0] === "Model" || parts[0] === "Tool")
       ? parts.slice(1).join(" · ")
@@ -232,8 +236,7 @@ const runnerCompletedItemSchema = z.object({
 });
 
 function modelCallLabel(scope: ConversationScope, attempt: number | undefined) {
-  const nested =
-    scope.spawnSpanId !== null || scope.subagentStack.length > 0;
+  const nested = scope.spawnSpanId !== null || scope.subagentStack.length > 0;
   const prefix = nested ? "Subagent model" : "Model";
   let label: string;
   if (scope.toolsSinceLastModelCall.length === 0) {
@@ -270,6 +273,39 @@ export class TraceService {
 
   redactText(text: string) {
     return this.redactor.redactText(text);
+  }
+
+  onEventStreamProblem(
+    runId: string,
+    problem: { filePath: string; reason: string; line?: string | undefined },
+  ) {
+    const state = this.runs.get(runId);
+    const trace = this.store.get(runId);
+    if (!state || !trace || trace.evidenceProblem) return;
+    const at = this.now().toISOString();
+    const parentId = state.turnSpanId ?? state.rootSpanId;
+    const detail = this.redactor.redactText(problem.reason);
+    this.store.appendSpan(runId, {
+      id: randomUUID(),
+      traceId: runId,
+      parentId,
+      name: "runtime.events",
+      label: "Runtime event stream",
+      kind: "system",
+      actor: "system",
+      status: "error",
+      startedAt: at,
+      endedAt: at,
+      durationMs: 0,
+      attributes: {
+        fileName: path.basename(problem.filePath),
+      },
+      error: detail,
+    });
+    this.store.updateTrace(runId, (record) => {
+      record.evidenceComplete = false;
+      record.evidenceProblem = detail;
+    });
   }
 
   // Credential detection has to happen before masking: once a value is
@@ -330,6 +366,7 @@ export class TraceService {
       failure: null,
       recoveredErrorCount: 0,
       evidenceComplete: true,
+      evidenceProblem: null,
       unrecognizedEvents: 0,
       auditOf: run.auditOf ?? null,
       auditDepth: run.auditDepth ?? 0,
@@ -624,6 +661,8 @@ export class TraceService {
       // letting a diagnosis rest on evidence the platform knows it dropped.
       if (outcome.failure?.kind === "output-cap") {
         trace.evidenceComplete = false;
+        trace.evidenceProblem ??=
+          "The runtime output exceeded the configured capture limit, so part of the stream was discarded.";
       }
 
       // Found whatever the run's outcome was. A sandbox denial that the agent
@@ -703,9 +742,8 @@ export class TraceService {
     // so the fallback has to skip them for the same reason the line above does.
     const runId =
       this.activeRunByAgent.get(agentId) ??
-      this.store
-        .listByAgent(agentId)
-        .find((trace) => !isAuditorTrace(trace))?.id;
+      this.store.listByAgent(agentId).find((trace) => !isAuditorTrace(trace))
+        ?.id;
     if (!runId) return null;
     const trace = this.store.get(runId);
     if (!trace) return null;
@@ -738,7 +776,8 @@ export class TraceService {
     let buffered = 0;
     let skipped = 0;
     for (const record of records) {
-      const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
+      const conversationId =
+        record.attributes[this.traceAdapter.correlationAttribute];
       if (typeof conversationId !== "string" || conversationId.length === 0) {
         skipped += 1;
         continue;
@@ -798,7 +837,8 @@ export class TraceService {
       });
       return;
     }
-    const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
+    const conversationId =
+      record.attributes[this.traceAdapter.correlationAttribute];
     if (typeof conversationId !== "string" || conversationId.length === 0) {
       return;
     }
@@ -831,7 +871,8 @@ export class TraceService {
           trace.model = normalized.model ?? trace.model;
         });
         this.store.updateSpan(runId, turnSpanId, (span) => {
-          if (normalized.provider) span.attributes.provider = normalized.provider;
+          if (normalized.provider)
+            span.attributes.provider = normalized.provider;
           if (normalized.approvalPolicy)
             span.attributes.approvalPolicy = normalized.approvalPolicy;
           if (normalized.sandboxPolicy)
@@ -896,7 +937,9 @@ export class TraceService {
             ...(normalized.statusCode !== undefined
               ? { statusCode: normalized.statusCode }
               : {}),
-            ...(normalized.attempt !== undefined ? { attempt: normalized.attempt } : {}),
+            ...(normalized.attempt !== undefined
+              ? { attempt: normalized.attempt }
+              : {}),
           },
           error: normalized.errorMessage
             ? this.redactor.redactText(normalized.errorMessage)
@@ -924,7 +967,9 @@ export class TraceService {
           endedAt: timestamp,
           durationMs: normalized.durationMs ?? 0,
           attributes: {
-            ...(normalized.attributeKind ? { kind: normalized.attributeKind } : {}),
+            ...(normalized.attributeKind
+              ? { kind: normalized.attributeKind }
+              : {}),
             laneId: this.laneIdFor(scope, false),
           },
           error: this.redactor.redactText(normalized.errorMessage),
@@ -1058,7 +1103,9 @@ export class TraceService {
               if (normalized.mcpServer)
                 span.attributes.mcpServer = normalized.mcpServer;
               if (exitCode !== null) span.attributes.exitCode = exitCode;
-              span.error = succeeded ? null : clip(output, 400) || "Tool failed";
+              span.error = succeeded
+                ? null
+                : clip(output, 400) || "Tool failed";
               if (isSubagentTool(normalized.toolName)) {
                 const subagentLabel = readSubagentLabel(toolArguments);
                 if (subagentLabel) {
@@ -1087,49 +1134,50 @@ export class TraceService {
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
           }
         } else {
-          this.appendChild(
-            runId,
-            this.activeParent(scope, turnSpanId),
-            {
-              name: "tool." + normalized.toolName,
-              label: isSubagentTool(normalized.toolName)
-                ? "Subagent task"
-                : "Called " + normalized.toolName,
-              kind: "tool_call",
-              actor: "agent",
-              status: succeeded ? "ok" : "error",
-              startedAt: new Date(
-                new Date(timestamp).getTime() - normalized.durationMs,
-              ).toISOString(),
-              endedAt: timestamp,
-              durationMs: normalized.durationMs,
-              attributes: {
-                toolName: normalized.toolName,
-                callId,
-                laneId: this.laneIdFor(scope, isSubagentTool(normalized.toolName)),
-                ...(scope.lastModelCallSpanId
-                  ? { causedBySpanId: scope.lastModelCallSpanId }
-                  : {}),
-                ...(isSubagentTool(normalized.toolName) ? { subagent: true } : {}),
-                ...(toolArguments ? { arguments: toolArguments } : {}),
-                ...(output ? { output } : {}),
-                ...(outputTruncated
-                  ? {
-                      outputTruncated: true,
-                      outputLength: normalized.output?.length ?? 0,
-                    }
-                  : {}),
-                ...(requestSecrets.length > 0
-                  ? { secretsInRequest: requestSecrets.join(",") }
-                  : {}),
-                ...(responseSecrets.length > 0
-                  ? { secretsInResponse: responseSecrets.join(",") }
-                  : {}),
-                ...(exitCode !== null ? { exitCode } : {}),
-              },
-              error: succeeded ? null : clip(output, 400) || "Tool failed",
+          this.appendChild(runId, this.activeParent(scope, turnSpanId), {
+            name: "tool." + normalized.toolName,
+            label: isSubagentTool(normalized.toolName)
+              ? "Subagent task"
+              : "Called " + normalized.toolName,
+            kind: "tool_call",
+            actor: "agent",
+            status: succeeded ? "ok" : "error",
+            startedAt: new Date(
+              new Date(timestamp).getTime() - normalized.durationMs,
+            ).toISOString(),
+            endedAt: timestamp,
+            durationMs: normalized.durationMs,
+            attributes: {
+              toolName: normalized.toolName,
+              callId,
+              laneId: this.laneIdFor(
+                scope,
+                isSubagentTool(normalized.toolName),
+              ),
+              ...(scope.lastModelCallSpanId
+                ? { causedBySpanId: scope.lastModelCallSpanId }
+                : {}),
+              ...(isSubagentTool(normalized.toolName)
+                ? { subagent: true }
+                : {}),
+              ...(toolArguments ? { arguments: toolArguments } : {}),
+              ...(output ? { output } : {}),
+              ...(outputTruncated
+                ? {
+                    outputTruncated: true,
+                    outputLength: normalized.output?.length ?? 0,
+                  }
+                : {}),
+              ...(requestSecrets.length > 0
+                ? { secretsInRequest: requestSecrets.join(",") }
+                : {}),
+              ...(responseSecrets.length > 0
+                ? { secretsInResponse: responseSecrets.join(",") }
+                : {}),
+              ...(exitCode !== null ? { exitCode } : {}),
             },
-          );
+            error: succeeded ? null : clip(output, 400) || "Tool failed",
+          });
           if (succeeded) {
             scope.toolsSinceLastModelCall.push(normalized.toolName);
             if (output) scope.lastToolOutput = clip(output, OUTPUT_CLIP);
@@ -1147,7 +1195,11 @@ export class TraceService {
     }
   }
 
-  private applyUsage(runId: string, scope: ConversationScope, usage: PartialUsage) {
+  private applyUsage(
+    runId: string,
+    scope: ConversationScope,
+    usage: PartialUsage,
+  ) {
     this.store.updateTrace(runId, (trace) => {
       trace.usage.inputTokens += usage.inputTokens ?? 0;
       trace.usage.cachedTokens += usage.cachedTokens ?? 0;
@@ -1195,8 +1247,7 @@ export class TraceService {
     const state = this.runs.get(runId);
     if (!state) return null;
     const trace = this.store.get(runId);
-    const callerLane =
-      trace && isAuditorTrace(trace) ? "auditor" : "root";
+    const callerLane = trace && isAuditorTrace(trace) ? "auditor" : "root";
     const subagentType = options?.subagentType;
     const parentId = subagentType
       ? this.createSubagentSpawn(runId, state, callerLane, subagentType, span)

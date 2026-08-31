@@ -14,7 +14,11 @@ const envSchema = z.object({
     .enum(["read-only", "workspace-write", "danger-full-access"])
     .default("workspace-write"),
   CODEX_TIMEOUT_MS: z.coerce.number().int().min(1_000).default(600_000),
-  CODEX_MAX_OUTPUT_BYTES: z.coerce.number().int().min(65_536).default(2_097_152),
+  CODEX_MAX_OUTPUT_BYTES: z.coerce
+    .number()
+    .int()
+    .min(65_536)
+    .default(2_097_152),
   CLAUDE_CODE_HOME: z.string().default(path.resolve("claude-home")),
   CLAUDE_CODE_BIN: z.string().default("claude"),
   // Claude Code's analog of CODEX_SANDBOX_MODE, with one important
@@ -33,9 +37,14 @@ const envSchema = z.object({
   // ANTHROPIC_API_KEY above this, so the two are mutually exclusive in
   // claudeCodeRuntime.processEnv rather than both being forwarded.
   CLAUDE_CODE_OAUTH_TOKEN: z.string().optional(),
-  RUNTIME_PROVIDER: z.enum(["local-process", "container"]).default("local-process"),
+  RUNTIME_PROVIDER: z
+    .enum(["local-process", "container"])
+    .default("local-process"),
   CONTAINER_ENGINE: z.string().min(1).default("docker"),
-  CONTAINER_RUNTIME_IMAGE: z.string().min(1).default("volc-agent-runtime:local"),
+  CONTAINER_RUNTIME_IMAGE: z
+    .string()
+    .min(1)
+    .default("volc-agent-runtime:local"),
   CONTAINER_CPU_LIMIT: z.coerce.number().positive().default(2),
   CONTAINER_MEMORY_LIMIT: z
     .string()
@@ -63,6 +72,7 @@ const envSchema = z.object({
     .url()
     .default("https://ark.cn-beijing.volces.com/api/v3"),
   AUDIT_ENABLED: z.enum(["true", "false"]).default("true"),
+  MOCK_DISRUPT_TRACER: z.enum(["true", "false"]).default("false"),
   // Comma-separated hostnames the agent may reach. Unset disables the check
   // entirely; an explicit empty value means deny-all. A leading dot opts a
   // whole subtree in (".github.com" covers api.github.com).
@@ -103,7 +113,9 @@ const envSchema = z.object({
   // Override for setups where the Runtime cannot reach the control plane via
   // the derived host (e.g. rootless engines without host-gateway support).
   OTEL_COLLECTOR_URL: z.string().url().optional(),
-  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
+  NODE_ENV: z
+    .enum(["development", "test", "production"])
+    .default("development"),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;
@@ -125,7 +137,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     if (authToken.length < 24) {
       throw new Error(
         "APP_AUTH_TOKEN must contain at least 24 characters for a non-loopback " +
-          "production server (got " + authToken.length + ").",
+          "production server (got " +
+          authToken.length +
+          ").",
       );
     }
   }
@@ -163,6 +177,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
     auditEnabled: env.AUDIT_ENABLED === "true",
+    mockDisruptTracer: env.MOCK_DISRUPT_TRACER === "true",
     auditSecurityModel:
       env.AUDIT_SECURITY_MODEL?.trim() ||
       env.ARK_MODEL?.trim() ||
@@ -203,7 +218,9 @@ export function collectorLogsUrl(config: AppConfig): string {
   // The Runtime container reaches the control plane through the Docker host
   // alias; the local-process runner shares the host loopback.
   const host =
-    config.runtimeProvider === "container" ? "host.docker.internal" : "127.0.0.1";
+    config.runtimeProvider === "container"
+      ? "host.docker.internal"
+      : "127.0.0.1";
   return "http://" + host + ":" + config.port + "/collector/v1/logs";
 }
 

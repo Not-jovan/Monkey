@@ -49,7 +49,10 @@ import {
   type StepsMeta,
 } from "./audit-memory.js";
 import type { AuditStore } from "./audit-store.js";
-import { findRepeatedFailures, runDeterministicChecks } from "./deterministic.js";
+import {
+  findRepeatedFailures,
+  runDeterministicChecks,
+} from "./deterministic.js";
 import { reportForStep, type StepCheckOutcome } from "./step-findings.js";
 import {
   restoreCheck,
@@ -259,8 +262,7 @@ function collapseHealthNotes(
     if (step.category === "audit-health") health.push(step);
     else nextRun.push(step);
   }
-  const kept =
-    health.find((step) => step.type === "error") ?? health[0];
+  const kept = health.find((step) => step.type === "error") ?? health[0];
   if (!kept) return { spanAudit: nextSpan, runAudit: nextRun };
   const bucket = kept.spanId === null ? undefined : nextSpan[kept.spanId];
   if (bucket) bucket.push(kept);
@@ -301,10 +303,7 @@ function closeFromHealth(
   };
 }
 
-function judgedIntent(
-  chat: AgentChatAuditor,
-  trace: TraceRecord,
-): IntentState {
+function judgedIntent(chat: AgentChatAuditor, trace: TraceRecord): IntentState {
   const state = chat.intentState;
   const copy = state
     ? { ...state, extended: [...state.extended] }
@@ -348,6 +347,7 @@ export class AuditService {
     if (!this.deps.enabled) return;
     this.deps.traceStore.on("span", ({ trace, span }) => {
       if (isAuditorTrace(trace)) return;
+      if (!trace.evidenceComplete) return;
       if (!this.shouldAuditStep(span, trace)) return;
       const chat = this.auditorFor(trace);
       chat.openStep();
@@ -359,6 +359,7 @@ export class AuditService {
     });
     this.deps.traceStore.on("trace-completed", ({ trace }) => {
       if (isAuditorTrace(trace)) return;
+      if (!trace.evidenceComplete) return;
       const chat = this.auditorFor(trace);
       this.enqueue(() =>
         this.identifyFor(chat, trace).then(() => chat.auditAll()),
@@ -373,22 +374,25 @@ export class AuditService {
   // updateTrace, so no trace-completed is ever emitted for it -- and this
   // subscription is installed after that rewrite has already happened. Without
   // this sweep a crashed run is never judged at the run level and nothing says
-// so. The cap on MAX_RESUMED_RUN_AUDITS is the working set, not the archive:
-// a first boot with auditing newly enabled would otherwise queue every
-// historical run. Older unfinished work waits for a later boot or a click.
+  // so. The cap on MAX_RESUMED_RUN_AUDITS is the working set, not the archive:
+  // a first boot with auditing newly enabled would otherwise queue every
+  // historical run. Older unfinished work waits for a later boot or a click.
   private resumeUnfinishedRunAudits() {
     const pending = this.deps.traceStore
       .list()
       .filter(
         (trace) =>
           !isAuditorTrace(trace) &&
+          trace.evidenceComplete &&
           trace.status !== "running" &&
           !this.deps.auditStore.isRunComplete(trace.id),
       );
     for (const trace of pending.slice(0, MAX_RESUMED_RUN_AUDITS)) {
       const chat = this.auditorFor(trace);
       this.enqueue(() =>
-        this.identifyFor(chat, trace).then(() => this.reauditAgent(chat, trace)),
+        this.identifyFor(chat, trace).then(() =>
+          this.reauditAgent(chat, trace),
+        ),
       );
     }
     const skipped = pending.length - MAX_RESUMED_RUN_AUDITS;
@@ -621,7 +625,9 @@ export class AuditService {
 
   private priorPromptInjectionQuotes(findings: AuditTraceStep[]): string[] {
     return [
-      ...new Set(this.injectionsInFindings(findings).map((entry) => entry.quote)),
+      ...new Set(
+        this.injectionsInFindings(findings).map((entry) => entry.quote),
+      ),
     ];
   }
 
@@ -681,7 +687,9 @@ export class AuditService {
       .map((finding) => finding.slice(prefix.length).trim().toLowerCase());
   }
 
-  private async draftFindings(chat: AgentChatAuditor): Promise<AuditTraceStep[]> {
+  private async draftFindings(
+    chat: AgentChatAuditor,
+  ): Promise<AuditTraceStep[]> {
     return Object.values(await this.metaFor(chat)).flatMap(
       (entry) => entry.findings,
     );
@@ -755,7 +763,9 @@ export class AuditService {
     });
 
     const secretTypes = [
-      ...new Set(deterministic.secretExposures.map((entry) => entry.secretType)),
+      ...new Set(
+        deterministic.secretExposures.map((entry) => entry.secretType),
+      ),
     ];
     const toolName =
       typeof span.attributes.toolName === "string"
@@ -1021,7 +1031,8 @@ export class AuditService {
   ): Promise<StepCheckOutcome<Verdict> | null> {
     const restored = restoreCheck(cached, schema, options);
     if (restored !== "run") {
-      if (restored !== null) this.recordCachedVerdict(restored, options?.record);
+      if (restored !== null)
+        this.recordCachedVerdict(restored, options?.record);
       return restored;
     }
     return run();
@@ -1156,7 +1167,7 @@ export class AuditService {
       quote: entry.quote,
       // A run-level finding carries no span. Treating it as step 0 makes every
       // recorded step count as later, which is the safe reading.
-      at: (entry.spanId ? positionOf.get(entry.spanId) ?? 0 : 0) + 1,
+      at: (entry.spanId ? (positionOf.get(entry.spanId) ?? 0) : 0) + 1,
     }));
     const earliest = Math.min(...directives.map((entry) => entry.at));
     const later = trace.spans
@@ -1297,8 +1308,7 @@ export class AuditService {
     const allHistory = indexed.map(({ span, number }) => ({
       number,
       label: span.label,
-      summary:
-        workpads.get(span.id) || "(no memory recorded for this step)",
+      summary: workpads.get(span.id) || "(no memory recorded for this step)",
     }));
     const cited = numbered
       .filter(({ span }) =>
@@ -1465,7 +1475,10 @@ export class AuditService {
         health,
         contextSummary: "",
       });
-      outcome = closeFromHealth(health, failedPassError(meta, published.runAudit));
+      outcome = closeFromHealth(
+        health,
+        failedPassError(meta, published.runAudit),
+      );
     } catch (error) {
       this.deps.log?.("run-level audit failed for run " + traceId, error);
       outcome = { status: "failed", error: errorMessage(error) };
@@ -1520,7 +1533,8 @@ export class AuditService {
     if (dest === null) return;
     const subagentType = auditorSubagentType(input.name);
     input.attempts.forEach((attempt, index) => {
-      const fallback = input.usedFallback && index === input.attempts.length - 1;
+      const fallback =
+        input.usedFallback && index === input.attempts.length - 1;
       traceService.recordModelCall(
         dest,
         auditorCallSpan({
@@ -1540,9 +1554,9 @@ export class AuditService {
     });
   }
 
-    // A reused verdict is still work this pass did; it just did not pay for a
-    // model. Recording it is what lets the Glass Box say [CACHED] instead of
-    // looking like the check never ran.
+  // A reused verdict is still work this pass did; it just did not pay for a
+  // model. Recording it is what lets the Glass Box say [CACHED] instead of
+  // looking like the check never ran.
   private recordCachedCheck(
     trace: TraceRecord,
     input: {

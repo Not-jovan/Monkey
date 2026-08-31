@@ -102,6 +102,14 @@ export function readStreamError(
   return null;
 }
 
+function isCodexTerminalEvent(event: Record<string, unknown>): boolean {
+  return (
+    event.type === "turn.completed" ||
+    event.type === "turn.failed" ||
+    event.type === "turn.cancelled"
+  );
+}
+
 function normalizeCodexEvent(
   attributes: Record<string, unknown>,
 ): NormalizedRuntimeEvent | null {
@@ -260,6 +268,8 @@ export const codexRuntime: RuntimeDefinition = {
     CODEX_HOME: config.codexHome,
     ARK_API_KEY: config.arkApiKey,
   }),
+
+  isTerminalEvent: isCodexTerminalEvent,
 
   trace: {
     runtimeId: "codex",

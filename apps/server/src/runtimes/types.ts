@@ -52,5 +52,8 @@ export interface RuntimeDefinition {
   // needs runtime-specific knowledge of what env vars matter.
   processEnv(config: AppConfig, collectorToken: string): NodeJS.ProcessEnv;
 
+  // The event that semantically closes one turn in the runtime's JSONL stream.
+  isTerminalEvent(event: Record<string, unknown>): boolean;
+
   trace: RuntimeTraceAdapter;
 }

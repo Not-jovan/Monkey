@@ -9,6 +9,7 @@ import {
   RunFailureError,
 } from "./failures.js";
 import { RunTranscript, attachFailureTranscript } from "./middlewares/run-transcript/index.js";
+import { startRuntimeEventPipeline } from "./runtime-event-scraper.js";
 import type { ParsedEvents, RuntimeDefinition } from "./runtimes/types.js";
 import type { AgentRunner, RunnerRequest, RunnerResult } from "./types.js";
 
@@ -92,6 +93,17 @@ export class ProcessRuntimeRunner implements AgentRunner {
       errors: [],
       model: null,
     };
+    const eventPipeline =
+      request.runId && request.onEvent
+        ? await startRuntimeEventPipeline({
+            dataDirectory: this.config.dataDirectory,
+            runId: request.runId,
+            onEvent: request.onEvent,
+            onProblem: request.onEventStreamProblem,
+            isTerminalEvent: this.runtime.isTerminalEvent,
+            disrupted: request.eventPipeline?.disrupted,
+          })
+        : null;
     let stdout = "";
     let stderr = "";
     let totalBytes = 0;
@@ -125,12 +137,18 @@ export class ProcessRuntimeRunner implements AgentRunner {
         return;
       }
       if (target === "stdout") {
-        transcript.recordStdout(chunk.toString("utf8"));
-        stdout += chunk.toString("utf8");
+        const text = chunk.toString("utf8");
+        transcript.recordStdout(text);
+        eventPipeline?.record(text);
+        stdout += text;
         const lines = stdout.split(/\r?\n/);
         stdout = lines.pop() ?? "";
         for (const line of lines) {
-          this.runtime.parseEventLine(line, parsed, request.onEvent);
+          this.runtime.parseEventLine(
+            line,
+            parsed,
+            eventPipeline ? undefined : request.onEvent,
+          );
           reportRuntimeIds();
         }
       } else {
@@ -163,9 +181,14 @@ export class ProcessRuntimeRunner implements AgentRunner {
         child.once("close", (code) => resolve(code ?? 1));
       });
       if (stdout.trim()) {
-        this.runtime.parseEventLine(stdout.trim(), parsed, request.onEvent);
+        this.runtime.parseEventLine(
+          stdout.trim(),
+          parsed,
+          eventPipeline ? undefined : request.onEvent,
+        );
         reportRuntimeIds();
       }
+      await eventPipeline?.close();
       if (active.cancelled) {
         throw new RunCancelledError();
       }
@@ -217,6 +240,7 @@ export class ProcessRuntimeRunner implements AgentRunner {
         model: parsed.model,
       };
     } catch (error) {
+      await eventPipeline?.close();
       // A cancellation is a user action, not a fault worth a transcript.
       if (!(error instanceof RunCancelledError)) {
         await attachFailureTranscript(transcript, error, {
