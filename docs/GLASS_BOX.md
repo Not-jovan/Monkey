@@ -198,6 +198,7 @@ services are required.
 | `AUDIT_SECURITY_MODEL` | `gpt-oss-120b-250805` | Judges each step. |
 | `AUDIT_INTENT_MODEL` | `deepseek-v4-flash-ga-260731` | Judges the Run, classifies intent, and is the step-audit fallback. |
 | `AUDIT_NETWORK_WHITELIST` | Unset | Comma-separated hostnames the Agent may reach. |
+| `AUDIT_MODEL_THINKING` | `disabled` | Step audits are JSON. `auto` is also sent as disabled; set `enabled` only if you are measuring recall. |
 | `OTEL_COLLECTOR_URL` | Derived | Override when the Runtime cannot reach the host via `host.docker.internal`. |
 
 There is nothing to configure for the auditor's prompt cache. Ark caches a

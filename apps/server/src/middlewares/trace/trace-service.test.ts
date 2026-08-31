@@ -1069,6 +1069,42 @@ describe("TraceService", () => {
     expect(store.get(RUN_ID)?.evidenceComplete).toBe(false);
   });
 
+  it("does not diagnose a completed auditor run from recovered model errors", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+    service.recordModelCall(RUN_ID, {
+      id: "call-1",
+      traceId: RUN_ID,
+      parentId: null,
+      name: "audit.step.summary",
+      label: "Summarize",
+      kind: "model_call",
+      actor: "system",
+      status: "error",
+      startedAt: "2026-08-30T00:00:00.000Z",
+      endedAt: "2026-08-30T00:00:01.000Z",
+      durationMs: 1_000,
+      attributes: {},
+      error: "ModelNotOpen: Your account has not activated the model",
+    });
+    service.onRunEnd(RUN_ID, {
+      status: "completed",
+      output: "Audit of trace other-1 complete.",
+      failure: null,
+    });
+
+    const trace = store.get(RUN_ID);
+    expect(trace?.status).toBe("completed");
+    expect(trace?.failure).toBeNull();
+    expect(trace?.failingSpanId).toBeNull();
+    expect(trace?.recoveredErrorCount).toBe(1);
+  });
+
   // An in-process run has no event stream, so the caller hands over the span it
   // already made. This is how an auditor's work becomes a trace.
   it("records an in-process model call under the run it belongs to", async () => {
@@ -1195,7 +1231,7 @@ describe("TraceService", () => {
         traceId: RUN_ID,
         parentId: null,
         name: "audit.step.summary",
-        label: "Summarize · Model · plan",
+        label: "Summarize - Model · plan",
         kind: "model_call",
         actor: "system",
         status: "ok",
@@ -1214,7 +1250,7 @@ describe("TraceService", () => {
         traceId: RUN_ID,
         parentId: null,
         name: "audit.step.summary",
-        label: "Summarize · Tool · exec_command",
+        label: "Summarize - Tool · exec_command",
         kind: "model_call",
         actor: "system",
         status: "ok",
@@ -1233,7 +1269,7 @@ describe("TraceService", () => {
         traceId: RUN_ID,
         parentId: null,
         name: "audit.step.intent",
-        label: "Intent · Model · plan",
+        label: "Intent - Model · plan",
         kind: "model_call",
         actor: "system",
         status: "ok",

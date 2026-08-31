@@ -262,7 +262,7 @@ describe("canvas swimlanes", () => {
       name: "audit.step.summary",
       kind: "model_call",
       actor: "system",
-      label: "Summarize · Model · plan",
+      label: "Summarize - Model · plan",
       attributes: { laneId: "auditor", targetSpanId: "agent-plan" },
     });
     const runAudit = span({
@@ -270,7 +270,7 @@ describe("canvas swimlanes", () => {
       name: "audit.forward-trace",
       kind: "model_call",
       actor: "system",
-      label: "Forward trace · 2 directive(s)",
+      label: "Forward trace - 2 directive(s)",
       attributes: { laneId: "auditor" },
     });
     const spans = [summarize, runAudit];
@@ -441,7 +441,7 @@ describe("canvas swimlanes", () => {
       kind: "model_call",
       actor: "system",
       parentId: "spawn-summary",
-      label: "Summarize · Model · plan",
+      label: "Summarize - Model · plan",
       startedAt: "2026-08-30T00:00:00.000Z",
       attributes: { laneId: "spawn-summary", targetSpanId: "agent-plan" },
     });
@@ -451,7 +451,7 @@ describe("canvas swimlanes", () => {
       kind: "model_call",
       actor: "system",
       parentId: "spawn-summary",
-      label: "Summarize · Tool · exec_command",
+      label: "Summarize - Tool · exec_command",
       startedAt: "2026-08-30T00:00:02.000Z",
       attributes: { laneId: "spawn-summary", targetSpanId: "agent-exec" },
     });
@@ -462,7 +462,7 @@ describe("canvas swimlanes", () => {
       kind: "model_call",
       actor: "system",
       parentId: "spawn-summary",
-      label: "Summarize · Tool · exec_command (fallback)",
+      label: "Summarize - Tool · exec_command (fallback)",
       startedAt: "2026-08-30T00:00:03.000Z",
       attributes: { laneId: "spawn-summary", targetSpanId: "agent-exec" },
     });
@@ -488,8 +488,8 @@ describe("canvas swimlanes", () => {
     expect(rowOf("sum-exec-fallback")).toBe(2);
     expect(layout.lanes.map((lane) => lane.label)).toEqual([
       "auditor",
-      "sub · Summarize · Model · plan",
-      "sub · Summarize · Tool · exec_command",
+      "sub · Summarize - Model · plan",
+      "sub · Summarize - Tool · exec_command",
     ]);
   });
 });

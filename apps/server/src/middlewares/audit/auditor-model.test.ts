@@ -304,7 +304,7 @@ describe("auditorCallSpan", () => {
     const span = auditorCallSpan({
       traceId: "audit-1",
       name: "audit.step.intent",
-      label: "Intent · Model · plan",
+      label: "Intent - Model · plan",
       targetSpanId: "span-1",
       prompt: "judge this",
       attempt,
@@ -321,7 +321,7 @@ describe("auditorCallSpan", () => {
     const span = auditorCallSpan({
       traceId: "audit-1",
       name: "audit.step.summary",
-      label: "Summarize · Model · plan",
+      label: "Summarize - Model · plan",
       targetSpanId: "span-1",
       prompt: "judge this",
       attempt: {
@@ -342,7 +342,7 @@ describe("auditorCallSpan", () => {
     const span = auditorCallSpan({
       traceId: "audit-1",
       name: "audit.step.summary",
-      label: "Summarize · Model · plan",
+      label: "Summarize - Model · plan",
       targetSpanId: "span-1",
       prompt: "judge this",
       attempt: { ...attempt, usage: { inputTokens: 18_000 } },
@@ -355,7 +355,7 @@ describe("auditorCallSpan", () => {
     const span = auditorCallSpan({
       traceId: "audit-1",
       name: "audit.forward-trace",
-      label: "Forward trace · 2 directive(s)",
+      label: "Forward trace - 2 directive(s)",
       targetSpanId: null,
       prompt: "judge the run",
       attempt,
@@ -369,7 +369,7 @@ describe("auditorCallSpan", () => {
     const span = auditorCallSpan({
       traceId: "audit-1",
       name: "audit.step.intent",
-      label: "Intent · Model · plan",
+      label: "Intent - Model · plan",
       targetSpanId: "span-1",
       prompt: "judge this",
       attempt: {

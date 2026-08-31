@@ -92,9 +92,9 @@ describe("reportForStep", () => {
     const report = reportForStep(
       nothingFound(),
       checks({
-        summary: unanswered("Summarize · Read src/index.ts", outage),
-        intent: unanswered("Intent · Read src/index.ts", outage),
-        injection: unanswered("Injection · Read src/index.ts", outage),
+        summary: unanswered("Summarize - Read src/index.ts", outage),
+        intent: unanswered("Intent - Read src/index.ts", outage),
+        injection: unanswered("Injection - Read src/index.ts", outage),
       }),
     );
 

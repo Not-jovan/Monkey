@@ -36,6 +36,10 @@ describe("codex config generation", () => {
     const bare = loadConfig({ NODE_ENV: "test" });
     expect(secretValues(bare)).toEqual([]);
   });
+
+  it("keeps audit-model thinking off unless it is explicitly enabled", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).auditModelThinking).toBe("disabled");
+  });
 });
 
 describe("production auth token guard", () => {

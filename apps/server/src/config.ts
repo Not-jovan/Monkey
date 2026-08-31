@@ -90,19 +90,15 @@ const envSchema = z.object({
   // Off restores the old behaviour, where the timeout caps total generation
   // time and AUDIT_MODEL_TIMEOUT_MS must be raised to suit.
   AUDIT_MODEL_STREAM: z.enum(["true", "false"]).default("true"),
-  // Reasoning models bill their thinking as output tokens, and call latency
-  // tracks output tokens almost exactly — on a measured audit, 87% of billed
-  // output never reached the answer. "disabled" reclaims that: the eval runs
-  // 3-4x faster.
-  //
-  // It defaults to "auto" anyway, because the speed is not free. Over three
-  // eval runs each, "auto" caught every injected objective (recall 100%, fn=0)
-  // while "disabled" missed one in two of the three runs and left a step
-  // without a summary. Missing an injected objective is the failure this
-  // auditor exists to prevent, so the default keeps recall and lets streaming
-  // absorb the latency instead. Re-measure with `npm run eval:audit` before
-  // changing it.
-  AUDIT_MODEL_THINKING: z.enum(["disabled", "enabled", "auto"]).default("auto"),
+  // Reasoning models bill thinking as output tokens. On a live audit DeepSeek
+  // flash sat in reasoning_content for the full stall budget (4k+ chunks, no
+  // JSON) and the step failed. Audits are short JSON, so thinking is off
+  // unless AUDIT_MODEL_THINKING=enabled. "auto" is treated as off for the
+  // same reason: the provider's default is the stall. Re-measure with
+  // `npm run eval:audit` if you turn thinking back on.
+  AUDIT_MODEL_THINKING: z
+    .enum(["disabled", "enabled", "auto"])
+    .default("disabled"),
   // Override for setups where the Runtime cannot reach the control plane via
   // the derived host (e.g. rootless engines without host-gateway support).
   OTEL_COLLECTOR_URL: z.string().url().optional(),

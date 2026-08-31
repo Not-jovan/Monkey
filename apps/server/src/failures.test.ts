@@ -83,6 +83,7 @@ describe("classifyRunFailure", () => {
       ["maximum context length exceeded", "context-length-exceeded"],
       ["401 unauthorized", "auth-rejected"],
       ["connect ECONNREFUSED 127.0.0.1:443", "provider-unreachable"],
+      ["TypeError: fetch failed", "provider-unreachable"],
       ["spawn docker ENOENT", "container-unavailable"],
     ];
     for (const [raw, kind] of cases) {

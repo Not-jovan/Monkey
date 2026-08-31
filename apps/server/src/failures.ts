@@ -232,7 +232,7 @@ const RULES: Rule[] = [
     title: "Ark could not be reached",
     remedy: "Check network egress to the Ark base URL, then retry.",
     pattern:
-      /\b(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN)\b|socket hang up|network error/i,
+      /\b(ECONNREFUSED|ENOTFOUND|ETIMEDOUT|EAI_AGAIN)\b|socket hang up|network error|fetch failed/i,
   },
   {
     layer: "platform",

@@ -1,7 +1,7 @@
 # Monkey Auditor, Agent Tracing and Auditing
 
 ## Problem
-You cannot improve the agent if you do not know what is wrong with it.
+You cannot improve what you cannot trace.
 
 We create agents to achieve some desired goal. As the agent progresses, we may introduce new constraints and guardrails. But how can we be sure these constraints and guardrails actually work? We have to trace through the agent execution (Tool calls, subagent spawns, input / output). This gets tedious. 
 
@@ -300,48 +300,6 @@ The case file carries:
 - `trajectory`: one-liners for tool, model, and user steps (last 20). No run/turn wrappers. `trajectoryTruncated` is how many were dropped.
 - `failingStep` / `causedByStep`: commands, files, clipped arguments and output
 - `auditComplete`, `auditHealth`, `auditTraceId`, `auditChain`
-
-```json
-{
-  "id": "…",
-  "status": "failed",
-  "diagnosis": {
-    "outcome": "failed",
-    "headline": "A command the agent wrote failed",
-    "layer": "agent",
-    "blame": "agent",
-    "kind": "tool-failed",
-    "retryability": "transient",
-    "remedy": "…",
-    "where": { "spanId": "…", "label": "Tool · npm test", "kind": "tool_call" },
-    "causedBy": { "spanId": "…", "label": "Model · plan", "kind": "model_call" },
-    "evidence": "npm ERR! missing script: test",
-    "evidenceComplete": true
-  },
-  "intent": { "instructions": "…", "objective": "…", "extended": [] },
-  "context": {
-    "position": 2,
-    "chainLength": 2,
-    "previousTraceId": "…",
-    "nextTraceId": null,
-    "carriedIn": "Asked to: …. Outcome: completed"
-  },
-  "findings": [
-    {
-      "type": "warning",
-      "category": "intent-check",
-      "finding": "…",
-      "span": { "spanId": "…", "label": "Tool · npm test", "kind": "tool_call" }
-    }
-  ],
-  "trajectory": ["[error] Tool · npm test | …"],
-  "trajectoryTruncated": 0,
-  "failingStep": { "label": "Tool · npm test", "commands": ["npm test"], "output": "…" },
-  "causedByStep": { "label": "Model · plan", "output": "…" },
-  "auditHealth": "ok",
-  "auditTraceId": "…"
-}
-```
 
 ### Audits and intent
 

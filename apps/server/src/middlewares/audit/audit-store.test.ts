@@ -152,6 +152,20 @@ describe("AuditStore re-audit", () => {
     ]);
     expect(reopened.passesFor(TRACE_ID)).toEqual([]);
   });
+
+  it("starts a new pass at ok health", async () => {
+    const { store } = await makeStore();
+    store.replaceSpan(trace(), "span-1", [finding("old")], "", "failed");
+    store.beginPass(trace());
+    expect(store.health(TRACE_ID)).toBe("ok");
+  });
+
+  it("keeps a failed step's health after the run-level answer lands", async () => {
+    const { store } = await makeStore();
+    store.replaceSpan(trace(), "span-1", [finding("step")], "", "failed");
+    store.recordRequestedAudit(trace(), [finding("run-level")], "", "ok");
+    expect(store.health(TRACE_ID)).toBe("failed");
+  });
 });
 
 describe("AuditStore interrupted-pass detection", () => {

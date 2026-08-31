@@ -148,6 +148,10 @@ export class AuditStore {
     ].slice(-MAX_AUDIT_HISTORY);
     doc.spanAudit = {};
     doc.runAudit = [];
+    // This pass has no answers yet. Leaving the previous health would make a
+    // later step failure (or a recovered fallback) look like it belonged to
+    // work that has already been filed away.
+    doc.health = "ok";
     // The new pass has not finished, and endTime is what says so.
     // Left at the previous pass's value, an interrupted re-audit looked
     // complete, so the next attempt started over instead of carrying on.
@@ -300,9 +304,11 @@ export class AuditStore {
   ) {
     const doc = this.ensure(trace, intentId);
     doc.runAudit = [...steps];
-    // Reset rather than merged: the previous answer is gone, so keeping the
-    // health it reported would outlive the findings that explained it.
-    doc.health = health;
+    // Merged with the per-step health this pass already recorded. Resetting
+    // here used to hide a failed auditor step behind a completed run-level
+    // answer. beginPass clears the previous pass's health first, so this is
+    // only this pass.
+    doc.health = worstHealth(doc.health, health);
     this.syncFromTrace(doc, trace);
     if (trace.status !== "running") {
       doc.summary.endTime = Date.parse(trace.endedAt ?? trace.startedAt);

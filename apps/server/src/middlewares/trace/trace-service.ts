@@ -103,13 +103,15 @@ function preview(text: string, limit = 80) {
   return flat.slice(0, limit - 1) + "…";
 }
 
-// "Summarize · Model · plan" → the step the auditor asked about.
+// "Summarize - Model · plan" → the step the auditor asked about.
 function auditorCallSubject(label: string) {
-  const sep = " · ";
-  const index = label.indexOf(sep);
-  if (index <= 0) return undefined;
-  const subject = label.slice(index + sep.length).trim();
-  return subject.length > 0 ? subject : undefined;
+  for (const sep of [" - ", " · "]) {
+    const index = label.indexOf(sep);
+    if (index <= 0) continue;
+    const subject = label.slice(index + sep.length).trim();
+    if (subject.length > 0) return subject;
+  }
+  return undefined;
 }
 
 // Drop the Model/Tool kind so the spawn can name the step in the space a
@@ -629,6 +631,17 @@ export class TraceService {
         (span) => span.status === "error" && span.id !== state.rootSpanId,
       );
       const failing = errored.at(-1);
+
+      // An auditor run fails only when a step check or auditAll failed. A
+      // recovered primary-model error (ModelNotOpen, then a fallback verdict)
+      // is degraded, not a failed run, and must not become the diagnosis.
+      if (isAuditorTrace(trace) && !failed) {
+        trace.failingSpanId = null;
+        trace.recoveredErrorCount = errored.length;
+        trace.failure = outcome.failure ?? null;
+        return;
+      }
+
       trace.failingSpanId = failing?.id ?? (failed ? state.rootSpanId : null);
 
       // Counted from the steps that actually failed, not from Codex's stream

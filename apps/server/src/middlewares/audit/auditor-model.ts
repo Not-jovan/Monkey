@@ -11,10 +11,10 @@ import type { AgentRunner, ProviderCallTiming, RunUsage } from "../../types.js";
 // about auditing — a check should say what it wants judged, not how a provider
 // misbehaves.
 
-// Reasoning and the answer share this budget. The default left a reasoning
-// model no room to finish the JSON it had started. Exported because the runner
-// that applies it is constructed by the middleware, not by this file.
-export const VERDICT_MAX_TOKENS = 4_096;
+// Verdicts are small JSON. Thinking is off by default, so this does not have
+// to leave room for a reasoning dump. Exported because the runner that
+// applies it is constructed by the middleware, not by this file.
+export const VERDICT_MAX_TOKENS = 1_024;
 
 export interface AuditorCallAttempt {
   model: string;

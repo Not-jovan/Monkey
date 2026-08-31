@@ -269,7 +269,7 @@ export function createArkClient(
   timeoutMs = 60_000,
   fetchImpl: typeof fetch = globalThis.fetch,
 ) {
-  const thinking = config.auditModelThinking ?? "auto";
+  const thinking = config.auditModelThinking ?? "disabled";
   const wantStream = config.auditModelStream ?? true;
   let inFlight = 0;
 
@@ -398,8 +398,13 @@ export function createArkClient(
           ...(wantStream
             ? { stream: true, stream_options: { include_usage: true } }
             : {}),
-          // Omitted when "auto" so the provider keeps its own default.
-          ...(thinking === "auto" ? {} : { thinking: { type: thinking } }),
+          // Audits are short JSON. Leaving thinking on "auto" lets DeepSeek
+          // spend the whole stall budget in reasoning_content and never emit
+          // the verdict — measured at 4k+ chunks, 60s, empty answer. "auto"
+          // therefore means off. Set AUDIT_MODEL_THINKING=enabled to opt in.
+          ...(thinking === "enabled"
+            ? { thinking: { type: "enabled" } }
+            : { thinking: { type: "disabled" } }),
         }),
         signal: controller.signal,
       });

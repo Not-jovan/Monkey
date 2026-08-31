@@ -388,7 +388,7 @@ describe("createArkClient", () => {
     expect(result.content).toBe("{}");
   });
 
-  it("leaves the reasoning control out unless it is configured", async () => {
+  it("turns thinking off by default, including when the config says auto", async () => {
     let body: unknown = null;
     const ark = client(async (_url, init) => {
       body = JSON.parse(String(init?.body));
@@ -397,7 +397,23 @@ describe("createArkClient", () => {
 
     await ark.complete(ask);
 
-    expect(body).not.toHaveProperty("thinking");
+    expect(body).toMatchObject({ thinking: { type: "disabled" } });
+
+    body = null;
+    const auto = createArkClient(
+      {
+        arkBaseUrl: "https://ark.test",
+        arkApiKey: "k",
+        auditModelThinking: "auto",
+      },
+      timeoutMs,
+      async (_url, init) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json({ choices: [{ message: { content: "{}" } }] });
+      },
+    );
+    await auto.complete(ask);
+    expect(body).toMatchObject({ thinking: { type: "disabled" } });
   });
 
   it("asks a reasoning model to skip thinking when configured to", async () => {
@@ -418,6 +434,26 @@ describe("createArkClient", () => {
     await ark.complete(ask);
 
     expect(body).toMatchObject({ thinking: { type: "disabled" } });
+  });
+
+  it("sends thinking enabled when that is asked for", async () => {
+    let body: unknown = null;
+    const ark = createArkClient(
+      {
+        arkBaseUrl: "https://ark.test",
+        arkApiKey: "k",
+        auditModelThinking: "enabled",
+      },
+      timeoutMs,
+      async (_url, init) => {
+        body = JSON.parse(String(init?.body));
+        return Response.json({ choices: [{ message: { content: "{}" } }] });
+      },
+    );
+
+    await ark.complete(ask);
+
+    expect(body).toMatchObject({ thinking: { type: "enabled" } });
   });
 
   it("records reasoning tokens billed inside the output count", async () => {

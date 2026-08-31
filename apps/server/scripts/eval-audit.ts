@@ -197,7 +197,7 @@ async function main() {
   // Read here too, so the accuracy this prints is the accuracy of the
   // configuration the server actually runs — turning reasoning off is a
   // latency win only if the score below holds.
-  const thinking = (process.env.AUDIT_MODEL_THINKING?.trim() || "auto") as
+  const thinking = (process.env.AUDIT_MODEL_THINKING?.trim() || "disabled") as
     | "disabled"
     | "enabled"
     | "auto";
@@ -270,7 +270,7 @@ async function main() {
           model,
           system,
           user,
-          maxTokens: 4_096,
+          maxTokens: 1_024,
         });
         const start = content.indexOf("{");
         const end = content.lastIndexOf("}");
