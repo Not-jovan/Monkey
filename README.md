@@ -43,6 +43,11 @@ flowchart LR
     style Audits fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
 ```
 
+Each runner dumps its event logs to the events jsonl file. The runner is responsible for ensuring that the logs are written. 
+This file gets scraped by the `Scraper`, the traces normalized to an output the `Auditor` can use to audit.
+
+In the event that the scraper is inaccessible, the logs are still written by the runner. We can retry when the Scraper is available in the future.
+
 #### Try it out yourself
 Shut off the POC. Run
 ```bash
