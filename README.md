@@ -217,16 +217,21 @@ flowchart TB
 #### Intent Derivation
 An intent is the desired goal (i.e. Instruction) of your agent. As agent progresses, you introduce it new constraints/guardrails. The Auditor reidentifies the Intent of the agent for every chat. The Auditor then track whether the agent conforms to this intent when auditing, as well as attempts to deviate.
 
+Runs only when this chat has no standing spec yet. Agent instructions from `launchpad.json`, user prompt from `traces/`, prior derivation from `audits/`. Later spans skip it and go to `auditStep`. Intent alignment uses that spec.
+
 #### Artifacts
 | Action | Remark |
 | --- | --- |
-| `identifyIntent` | Runs only when this chat has no standing spec yet. Agent instructions from `launchpad.json`, user prompt from `traces/`, prior derivation from `audits/`. Later spans skip it and go to `auditStep`. Intent alignment uses that spec. |
 | `{stepId}.md` | Durable memory for the auditor. Each step audit writes its working state here so `auditAll` still has something to read after the step is gone. A workpad, not a report. |
 | `steps-meta.json` | Index into that workpad. `auditAll` uses it to decide which `{stepId}.md` files to open, rather than rereading every step. |
 | Wait until every `auditStep` has finished | `auditAll` needs the workpad complete. Starting against an in-flight step misses the instruction that just landed. |
 | `audits/` | Where finished audit results are stored. The workpad is how the auditor thinks. This is what it concluded. |
 
 #### Policies
+We validate policies on stages:
+- Step level, collate each step's results.
+- Audit All, based on step level results, Auditor tries to draw links.
+
 | Type | Policy | Remark |
 | --- | --- | --- |
 | Security | Network Call Whitelist | Check whether a URL in the step is an actual network call (not just mentioned), then whether the host is on `AUDIT_NETWORK_WHITELIST`. Unset disables the check; empty denies every destination. |
