@@ -36,6 +36,7 @@ export interface AgentRun {
 
 export interface TraceSpan {
   id: string;
+  parentId: string | null;
   name: string;
   kind: "run" | "user_action" | "turn" | "model_call" | "tool_call" | "system";
   status: "running" | "ok" | "error";
