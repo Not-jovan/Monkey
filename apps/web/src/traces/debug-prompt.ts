@@ -2,6 +2,11 @@
 // filled in. Diagnosing agents should start at the `/ai` case file and only
 // open the Glass Box dump when they need a span that file clipped.
 
+export const DEBUG_AGENT_NAME = "Debug";
+
+export const DEBUG_AGENT_FIRST_MESSAGE =
+  "Deduce the issue and give me the constraint set to minimise these issues";
+
 export function debugPrompt(input: {
   origin: string;
   traceId: string;

@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { debugPrompt } from "./debug-prompt";
+import {
+  DEBUG_AGENT_FIRST_MESSAGE,
+  DEBUG_AGENT_NAME,
+  debugPrompt,
+} from "./debug-prompt";
 
 const agentRun = {
   origin: "http://localhost:3000",
@@ -42,5 +46,13 @@ describe("debugPrompt", () => {
     const prompt = debugPrompt({ ...agentRun, origin: "http://localhost:3000/" });
     expect(prompt).toContain("GET http://localhost:3000/api/traces/run-1/ai");
     expect(prompt).not.toContain("http://localhost:3000//api/");
+  });
+
+  it("fits the Debug Agent's instruction budget", () => {
+    expect(DEBUG_AGENT_NAME).toBe("Debug");
+    expect(DEBUG_AGENT_FIRST_MESSAGE).toBe(
+      "Deduce the issue and give me the constraint set to minimise these issues",
+    );
+    expect(debugPrompt(agentRun).length).toBeLessThanOrEqual(10_000);
   });
 });

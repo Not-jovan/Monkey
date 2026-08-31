@@ -135,44 +135,60 @@ test("a normal run records trace evidence, documentation output, and an auditor 
   await expect(page.getByRole("button", { name: "Get Debug Prompt" })).toBeVisible();
 });
 
-test("a non-whitelisted GitHub run exposes an actionable correction workflow", async () => {
+test("a non-whitelisted GitHub run can start a Debug Agent", async () => {
   const findings = actionableFindings(githubTrace);
   expect(findings.length).toBeGreaterThan(0);
   expect(securityText(githubTrace.findings)).toMatch(/github\.com/i);
 
   await page.goto(`/traces/${githubTrace.trace.id}`);
-  const correctionPanel = page.locator(".trace-correction");
-  await expect(correctionPanel.getByRole("heading", { name: "Correct the Agent" })).toBeVisible();
+  const panel = page.locator(".trace-debug-agent");
+  await expect(panel.getByRole("heading", { name: "Debug Agent" })).toBeVisible();
 
-  const enabledBoxes = correctionPanel.locator('input[type="checkbox"]:not(:disabled)');
-  const toSelect = Math.min(2, await enabledBoxes.count());
-  expect(toSelect).toBeGreaterThan(0);
-  for (let index = 0; index < toSelect; index += 1) {
-    await enabledBoxes.nth(index).check();
-  }
-
-  await correctionPanel.getByPlaceholder(/Add a rule/i).fill(humanCorrection);
-  const responsePromise = page.waitForResponse(
+  const createPromise = page.waitForResponse(
     (response) =>
       response.request().method() === "POST" &&
-      response.url().endsWith(`/api/traces/${githubTrace.trace.id}/intent/correct`),
+      response.url().endsWith("/api/agents") &&
+      !response.url().includes("/messages"),
   );
-  await correctionPanel
-    .getByRole("button", {
-      name: new RegExp("Apply to instructions \\(" + toSelect + "\\)"),
-    })
-    .click();
-  const response = await responsePromise;
-  expect(response.status(), await response.text()).toBe(201);
+  const messagePromise = page.waitForResponse(
+    (response) =>
+      response.request().method() === "POST" &&
+      /\/api\/agents\/[^/]+\/messages$/.test(new URL(response.url()).pathname),
+  );
+  await panel.getByRole("button", { name: "Start Debug Agent" }).click();
+  const created = await createPromise;
+  expect(created.status(), await created.text()).toBe(201);
+  const debugAgent = ((await created.json()) as { agent: Agent }).agent;
+  expect(debugAgent.name).toBe("Debug");
+  expect(debugAgent.instructions).toContain(
+    `/api/traces/${githubTrace.trace.id}/ai`,
+  );
+  const message = await messagePromise;
+  expect(message.status(), await message.text()).toBe(202);
 
-  await expect(correctionPanel).toContainText(humanCorrection);
-  await expect(correctionPanel.getByText("already corrected").first()).toBeVisible();
-  await expect
-    .poll(async () => (await corrections(page.request, agent.id)).length)
-    .toBeGreaterThan(0);
+  await expect(page).toHaveURL(new RegExp("[?&]agent=" + debugAgent.id));
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Debug" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Deduce the issue and give me the constraint set to minimise these issues",
+    ),
+  ).toBeVisible();
 });
 
 test("a correction appears in current constraints but not in other run correction history", async () => {
+  const findingIds = actionableFindings(githubTrace)
+    .slice(0, 2)
+    .map((finding) => finding.id);
+  expect(findingIds.length).toBeGreaterThan(0);
+  await correctIntent(
+    page.request,
+    githubTrace.trace.id,
+    findingIds,
+    humanCorrection,
+  );
+
   await page.goto("/");
   await page.getByRole("button", { name: "Documentation Agent" }).click();
   await page.locator(".intent-toggle").click();
@@ -239,7 +255,7 @@ test("the auditor trace can be opened and audited on demand", async () => {
   await page.goto(`/traces/${githubTrace.trace.id}`);
   await page.getByRole("tab", { name: /View Auditor/ }).click();
   await expect(page.getByText(/Audit of trace/i)).toBeVisible();
-  await expect(page.locator(".trace-correction")).toHaveCount(0);
+  await expect(page.locator(".trace-debug-agent")).toHaveCount(0);
 
   await page.goto(`/traces/${auditorId}?pane=run`);
   await expect(page.getByRole("tab", { name: /View Run/ })).toHaveAttribute(
