@@ -36,6 +36,7 @@ let page: Page;
 let agent: Agent;
 let docsTrace: TraceDetail;
 let githubTrace: TraceDetail;
+let correctionScopeTrace: TraceDetail;
 let htmlTrace: TraceDetail;
 
 async function sendMessage(prompt: string) {
@@ -142,6 +143,9 @@ test.beforeAll(async ({ browser }: { browser: Browser }) => {
 
   docsTrace = await sendMessage(prompts.docs);
   githubTrace = await sendMessage(prompts.github);
+  // Keep correction-scope coverage independent from the GitHub findings that
+  // an earlier test consumes.
+  correctionScopeTrace = await sendMessage(prompts.github);
   htmlTrace = await sendMessage(prompts.html);
 });
 
@@ -306,13 +310,17 @@ test("the auditor trace can be opened and audited on demand", async () => {
 
   const beforeAudit = await currentTraceDetail(auditorId);
   if (!beforeAudit.auditComplete) {
-    const responsePromise = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/traces/${auditorId}/audit`),
-    );
-    await page.getByRole("button", { name: "Audit", exact: true }).click();
-    const response = await responsePromise;
+    // Audit controls are rendered in the Auditor pane, while this page was
+    // deliberately opened on the Run pane above.
+    await page.getByRole("tab", { name: /View Auditor/ }).click();
+    const [response] = await Promise.all([
+      page.waitForResponse(
+        (candidate) =>
+          candidate.request().method() === "POST" &&
+          candidate.url().endsWith(`/api/traces/${auditorId}/audit`),
+      ),
+      page.getByRole("button", { name: "Audit", exact: true }).click(),
+    ]);
     expect(response.status(), await response.text()).toBe(200);
   }
 
@@ -323,35 +331,27 @@ test("the auditor trace can be opened and audited on demand", async () => {
 });
 
 test("correction APIs keep source-run evidence scoped", async () => {
-  const alreadyCorrected = new Set(
-    (await corrections(page.request, agent.id))
-      .filter((entry) => entry.traceId === githubTrace.trace.id && entry.revertedAt === null)
-      .flatMap((entry) => entry.findingIds),
-  );
-  const uncorrectedFinding = actionableFindings(githubTrace).find(
-    (finding) => !alreadyCorrected.has(finding.id),
-  );
-  test.skip(
-    !uncorrectedFinding,
-    "Need another actionable finding for direct API correction",
-  );
-  if (!uncorrectedFinding) return;
+  const findings = actionableFindings(correctionScopeTrace);
+  expect(findings.length).toBeGreaterThan(0);
+  const uncorrectedFinding = findings[0]!;
 
   const created = await correctIntent(
     page.request,
-    githubTrace.trace.id,
+    correctionScopeTrace.trace.id,
     [uncorrectedFinding.id],
     "Treat related GitHub findings as one source-run correction.",
   );
 
-  expect(created.traceId).toBe(githubTrace.trace.id);
+  expect(created.traceId).toBe(correctionScopeTrace.trace.id);
   expect(created.findingIds).toEqual([uncorrectedFinding.id]);
 
   const all = await corrections(page.request, agent.id);
   expect(all.filter((entry) => entry.traceId === docsTrace.trace.id)).toEqual([]);
-  expect(all.some((entry) => entry.traceId === githubTrace.trace.id)).toBe(true);
+  expect(
+    all.some((entry) => entry.traceId === correctionScopeTrace.trace.id),
+  ).toBe(true);
 
-  const auditorId = githubTrace.auditTraceId!;
+  const auditorId = correctionScopeTrace.auditTraceId!;
   const directCorrection = await page.request.post(
     `/api/traces/${auditorId}/intent/correct`,
     {
