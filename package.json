@@ -14,7 +14,7 @@
     "dev": "concurrently -n server,web -c cyan,magenta \"npm run dev -w @launchpad/server\" \"npm run dev -w @launchpad/web\"",
     "build": "npm run build -w @launchpad/web && npm run build -w @launchpad/server",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test --workspaces --if-present",
+    "test": "npm run test -w @launchpad/server",
     "check": "npm run typecheck && npm run test && npm run build",
     "test:e2e": "playwright test",
     "test:e2e:headed": "playwright test --headed",

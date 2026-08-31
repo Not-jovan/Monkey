@@ -2,6 +2,7 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   correctIntent,
   corrections,
+  auditTrace,
   getAgent,
   getIntent,
   waitForAuditedTrace,
@@ -296,6 +297,7 @@ test("correction APIs keep source-run evidence scoped", async () => {
     !uncorrectedFinding,
     "Need another actionable finding for direct API correction",
   );
+  if (!uncorrectedFinding) return;
 
   const created = await correctIntent(
     page.request,
@@ -325,4 +327,59 @@ test("correction APIs keep source-run evidence scoped", async () => {
 
   const refreshed = await getAgent(page.request, agent.id);
   expect(refreshed.codexThreadId).toBe(htmlTrace.trace.conversationId);
+});
+
+test("a requested re-audit reuses cached results for every step", async () => {
+  const requested = await auditTrace(page.request, docsTrace.trace.id);
+  expect(requested.auditTraceId).not.toBeNull();
+
+  const refreshed = await waitForAuditedTrace(page.request, docsTrace.trace.id);
+  expect(refreshed.auditTraceId).toBe(requested.auditTraceId);
+
+  const auditor = await currentTraceDetail(requested.auditTraceId!);
+  const cachedStepCalls = auditor.trace.spans.filter(
+    (span) =>
+      span.name === "tool.spawn_agent" &&
+      span.attributes.subagent === true &&
+      typeof span.attributes.targetSpanId === "string",
+  );
+  expect(cachedStepCalls.length).toBeGreaterThan(0);
+  expect(cachedStepCalls.every((span) => span.attributes.cached === true)).toBe(
+    true,
+  );
+});
+
+test("an abruptly terminated Agent Runtime fails, then the Agent can retry", async () => {
+  const failedResponse = await page.request.post(
+    `/api/agents/${agent.id}/messages`,
+    {
+      data: {
+        // The Runtime container runs the CLI as PID 1. Killing it models an
+        // abrupt Runtime/service termination rather than a user cancellation.
+        content:
+          "Run exactly this command and do not do anything else: kill -9 1",
+      },
+    },
+  );
+  expect(failedResponse.status(), await failedResponse.text()).toBe(202);
+  const failedBody = (await failedResponse.json()) as { run: { id: string } };
+  const failedRun = await waitForRun(page.request, failedBody.run.id);
+  expect(failedRun.status).toBe("failed");
+  expect(failedRun.error).toBeTruthy();
+
+  const retryResponse = await page.request.post(
+    `/api/agents/${agent.id}/messages`,
+    {
+      data: {
+        content:
+          "Create a file named retry-proof.md containing exactly: retry succeeded",
+      },
+    },
+  );
+  expect(retryResponse.status(), await retryResponse.text()).toBe(202);
+  const retryBody = (await retryResponse.json()) as { run: { id: string } };
+  const retryRun = await waitForRun(page.request, retryBody.run.id);
+  expect(retryRun.status, retryRun.error ?? "retry did not complete").toBe(
+    "completed",
+  );
 });

@@ -3,6 +3,7 @@ import { expect, type APIRequestContext } from "@playwright/test";
 export interface Agent {
   id: string;
   name: string;
+  instructions: string;
   workspacePath: string;
   codexThreadId: string | null;
 }
@@ -255,6 +256,7 @@ export async function correctIntent(
     )
   ).correction;
 }
+
 
 export async function auditTrace(
   request: APIRequestContext,
