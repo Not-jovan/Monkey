@@ -131,35 +131,27 @@ function AuditAttempts({
   if (attempts.length < 2) return null;
   const latestId = attempts[0]?.id;
   return (
-    <>
+    <label className="audit-attempts-picker">
       <span className="audit-attempts-label">Attempts</span>
-      <div
-        className="pane-toggle view-toggle"
-        role="tablist"
+      <select
         aria-label="Auditor attempts"
+        value={selectedId}
+        onChange={(event) => {
+          const id = event.target.value;
+          onSelect(id === latestId ? null : id);
+        }}
       >
-        {attemptsOldestFirst(attempts).map((attempt, index) => {
-          const selected = attempt.id === selectedId;
-          const latest = attempt.id === latestId;
-          return (
-            <button
-              key={attempt.id}
-              type="button"
-              role="tab"
-              className={selected ? "is-active" : ""}
-              aria-selected={selected}
-              onClick={() => onSelect(latest ? null : attempt.id)}
-            >
-              {auditAttemptLabel({
-                number: index + 1,
-                latest,
-                status: attempt.status,
-              })}
-            </button>
-          );
-        })}
-      </div>
-    </>
+        {attemptsOldestFirst(attempts).map((attempt, index) => (
+          <option key={attempt.id} value={attempt.id}>
+            {auditAttemptLabel({
+              number: index + 1,
+              latest: attempt.id === latestId,
+              status: attempt.status,
+            })}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -256,12 +248,11 @@ export function TraceDetailPage() {
     persistPane(next);
   };
 
-  const auditComplete = detailQuery.data?.auditComplete ?? false;
   const auditBusy = audit.isPending || auditInFlight(auditAttempts);
   const canRetryAudit =
     pane === "auditor" &&
     auditAttempts.length > 0 &&
-    (auditHealth !== "ok" || !auditComplete);
+    detailQuery.data?.trace.status !== "running";
   const failed = showFailedAlert({ pane, auditHealth }) && !auditBusy;
 
   if (locked || detailQuery.error) {

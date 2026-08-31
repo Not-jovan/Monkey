@@ -119,7 +119,7 @@ describe("AuditorModel.complete request shape", () => {
     const model = new AuditorModel(runner);
 
     const composed = "evidence\n\nthe question";
-    await model.complete(RUN, "good-model", null, "s", composed, verdict);
+    await model.complete(RUN, "good-model", "s", composed, verdict);
 
     expect(runner.requests).toHaveLength(1);
     expect(runner.requests[0]).toMatchObject({
@@ -135,8 +135,7 @@ describe("AuditorModel.complete", () => {
   it("gives every check the same words for one outage", async () => {
     const runner = fakeRunner();
     const model = new AuditorModel(runner);
-    const ask = () =>
-      model.complete(RUN, "primary-model", "fallback-model", "s", "u", verdict);
+    const ask = () => model.complete(RUN, "primary-model", "s", "u", verdict);
 
     // Concurrent, the way one step's checks actually run: all three reach the
     // provider before any of them learns the model is gone, so each is handed
@@ -144,9 +143,9 @@ describe("AuditorModel.complete", () => {
     const concurrent = await Promise.all([ask(), ask(), ask()]);
 
     expect(new Set(concurrent.map((answer) => answer.failure)).size).toBe(1);
-    expect(concurrent[0]?.status).toBe("degraded");
+    expect(concurrent[0]?.status).toBe("failed");
     expect(concurrent[0]?.failure).toBe(
-      "Primary audit model unavailable: ModelNotOpen: Your account has not " +
+      "ModelNotOpen: Your account has not " +
         "activated the model primary-model. Please activate the model service " +
         "in the Ark Console.",
     );
@@ -155,29 +154,16 @@ describe("AuditorModel.complete", () => {
   it("repeats the remembered reason rather than a bare not-available", async () => {
     const runner = fakeRunner();
     const model = new AuditorModel(runner);
-    const first = await model.complete(
-      RUN,
-      "primary-model",
-      "fallback-model",
-      "s",
-      "u",
-      verdict,
-    );
+    const first = await model.complete(RUN, "primary-model", "s", "u", verdict);
     const calls = runner.models.length;
 
-    const later = await model.complete(
-      RUN,
-      "primary-model",
-      "fallback-model",
-      "s",
-      "u",
-      verdict,
-    );
+    const later = await model.complete(RUN, "primary-model", "s", "u", verdict);
 
-    // The primary is not tried again, and what the check reports does not
+    // The model is not tried again, and what the check reports does not
     // change just because it skipped the call.
     expect(runner.models.slice(calls)).not.toContain("primary-model");
     expect(later.failure).toBe(first.failure);
+    expect(later.status).toBe("failed");
   });
 
   // The attempt is what the auditor's own span shows, and an operator taking a
@@ -186,14 +172,7 @@ describe("AuditorModel.complete", () => {
     const runner = fakeRunner();
     const model = new AuditorModel(runner);
 
-    const answer = await model.complete(
-      RUN,
-      "primary-model",
-      "fallback-model",
-      "s",
-      "u",
-      verdict,
-    );
+    const answer = await model.complete(RUN, "primary-model", "s", "u", verdict);
 
     expect(answer.failure).not.toContain("Request id:");
     expect(
@@ -228,14 +207,7 @@ describe("AuditorModel.complete", () => {
     };
     const model = new AuditorModel(runner);
 
-    const answer = await model.complete(
-      RUN,
-      "flash",
-      null,
-      "s",
-      "u",
-      verdict,
-    );
+    const answer = await model.complete(RUN, "flash", "s", "u", verdict);
 
     expect(answer.status).toBe("failed");
     expect(answer.failure).toBe(
@@ -273,14 +245,7 @@ describe("AuditorModel.complete", () => {
     };
     const model = new AuditorModel(runner);
 
-    const answer = await model.complete(
-      RUN,
-      "flash",
-      null,
-      "s",
-      "u",
-      verdict,
-    );
+    const answer = await model.complete(RUN, "flash", "s", "u", verdict);
 
     expect(answer.status).toBe("completed");
     expect(answer.verdict).toEqual({ ok: true });
@@ -363,6 +328,22 @@ describe("auditorCallSpan", () => {
     });
     expect(span.attributes.phase).toBe("run");
     expect(auditorSubagentType(span.name)).toBeUndefined();
+  });
+
+  it("prefixes a reused verdict so the Glass Box can tell it from a model call", () => {
+    const span = auditorCallSpan({
+      traceId: "audit-1",
+      name: "audit.step.intent",
+      label: "Intent - Model · plan",
+      targetSpanId: "span-1",
+      prompt: "",
+      attempt: { ...attempt, model: "cached", durationMs: 0 },
+      fallback: false,
+      cached: true,
+    });
+    expect(span.label).toBe("[CACHED] Intent - Model · plan");
+    expect(span.attributes.cached).toBe(true);
+    expect(span.attributes.model).toBe("cached");
   });
 
   it("copies provider timing onto the span the inspector already shows", () => {

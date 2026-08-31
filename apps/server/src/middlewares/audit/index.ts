@@ -40,14 +40,6 @@ export async function createAuditMiddleware(input: {
     input.onStoreError,
   );
 
-  if (input.enabled && config.auditSecurityModel === config.auditIntentModel) {
-    input.warn(
-      'AUDIT_SECURITY_MODEL and AUDIT_INTENT_MODEL are both "' +
-        config.auditSecurityModel +
-        '". Every audit fallback is guarded on the two differing, so there is no ' +
-        "degraded path: one model failure loses the step's judged verdict outright.",
-    );
-  }
   if (input.enabled && config.auditNetworkWhitelist === null) {
     input.warn(
       "AUDIT_NETWORK_WHITELIST is unset, so the network policy check is disabled " +

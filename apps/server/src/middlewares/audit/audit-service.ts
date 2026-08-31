@@ -30,6 +30,7 @@ import {
   auditorSubagentType,
   AuditorModel,
   type AuditorCallAttempt,
+  type AuditorCallStatus,
 } from "./auditor-model.js";
 import {
   auditSteps,
@@ -589,9 +590,6 @@ export class AuditService {
     const { verdict, attempts, status, failure } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.intentModel,
-      this.deps.securityModel !== this.deps.intentModel
-        ? this.deps.securityModel
-        : null,
       INTENT_SCOPE_SYSTEM_PROMPT,
       user,
       intentClassification,
@@ -782,7 +780,15 @@ export class AuditService {
     // with cached 0; sent this way, the second came back with 6144 of 6186
     // cached and in a third of the time. The extra serial call is most of what
     // it costs, and the hit pays much of that back.
-    const reuse = { retryDegraded: chat.reasksDegraded };
+    const reuseFor = (name: string, label: string) => ({
+      retryDegraded: chat.reasksDegraded,
+      record: {
+        trace,
+        name,
+        label,
+        targetSpanId: span.id,
+      },
+    });
     const summaryCheck = await this.resolveRequiredCheck(
       cached?.summary,
       summaryVerdict,
@@ -794,7 +800,7 @@ export class AuditService {
           user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
           schema: summaryVerdict,
         }),
-      reuse,
+      reuseFor("audit.step.summary", "Summarize - " + span.label),
     );
 
     // The first two always run; the rest only when their subject exists.
@@ -817,7 +823,7 @@ export class AuditService {
             user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
             schema: intentStepVerdict,
           }),
-        reuse,
+        reuseFor("audit.step.intent", "Intent - " + span.label),
       ),
       this.resolveRequiredCheck(
         cached?.injection,
@@ -830,14 +836,14 @@ export class AuditService {
             user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
             schema: injectionVerdict,
           }),
-        reuse,
+        reuseFor("audit.step.injection", "Injection - " + span.label),
       ),
       secretTypes.length === 0
         ? this.resolveCheck(
             cached?.secrets,
             secretRelevanceVerdict,
             async () => null,
-            reuse,
+            reuseFor("audit.step.secrets", "Secret relevance - " + span.label),
           )
         : this.resolveCheck(
             cached?.secrets,
@@ -850,14 +856,14 @@ export class AuditService {
                 user: buildSecretContext(secretTypes, activity),
                 schema: secretRelevanceVerdict,
               }),
-            reuse,
+            reuseFor("audit.step.secrets", "Secret relevance - " + span.label),
           ),
       activity.networkCalls.length === 0
         ? this.resolveCheck(
             cached?.network,
             networkVerdict,
             async () => null,
-            reuse,
+            reuseFor("audit.step.network", "Network - " + span.label),
           )
         : this.resolveCheck(
             cached?.network,
@@ -870,14 +876,14 @@ export class AuditService {
                 user: buildNetworkContext(activity),
                 schema: networkVerdict,
               }),
-            reuse,
+            reuseFor("audit.step.network", "Network - " + span.label),
           ),
       span.kind !== "tool_call" || argumentsText.length === 0
         ? this.resolveCheck(
             cached?.tool,
             toolMisuseVerdict,
             async () => null,
-            reuse,
+            reuseFor("audit.step.tool", "Tool misuse - " + span.label),
           )
         : this.resolveCheck(
             cached?.tool,
@@ -890,14 +896,14 @@ export class AuditService {
                 user: buildToolMisuseContext(toolName, argumentsText, activity),
                 schema: toolMisuseVerdict,
               }),
-            reuse,
+            reuseFor("audit.step.tool", "Tool misuse - " + span.label),
           ),
       sinkTargets.length === 0
         ? this.resolveCheck(
             cached?.sinks,
             sinkWriteVerdict,
             async () => null,
-            reuse,
+            reuseFor("audit.step.sinks", "Sink writes - " + span.label),
           )
         : this.resolveCheck(
             cached?.sinks,
@@ -910,7 +916,7 @@ export class AuditService {
                 user: buildSinkContext(sinkTargets),
                 schema: sinkWriteVerdict,
               }),
-            reuse,
+            reuseFor("audit.step.sinks", "Sink writes - " + span.label),
           ),
     ]);
 
@@ -981,7 +987,6 @@ export class AuditService {
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
-      this.deps.intentModel,
       check.system,
       check.user,
       check.schema,
@@ -1004,10 +1009,21 @@ export class AuditService {
     cached: CachedCheck | undefined,
     schema: z.ZodType<Verdict>,
     run: () => Promise<StepCheckOutcome<Verdict> | null>,
-    options?: { retryDegraded?: boolean },
+    options?: {
+      retryDegraded?: boolean;
+      record?: {
+        trace: TraceRecord;
+        name: string;
+        label: string;
+        targetSpanId: string;
+      };
+    },
   ): Promise<StepCheckOutcome<Verdict> | null> {
     const restored = restoreCheck(cached, schema, options);
-    if (restored !== "run") return restored;
+    if (restored !== "run") {
+      if (restored !== null) this.recordCachedVerdict(restored, options?.record);
+      return restored;
+    }
     return run();
   }
 
@@ -1017,11 +1033,43 @@ export class AuditService {
     cached: CachedCheck | undefined,
     schema: z.ZodType<Verdict>,
     run: () => Promise<StepCheckOutcome<Verdict>>,
-    options?: { retryDegraded?: boolean },
+    options?: {
+      retryDegraded?: boolean;
+      record?: {
+        trace: TraceRecord;
+        name: string;
+        label: string;
+        targetSpanId: string;
+      };
+    },
   ): Promise<StepCheckOutcome<Verdict>> {
     const restored = restoreCheck(cached, schema, options);
-    if (restored !== "run" && restored !== null) return restored;
+    if (restored !== "run" && restored !== null) {
+      this.recordCachedVerdict(restored, options?.record);
+      return restored;
+    }
     return run();
+  }
+
+  private recordCachedVerdict(
+    restored: { verdict: unknown; status: AuditorCallStatus },
+    record:
+      | {
+          trace: TraceRecord;
+          name: string;
+          label: string;
+          targetSpanId: string;
+        }
+      | undefined,
+  ) {
+    if (!record) return;
+    this.recordCachedCheck(record.trace, {
+      name: record.name,
+      label: record.label,
+      targetSpanId: record.targetSpanId,
+      verdict: restored.verdict,
+      status: restored.status,
+    });
   }
 
   // The step's workpad: markdown the run-level pass re-reads, plus an index
@@ -1147,9 +1195,6 @@ export class AuditService {
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
-      this.deps.intentModel !== this.deps.securityModel
-        ? this.deps.intentModel
-        : null,
       FORWARD_TRACE_SYSTEM_PROMPT,
       user,
       followThroughVerdict,
@@ -1281,9 +1326,6 @@ export class AuditService {
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
-      this.deps.intentModel !== this.deps.securityModel
-        ? this.deps.intentModel
-        : null,
       BACK_TRACE_SYSTEM_PROMPT,
       user,
       backTraceVerdict,
@@ -1484,7 +1526,7 @@ export class AuditService {
         auditorCallSpan({
           traceId: dest,
           name: input.name,
-          label: fallback ? input.label + " (fallback)" : input.label,
+          label: input.label,
           // Still the span on the *audited* trace, not on this one. It is the
           // question's subject, and the UI resolves it against the trace this
           // auditor was judging.
@@ -1496,6 +1538,49 @@ export class AuditService {
         subagentType ? { subagentType } : undefined,
       );
     });
+  }
+
+    // A reused verdict is still work this pass did; it just did not pay for a
+    // model. Recording it is what lets the Glass Box say [CACHED] instead of
+    // looking like the check never ran.
+  private recordCachedCheck(
+    trace: TraceRecord,
+    input: {
+      name: string;
+      label: string;
+      targetSpanId: string | null;
+      verdict: unknown;
+      status: AuditorCallStatus;
+    },
+  ) {
+    const traceService = this.deps.traceService;
+    if (!traceService) return;
+    const dest = this.destinationForAttempts(trace);
+    if (dest === null) return;
+    const at = new Date().toISOString();
+    const subagentType = auditorSubagentType(input.name);
+    traceService.recordModelCall(
+      dest,
+      auditorCallSpan({
+        traceId: dest,
+        name: input.name,
+        label: input.label,
+        targetSpanId: input.targetSpanId,
+        prompt: "",
+        attempt: {
+          model: "cached",
+          startedAt: at,
+          endedAt: at,
+          durationMs: 0,
+          content: JSON.stringify(input.verdict),
+          error: null,
+          usage: null,
+        },
+        fallback: input.status === "degraded",
+        cached: true,
+      }),
+      subagentType ? { subagentType } : undefined,
+    );
   }
 
   // Where this auditor's model calls are recorded. A chat that is already
@@ -1615,8 +1700,14 @@ export class AuditService {
     for (const span of trace.spans) {
       if (!this.shouldAuditStep(span, trace)) continue;
       const checks = meta[span.id]?.checks;
-      if (!stepNeedsRetry(checks, { retryDegraded: chat.reasksDegraded }))
-        continue;
+      const needsRetry = stepNeedsRetry(checks, {
+        retryDegraded: chat.reasksDegraded,
+      });
+      // A finished pass asked again still walks every step, even when the
+      // verdicts can be reused: that is what writes [CACHED] spans onto the
+      // new auditor run. An interrupted resume keeps skipping complete steps
+      // so a crash halfway through does not repay the whole pass.
+      if (!needsRetry && !chat.reasksDegraded) continue;
       chat.openStep();
       retries.push(
         this.stepAudit(chat, span.id).finally(() => chat.closeStep()),
@@ -1837,9 +1928,6 @@ export class AuditService {
     const { verdict, status, failure, attempts } = await this.model.complete(
       this.auditorRun(trace),
       this.deps.securityModel,
-      this.deps.intentModel !== this.deps.securityModel
-        ? this.deps.intentModel
-        : null,
       META_SYSTEM_PROMPT,
       prompt,
       metaVerdict,

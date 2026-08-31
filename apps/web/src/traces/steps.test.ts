@@ -81,6 +81,24 @@ describe("subagent detection", () => {
     ).toBe("summarize · plan");
   });
 
+  it("prefixes a cached auditor spawn in the list headline", () => {
+    expect(
+      stepHeadline(
+        span({
+          id: "spawn",
+          name: "tool.spawn_agent",
+          label: "[CACHED] Subagent · intent · plan",
+          attributes: {
+            toolName: "spawn_agent",
+            subagentType: "intent",
+            targetLabel: "plan",
+            cached: true,
+          },
+        }),
+      ),
+    ).toBe("[CACHED] intent · plan");
+  });
+
   it("does not repeat Subagent in the list headline", () => {
     expect(
       stepHeadline(

@@ -16,6 +16,7 @@ import {
   previewLabel,
   subagentCallLabel,
   subagentResultHeadline,
+  withCachedPrefix,
 } from "./steps";
 import { formatDuration, displaySpanDurationMs } from "./format";
 
@@ -46,6 +47,10 @@ function statusColor(span: TraceSpan) {
 }
 
 function stepLabel(span: TraceSpan) {
+  return withCachedPrefix(span, rawStepLabel(span));
+}
+
+function rawStepLabel(span: TraceSpan) {
   if (span.kind === "run" && isErrorStep(span)) return "Run failed";
   if (span.kind === "turn" && isErrorStep(span)) return "Turn failed";
   if (span.kind === "model_call") return span.label;

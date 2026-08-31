@@ -1315,6 +1315,41 @@ describe("TraceService", () => {
     expect(intent?.attributes.laneId).toBe(intentSpawn?.id);
   });
 
+  it("prefixes a spawn whose model call reused a cached verdict", async () => {
+    const { store, service } = await makeService();
+    service.onRunStart(agent, {
+      id: RUN_ID,
+      prompt: "Audit of trace other-1",
+      auditOf: "other-1",
+      auditDepth: 1,
+    });
+    const call = service.recordModelCall(
+      RUN_ID,
+      {
+        id: "call-cached",
+        traceId: RUN_ID,
+        parentId: null,
+        name: "audit.step.intent",
+        label: "[CACHED] Intent - Model · plan",
+        kind: "model_call",
+        actor: "system",
+        status: "ok",
+        startedAt: "2026-08-30T00:00:00.000Z",
+        endedAt: "2026-08-30T00:00:00.000Z",
+        durationMs: 0,
+        attributes: { targetSpanId: "span-plan", cached: true },
+        error: null,
+      },
+      { subagentType: "intent" },
+    );
+    const spawn = store
+      .get(RUN_ID)!
+      .spans.find((span) => span.name === "tool.spawn_agent");
+    expect(spawn?.label).toBe("[CACHED] Subagent · intent · plan");
+    expect(spawn?.attributes.cached).toBe(true);
+    expect(call?.parentId).toBe(spawn?.id);
+  });
+
   it("carries no audit target for an ordinary agent run", async () => {
     const { store, service } = await makeService();
     service.onRunStart(agent, { id: RUN_ID, prompt: "count files" });

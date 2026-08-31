@@ -181,8 +181,8 @@ export function pushAuditorStatus(
     push(
       "warning",
       "audit-health",
-      failure ??
-        "The primary audit model failed; a fallback model still produced a verdict.",
+        failure ??
+        "The auditor could not complete the pass.",
     );
     return;
   }

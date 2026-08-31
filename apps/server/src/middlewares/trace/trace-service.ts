@@ -105,10 +105,13 @@ function preview(text: string, limit = 80) {
 
 // "Summarize - Model · plan" → the step the auditor asked about.
 function auditorCallSubject(label: string) {
+  const stripped = label.startsWith("[CACHED] ")
+    ? label.slice("[CACHED] ".length)
+    : label;
   for (const sep of [" - ", " · "]) {
-    const index = label.indexOf(sep);
+    const index = stripped.indexOf(sep);
     if (index <= 0) continue;
-    const subject = label.slice(index + sep.length).trim();
+    const subject = stripped.slice(index + sep.length).trim();
     if (subject.length > 0) return subject;
   }
   return undefined;
@@ -1242,15 +1245,17 @@ export class TraceService {
     const targetSpanId = call.attributes.targetSpanId;
     const subject = auditorCallSubject(call.label);
     const targetLabel = subject ? shortAuditorTarget(subject) : undefined;
+    const cached = call.attributes.cached === true;
     const completed = call.status !== "running";
+    const spawnLabel = targetLabel
+      ? "Subagent · " + subagentType + " · " + targetLabel
+      : "Subagent · " + subagentType;
     this.store.appendSpan(runId, {
       id: spanId,
       traceId: runId,
       parentId: state.rootSpanId,
       name: "tool.spawn_agent",
-      label: targetLabel
-        ? "Subagent · " + subagentType + " · " + targetLabel
-        : "Subagent · " + subagentType,
+      label: cached ? "[CACHED] " + spawnLabel : spawnLabel,
       kind: "tool_call",
       actor: "agent",
       status: completed ? call.status : "running",
@@ -1268,6 +1273,7 @@ export class TraceService {
           ? { targetSpanId }
           : {}),
         ...(targetLabel ? { targetLabel } : {}),
+        ...(cached ? { cached: true } : {}),
       },
       error: completed && call.status === "error" ? call.error : null,
     });

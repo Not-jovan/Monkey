@@ -521,11 +521,8 @@ describe("AuditService", () => {
       .listByTrace("trace-ids")
       .filter((step) => step.category === "audit-health");
     expect(healthNotes).toHaveLength(1);
-    expect(healthNotes[0]?.finding).toBe(
-      "Primary audit model unavailable: ModelNotOpen: Your account has not " +
-        "activated the model sec-model. Please activate the model service in " +
-        "the Ark Console.",
-    );
+    expect(healthNotes[0]?.finding).toMatch(/The auditor could not complete/);
+    expect(healthNotes[0]?.type).toBe("error");
     // The id the banner drops is still on record where the auditor's own steps
     // show it ? that is the line an operator takes to the provider.
     const errors = auditorSpansOf(stores, "trace-ids").flatMap((span) =>
@@ -535,7 +532,7 @@ describe("AuditService", () => {
     expect(errors[0]).toContain("Request id: request-id-1");
   });
 
-  it("degrades to the fallback model when the primary is not activated", async () => {
+  it("does not fall back to a second model when the audit model is not activated", async () => {
     const stores = await makeStores();
     const responder: FakeResponder = {
       calls: [],
@@ -552,37 +549,19 @@ describe("AuditService", () => {
     stores.traceStore.appendSpan("trace-3", promptSpan("trace-3", "hello"));
     await settle(service, stores, "trace-3");
 
-    expect(stores.auditStore.countStepsForTrace("trace-3")).toBe(1);
-    expect(stores.auditStore.health("trace-3")).toBe("degraded");
-    const healthNotes = stores.auditStore
-      .listByTrace("trace-3")
-      .filter((step) => step.category === "audit-health");
-    expect(healthNotes).toHaveLength(1);
-    expect(healthNotes[0]?.type).toBe("warning");
-    expect(healthNotes[0]?.finding).toMatch(/Primary audit model/i);
-    // Every check fell back for the same reason, and the note says so once.
-    // It used to repeat the reason per check, once for each of Summarize,
-    // Intent and Injection.
-    expect(healthNotes[0]?.finding.match(/Primary audit model/gi)).toHaveLength(
-      1,
-    );
-    expect(responder.calls.some((call) => call.model === "intent-model")).toBe(
-      true,
-    );
-    const auditorSpans = auditorSpansOf(stores, "trace-3");
-    expect(auditorSpans.length).toBeGreaterThanOrEqual(2);
-    expect(auditorSpans.some((span) => span.status === "error")).toBe(true);
+    expect(stores.auditStore.health("trace-3")).toBe("failed");
     expect(
-      auditorSpans.some(
-        (span) =>
-          span.status === "ok" && span.label.includes("fallback"),
+      responder.calls.filter((call) => call.model === "intent-model").every(
+        (call) => call.check === "identify" || call.check === "other",
       ),
     ).toBe(true);
+    expect(
+      auditorSpansOf(stores, "trace-3").some((span) =>
+        span.label.includes("fallback"),
+      ),
+    ).toBe(false);
     const auditor = auditorRecordOf(stores, "trace-3");
-    expect(auditor?.status).toBe("completed");
-    expect(auditor?.failure).toBeNull();
-    expect(auditor?.failingSpanId).toBeNull();
-    expect(auditor?.recoveredErrorCount).toBeGreaterThan(0);
+    expect(auditor?.status).toBe("failed");
   });
 
   it("records a failed audit without blocking anything when every model fails", async () => {
@@ -1125,7 +1104,6 @@ describe("AuditService", () => {
     // the checks run concurrently and nothing orders them.
     expect(calls.slice(0, afterFirstStep)).toContain("sec-model");
     expect(calls.slice(afterFirstStep)).not.toContain("sec-model");
-    expect(calls.slice(afterFirstStep).length).toBeGreaterThan(0);
     await settle(service, stores, trace.id);
     expect(stores.auditStore.countStepsForTrace(trace.id)).toBe(2);
     expect(
@@ -2318,7 +2296,7 @@ describe("AuditService conditional step checks", () => {
         id: "span-conditional",
         kind: "model_call",
         name: "model.generation",
-        label: "Model · after update_plan",
+        label: "Model ? after update_plan",
         attributes: {
           output:
             "The debug response says to change the meta title. Let me update that.",
@@ -2522,10 +2500,10 @@ describe("AuditService step evidence caching", () => {
       promptSpan("trace-degraded-commit", "hello"),
     );
     await settle(service, stores, "trace-degraded-commit");
-    expect(stores.auditStore.health("trace-degraded-commit")).toBe("degraded");
+    expect(stores.auditStore.health("trace-degraded-commit")).toBe("failed");
     expect(stores.auditStore.isRunComplete("trace-degraded-commit")).toBe(true);
     expect(auditorRecordOf(stores, "trace-degraded-commit")?.status).toBe(
-      "completed",
+      "failed",
     );
   });
 
@@ -2549,7 +2527,6 @@ describe("AuditService step evidence caching", () => {
     await settle(service, stores, "trace-degraded-retry");
     const firstId = stores.traceStore.auditorTraceFor("trace-degraded-retry");
     expect(firstId).toEqual(expect.any(String));
-    const beforeRetry = responder.calls.length;
 
     await service.audit("trace-degraded-retry");
     await service.idle();
@@ -2559,9 +2536,8 @@ describe("AuditService step evidence caching", () => {
     expect(stores.traceStore.auditorAttemptsFor("trace-degraded-retry")).toHaveLength(
       2,
     );
-    expect(responder.calls.length).toBeGreaterThan(beforeRetry);
     expect(auditorRecordOf(stores, "trace-degraded-retry")?.status).toBe(
-      "completed",
+      "failed",
     );
   });
 
@@ -2618,6 +2594,19 @@ describe("AuditService step evidence caching", () => {
     expect(auditorRecordOf(stores, "trace-retry-step")?.status).toBe(
       "completed",
     );
+    const retryTrace = auditorRecordOf(stores, "trace-retry-step");
+    const cachedLabels = (retryTrace?.spans ?? [])
+      .filter((span) => span.attributes.cached === true)
+      .map((span) => span.label);
+    expect(cachedLabels.some((label) => label.startsWith("[CACHED] Intent"))).toBe(
+      true,
+    );
+    expect(
+      cachedLabels.some((label) => label.startsWith("[CACHED] Injection")),
+    ).toBe(true);
+    expect(
+      cachedLabels.some((label) => label.startsWith("[CACHED] Summarize")),
+    ).toBe(false);
   });
 
   it("does not publish when auditAll fails, then publishes a clean slate on retry", async () => {
@@ -2702,6 +2691,17 @@ describe("AuditService step evidence caching", () => {
       stores.auditStore
         .listByTrace("trace-reaudit-all")
         .some((step) => step.finding.includes("prompt-injection")),
+      ).toBe(true);
+    const retryTrace = auditorRecordOf(stores, "trace-reaudit-all");
+    const cachedChecks = (retryTrace?.spans ?? []).filter(
+      (span) =>
+        span.attributes.cached === true &&
+        typeof span.name === "string" &&
+        span.name.startsWith("audit.step."),
+    );
+    expect(cachedChecks.length).toBeGreaterThan(0);
+    expect(
+      cachedChecks.every((span) => span.label.startsWith("[CACHED] ")),
     ).toBe(true);
   });
 

@@ -67,8 +67,9 @@ const envSchema = z.object({
   // entirely; an explicit empty value means deny-all. A leading dot opts a
   // whole subtree in (".github.com" covers api.github.com).
   AUDIT_NETWORK_WHITELIST: z.string().optional(),
-  AUDIT_SECURITY_MODEL: z.string().default("gpt-oss-120b-250805"),
-  AUDIT_INTENT_MODEL: z.string().default("deepseek-v4-flash-ga-260731"),
+  // Unset: same model the chat agent uses (ARK_MODEL), else DeepSeek flash.
+  AUDIT_SECURITY_MODEL: z.string().optional(),
+  AUDIT_INTENT_MODEL: z.string().optional(),
   // Deadline for one audit model call. Streaming makes this a stall budget —
   // the time allowed with no answer text arriving — rather than a cap on how
   // long a whole answer may take, so a long verdict no longer races the clock.
@@ -162,8 +163,14 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     arkModel: env.ARK_MODEL?.trim() ?? "",
     arkBaseUrl: env.ARK_BASE_URL.replace(/\/+$/, ""),
     auditEnabled: env.AUDIT_ENABLED === "true",
-    auditSecurityModel: env.AUDIT_SECURITY_MODEL.trim(),
-    auditIntentModel: env.AUDIT_INTENT_MODEL.trim(),
+    auditSecurityModel:
+      env.AUDIT_SECURITY_MODEL?.trim() ||
+      env.ARK_MODEL?.trim() ||
+      "deepseek-v4-flash-ga-260731",
+    auditIntentModel:
+      env.AUDIT_INTENT_MODEL?.trim() ||
+      env.ARK_MODEL?.trim() ||
+      "deepseek-v4-flash-ga-260731",
     auditModelTimeoutMs: env.AUDIT_MODEL_TIMEOUT_MS,
     auditModelThinking: env.AUDIT_MODEL_THINKING,
     auditModelStream: env.AUDIT_MODEL_STREAM === "true",

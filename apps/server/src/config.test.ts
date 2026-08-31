@@ -37,8 +37,25 @@ describe("codex config generation", () => {
     expect(secretValues(bare)).toEqual([]);
   });
 
-  it("keeps audit-model thinking off unless it is explicitly enabled", () => {
-    expect(loadConfig({ NODE_ENV: "test" }).auditModelThinking).toBe("disabled");
+  it("uses the chat agent's model for audits unless an audit model is set", () => {
+    expect(
+      loadConfig({ NODE_ENV: "test", ARK_MODEL: "deepseek-v4-flash-260425" })
+        .auditSecurityModel,
+    ).toBe("deepseek-v4-flash-260425");
+    expect(
+      loadConfig({ NODE_ENV: "test", ARK_MODEL: "deepseek-v4-flash-260425" })
+        .auditIntentModel,
+    ).toBe("deepseek-v4-flash-260425");
+    expect(
+      loadConfig({
+        NODE_ENV: "test",
+        ARK_MODEL: "deepseek-v4-flash-260425",
+        AUDIT_SECURITY_MODEL: "other-model",
+      }).auditSecurityModel,
+    ).toBe("other-model");
+    expect(loadConfig({ NODE_ENV: "test" }).auditSecurityModel).toBe(
+      "deepseek-v4-flash-ga-260731",
+    );
   });
 });
 

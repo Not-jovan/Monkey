@@ -193,7 +193,9 @@ async function main() {
     return;
   }
   const model =
-    process.env.AUDIT_SECURITY_MODEL?.trim() || "gpt-oss-120b-250805";
+    process.env.AUDIT_SECURITY_MODEL?.trim() ||
+    process.env.ARK_MODEL?.trim() ||
+    "deepseek-v4-flash-ga-260731";
   // Read here too, so the accuracy this prints is the accuracy of the
   // configuration the server actually runs — turning reasoning off is a
   // latency win only if the score below holds.

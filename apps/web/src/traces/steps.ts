@@ -86,6 +86,14 @@ export function isSubagentTask(span: TraceSpan) {
   return normalizedName.endsWith(".spawn_agent");
 }
 
+const CACHED_PREFIX = "[CACHED] ";
+
+export function withCachedPrefix(span: TraceSpan, label: string) {
+  if (span.attributes.cached !== true) return label;
+  if (label.startsWith(CACHED_PREFIX)) return label;
+  return CACHED_PREFIX + label;
+}
+
 export function subagentCallLabel(span: TraceSpan) {
   const type = span.attributes.subagentType;
   if (typeof type !== "string" || type.length === 0) return null;
@@ -109,16 +117,19 @@ export function stepHeadline(span: TraceSpan) {
   if (isSubagentTask(span)) {
     // The list already chips this as Subagent. Repeating that here is what
     // made auditor rows read as "SubagentSubagent · injection".
-    return subagentCallLabel(span) ?? span.label.replace(/^Subagent · /, "");
+    return withCachedPrefix(
+      span,
+      subagentCallLabel(span) ?? span.label.replace(/^Subagent · /, ""),
+    );
   }
   if (span.kind === "tool_call") {
     const toolName =
       typeof span.attributes.toolName === "string"
         ? span.attributes.toolName
         : span.name.replace(/^tool\./, "");
-    return "Tool · " + toolName;
+    return withCachedPrefix(span, "Tool · " + toolName);
   }
-  return span.label;
+  return withCachedPrefix(span, span.label);
 }
 
 function stepSortTime(span: TraceSpan, spanById: Map<string, TraceSpan>) {

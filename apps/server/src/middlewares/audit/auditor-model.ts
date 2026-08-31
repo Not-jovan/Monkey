@@ -6,10 +6,9 @@ import { ArkAbortError, ArkApiError } from "../../ark-client.js";
 import type { AgentRunner, ProviderCallTiming, RunUsage } from "../../types.js";
 
 // Everything about asking the audit model a question and living with the
-// answer: the fallback, what counts as a permanent failure, and the record of
-// each attempt. Separated from the checks themselves because none of it is
-// about auditing — a check should say what it wants judged, not how a provider
-// misbehaves.
+// answer: what counts as a permanent failure, and the record of each attempt.
+// Separated from the checks themselves because none of it is about auditing —
+// a check should say what it wants judged, not how a provider misbehaves.
 
 // Verdicts are small JSON. Thinking is off by default, so this does not have
 // to leave room for a reasoning dump. Exported because the runner that
@@ -95,6 +94,10 @@ function timingAttributes(timing: ProviderCallTiming | null | undefined) {
 // makes the auditor's own trace auditable by the machinery that judges an agent.
 // Lane and parent are filled by TraceService.recordModelCall — the same fields
 // Codex stamps — so the graph never has to guess from this span's name.
+export function cachedAuditorLabel(label: string) {
+  return label.startsWith("[CACHED] ") ? label : "[CACHED] " + label;
+}
+
 export function auditorCallSpan(input: {
   traceId: string;
   name: string;
@@ -103,13 +106,19 @@ export function auditorCallSpan(input: {
   prompt: string;
   attempt: AuditorCallAttempt;
   fallback: boolean;
+  cached?: boolean;
 }): TraceSpan {
+  let label = input.label;
+  if (input.fallback && !label.endsWith(" (fallback)")) {
+    label += " (fallback)";
+  }
+  if (input.cached) label = cachedAuditorLabel(label);
   return {
     id: randomUUID(),
     traceId: input.traceId,
     parentId: null,
     name: input.name,
-    label: input.label,
+    label,
     kind: "model_call",
     actor: "system",
     status: input.attempt.error ? "error" : "ok",
@@ -138,6 +147,7 @@ export function auditorCallSpan(input: {
         : {}),
       ...timingAttributes(input.attempt.timing),
       ...(input.fallback ? { fallback: true } : {}),
+      ...(input.cached ? { cached: true } : {}),
       ...(input.targetSpanId ? { targetSpanId: input.targetSpanId } : {}),
     },
     error: input.attempt.error,
@@ -191,8 +201,7 @@ export class AuditorModel {
   // caller needs the attempts either way to record what the auditor tried.
   async complete<Schema extends z.ZodType>(
     run: AuditorRun,
-    primaryModel: string,
-    fallbackModel: string | null,
+    model: string,
     system: string,
     user: string,
     schema: Schema,
@@ -286,24 +295,21 @@ export class AuditorModel {
       }
     };
 
-    const hasFallback = Boolean(fallbackModel) && fallbackModel !== primaryModel;
-
-    // Already known to be unavailable, so the primary is not tried at all.
-    const remembered = this.unavailable.get(primaryModel);
-    if (hasFallback && remembered !== undefined) {
-      return this.attempt(fallbackModel!, attempts, runAttempt, {
-        onSuccess: {
-          status: "degraded",
-          failure: "Primary audit model unavailable: " + remembered,
-        },
-        onFailure: (error) => summarizeError(error),
-      });
+    const remembered = this.unavailable.get(model);
+    if (remembered !== undefined) {
+      return {
+        verdict: null,
+        model,
+        status: "failed",
+        failure: remembered,
+        attempts,
+      };
     }
 
     try {
       return {
-        verdict: await runAttempt(primaryModel),
-        model: primaryModel,
+        verdict: await runAttempt(model),
+        model,
         status: "completed",
         failure: null,
         attempts,
@@ -311,61 +317,19 @@ export class AuditorModel {
     } catch (primaryError) {
       const primaryFailure = summarizeError(primaryError);
       if (isPermanentlyUnavailable(primaryError)) {
-        this.unavailable.set(primaryModel, primaryFailure);
-        // The log keeps the request id the report drops: this is the line an
-        // operator takes to the provider.
+        this.unavailable.set(model, primaryFailure);
         this.log?.(
           "audit model " +
-            primaryModel +
-            " is unavailable; falling back for the rest of this process: " +
+            model +
+            " is unavailable for the rest of this process: " +
             describeError(primaryError),
         );
       }
-      if (hasFallback) {
-        return this.attempt(fallbackModel!, attempts, runAttempt, {
-          onSuccess: {
-            status: "degraded",
-            failure: "Primary audit model unavailable: " + primaryFailure,
-          },
-          onFailure: (error) =>
-            "Primary: " + primaryFailure + " · Fallback: " + summarizeError(error),
-        });
-      }
       return {
         verdict: null,
-        model: primaryModel,
+        model,
         status: "failed",
         failure: primaryFailure,
-        attempts,
-      };
-    }
-  }
-
-  // The fallback leg, which both entry paths above share: the only difference
-  // between them is what they call the failure.
-  private async attempt<Verdict>(
-    model: string,
-    attempts: AuditorCallAttempt[],
-    runAttempt: (model: string) => Promise<Verdict>,
-    describe: {
-      onSuccess: { status: AuditorCallStatus; failure: string };
-      onFailure: (error: unknown) => string;
-    },
-  ): Promise<AuditorAnswer<Verdict>> {
-    try {
-      return {
-        verdict: await runAttempt(model),
-        model,
-        status: describe.onSuccess.status,
-        failure: describe.onSuccess.failure,
-        attempts,
-      };
-    } catch (error) {
-      return {
-        verdict: null,
-        model,
-        status: "failed",
-        failure: describe.onFailure(error),
         attempts,
       };
     }
