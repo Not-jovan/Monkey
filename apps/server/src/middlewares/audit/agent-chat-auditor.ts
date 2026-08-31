@@ -66,6 +66,10 @@ export class AgentChatAuditor {
   private open = 0;
   private waiters: (() => void)[] = [];
   private requestRunning = false;
+  // Set for a requested retry of a finished pass, so degraded checks are
+  // asked again instead of reused. Cleared when the request ends, including
+  // when it throws — a later resume must not inherit it.
+  private retryDegraded = false;
   // Unpublished step records for this pass. Written as each step finishes, and
   // read by auditAll so findings reach the store in one commit — or, when no
   // memory folder is configured, so they are not lost.
@@ -93,6 +97,16 @@ export class AgentChatAuditor {
     const closing = this.auditTrace;
     this.auditTrace = null;
     return closing;
+  }
+
+  // A finished pass is being asked again, not continued. Degraded fallbacks
+  // from the last attempt should not satisfy the retry.
+  beginFreshPass() {
+    this.retryDegraded = true;
+  }
+
+  get reasksDegraded() {
+    return this.retryDegraded;
   }
 
   constructor(
@@ -156,6 +170,7 @@ export class AgentChatAuditor {
       return "done";
     } finally {
       this.requestRunning = false;
+      this.retryDegraded = false;
     }
   }
 }

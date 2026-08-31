@@ -91,11 +91,73 @@ describe("step-check-cache", () => {
     expect(restored).not.toBeNull();
     if (restored === "run" || restored === null) return;
     expect(restored.verdict?.summary).toBe("Read README.md");
-    expect(restoreCheck(storeCheck({
-      verdict: null,
-      status: "failed",
-      failure: "timed out",
-      label: "Summarize",
-    }), summaryVerdict)).toBe("run");
+    expect(
+      restoreCheck(
+        storeCheck({
+          verdict: null,
+          status: "failed",
+          failure: "timed out",
+          label: "Summarize",
+        }),
+        summaryVerdict,
+      ),
+    ).toBe("run");
+    expect(
+      restoreCheck(
+        {
+          applicable: true,
+          status: "degraded",
+          failure: "primary down",
+          label: "Summarize",
+          verdict: { summary: "listed files" },
+        },
+        summaryVerdict,
+        { retryDegraded: true },
+      ),
+    ).toBe("run");
+    expect(
+      cachedCheckReusable(
+        {
+          applicable: true,
+          status: "degraded",
+          failure: "primary down",
+          label: "Summarize",
+          verdict: { summary: "listed files" },
+        },
+        { retryDegraded: true },
+      ),
+    ).toBe(false);
+    expect(
+      stepNeedsRetry(
+        {
+          summary: {
+            applicable: true,
+            status: "degraded",
+            failure: "primary down",
+            label: "Summarize",
+            verdict: { summary: "ok" },
+          },
+          intent: storeCheck({
+            verdict: { notInAlignment: [], newObjectives: [], reason: "" },
+            status: "completed",
+            failure: null,
+            label: "Intent",
+          }),
+          injection: storeCheck({
+            verdict: {
+              dangerous: false,
+              promptInjection: false,
+              actedOnExternalInstructions: [],
+              restrictionBypass: false,
+              reason: "",
+            },
+            status: "completed",
+            failure: null,
+            label: "Injection",
+          }),
+        },
+        { retryDegraded: true },
+      ),
+    ).toBe(true);
   });
 });

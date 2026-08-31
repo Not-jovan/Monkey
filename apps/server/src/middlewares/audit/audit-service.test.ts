@@ -2529,6 +2529,42 @@ describe("AuditService step evidence caching", () => {
     );
   });
 
+  it("opens a new auditor run when retrying a finished degraded pass", async () => {
+    const stores = await makeStores();
+    const responder: FakeResponder = {
+      calls: [],
+      respond: (model) => {
+        if (model === "sec-model") {
+          throw new ArkApiError("model not activated", "ModelNotOpen", 404);
+        }
+        return SAFE_VERDICT;
+      },
+    };
+    const service = makeAudit(stores, responder);
+    seedTrace(stores.traceStore, "trace-degraded-retry");
+    stores.traceStore.appendSpan(
+      "trace-degraded-retry",
+      promptSpan("trace-degraded-retry", "hello"),
+    );
+    await settle(service, stores, "trace-degraded-retry");
+    const firstId = stores.traceStore.auditorTraceFor("trace-degraded-retry");
+    expect(firstId).toEqual(expect.any(String));
+    const beforeRetry = responder.calls.length;
+
+    await service.audit("trace-degraded-retry");
+    await service.idle();
+
+    const secondId = stores.traceStore.auditorTraceFor("trace-degraded-retry");
+    expect(secondId).not.toBe(firstId);
+    expect(stores.traceStore.auditorAttemptsFor("trace-degraded-retry")).toHaveLength(
+      2,
+    );
+    expect(responder.calls.length).toBeGreaterThan(beforeRetry);
+    expect(auditorRecordOf(stores, "trace-degraded-retry")?.status).toBe(
+      "completed",
+    );
+  });
+
   it("retries only the failed check and replaces published findings", async () => {
     const stores = await makeStores();
     let failSummary = true;

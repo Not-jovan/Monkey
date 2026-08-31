@@ -782,6 +782,7 @@ export class AuditService {
     // with cached 0; sent this way, the second came back with 6144 of 6186
     // cached and in a third of the time. The extra serial call is most of what
     // it costs, and the hit pays much of that back.
+    const reuse = { retryDegraded: chat.reasksDegraded };
     const summaryCheck = await this.resolveRequiredCheck(
       cached?.summary,
       summaryVerdict,
@@ -793,6 +794,7 @@ export class AuditService {
           user: stepCheckPrompt(stepPrompt, SUMMARY_SYSTEM_PROMPT),
           schema: summaryVerdict,
         }),
+      reuse,
     );
 
     // The first two always run; the rest only when their subject exists.
@@ -804,67 +806,111 @@ export class AuditService {
       toolCheck,
       sinkCheck,
     ] = await Promise.all([
-      this.resolveRequiredCheck(cached?.intent, intentStepVerdict, () =>
-        this.stepCheck(trace, spanId, {
-          name: "audit.step.intent",
-          label: "Intent - " + span.label,
-          system: STEP_AUDIT_SYSTEM_PROMPT,
-          user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
-          schema: intentStepVerdict,
-        }),
+      this.resolveRequiredCheck(
+        cached?.intent,
+        intentStepVerdict,
+        () =>
+          this.stepCheck(trace, spanId, {
+            name: "audit.step.intent",
+            label: "Intent - " + span.label,
+            system: STEP_AUDIT_SYSTEM_PROMPT,
+            user: stepCheckPrompt(stepPrompt, INTENT_STEP_SYSTEM_PROMPT),
+            schema: intentStepVerdict,
+          }),
+        reuse,
       ),
-      this.resolveRequiredCheck(cached?.injection, injectionVerdict, () =>
-        this.stepCheck(trace, spanId, {
-          name: "audit.step.injection",
-          label: "Injection - " + span.label,
-          system: STEP_AUDIT_SYSTEM_PROMPT,
-          user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
-          schema: injectionVerdict,
-        }),
+      this.resolveRequiredCheck(
+        cached?.injection,
+        injectionVerdict,
+        () =>
+          this.stepCheck(trace, spanId, {
+            name: "audit.step.injection",
+            label: "Injection - " + span.label,
+            system: STEP_AUDIT_SYSTEM_PROMPT,
+            user: stepCheckPrompt(stepPrompt, INJECTION_SYSTEM_PROMPT),
+            schema: injectionVerdict,
+          }),
+        reuse,
       ),
       secretTypes.length === 0
-        ? this.resolveCheck(cached?.secrets, secretRelevanceVerdict, async () => null)
-        : this.resolveCheck(cached?.secrets, secretRelevanceVerdict, () =>
-            this.stepCheck(trace, spanId, {
-              name: "audit.step.secrets",
-              label: "Secret relevance - " + span.label,
-              system: SECRET_SYSTEM_PROMPT,
-              user: buildSecretContext(secretTypes, activity),
-              schema: secretRelevanceVerdict,
-            }),
+        ? this.resolveCheck(
+            cached?.secrets,
+            secretRelevanceVerdict,
+            async () => null,
+            reuse,
+          )
+        : this.resolveCheck(
+            cached?.secrets,
+            secretRelevanceVerdict,
+            () =>
+              this.stepCheck(trace, spanId, {
+                name: "audit.step.secrets",
+                label: "Secret relevance - " + span.label,
+                system: SECRET_SYSTEM_PROMPT,
+                user: buildSecretContext(secretTypes, activity),
+                schema: secretRelevanceVerdict,
+              }),
+            reuse,
           ),
       activity.networkCalls.length === 0
-        ? this.resolveCheck(cached?.network, networkVerdict, async () => null)
-        : this.resolveCheck(cached?.network, networkVerdict, () =>
-            this.stepCheck(trace, spanId, {
-              name: "audit.step.network",
-              label: "Network - " + span.label,
-              system: NETWORK_SYSTEM_PROMPT,
-              user: buildNetworkContext(activity),
-              schema: networkVerdict,
-            }),
+        ? this.resolveCheck(
+            cached?.network,
+            networkVerdict,
+            async () => null,
+            reuse,
+          )
+        : this.resolveCheck(
+            cached?.network,
+            networkVerdict,
+            () =>
+              this.stepCheck(trace, spanId, {
+                name: "audit.step.network",
+                label: "Network - " + span.label,
+                system: NETWORK_SYSTEM_PROMPT,
+                user: buildNetworkContext(activity),
+                schema: networkVerdict,
+              }),
+            reuse,
           ),
       span.kind !== "tool_call" || argumentsText.length === 0
-        ? this.resolveCheck(cached?.tool, toolMisuseVerdict, async () => null)
-        : this.resolveCheck(cached?.tool, toolMisuseVerdict, () =>
-            this.stepCheck(trace, spanId, {
-              name: "audit.step.tool",
-              label: "Tool misuse - " + span.label,
-              system: TOOL_MISUSE_SYSTEM_PROMPT,
-              user: buildToolMisuseContext(toolName, argumentsText, activity),
-              schema: toolMisuseVerdict,
-            }),
+        ? this.resolveCheck(
+            cached?.tool,
+            toolMisuseVerdict,
+            async () => null,
+            reuse,
+          )
+        : this.resolveCheck(
+            cached?.tool,
+            toolMisuseVerdict,
+            () =>
+              this.stepCheck(trace, spanId, {
+                name: "audit.step.tool",
+                label: "Tool misuse - " + span.label,
+                system: TOOL_MISUSE_SYSTEM_PROMPT,
+                user: buildToolMisuseContext(toolName, argumentsText, activity),
+                schema: toolMisuseVerdict,
+              }),
+            reuse,
           ),
       sinkTargets.length === 0
-        ? this.resolveCheck(cached?.sinks, sinkWriteVerdict, async () => null)
-        : this.resolveCheck(cached?.sinks, sinkWriteVerdict, () =>
-            this.stepCheck(trace, spanId, {
-              name: "audit.step.sinks",
-              label: "Sink writes - " + span.label,
-              system: SINK_SYSTEM_PROMPT,
-              user: buildSinkContext(sinkTargets),
-              schema: sinkWriteVerdict,
-            }),
+        ? this.resolveCheck(
+            cached?.sinks,
+            sinkWriteVerdict,
+            async () => null,
+            reuse,
+          )
+        : this.resolveCheck(
+            cached?.sinks,
+            sinkWriteVerdict,
+            () =>
+              this.stepCheck(trace, spanId, {
+                name: "audit.step.sinks",
+                label: "Sink writes - " + span.label,
+                system: SINK_SYSTEM_PROMPT,
+                user: buildSinkContext(sinkTargets),
+                schema: sinkWriteVerdict,
+              }),
+            reuse,
           ),
     ]);
 
@@ -958,8 +1004,9 @@ export class AuditService {
     cached: CachedCheck | undefined,
     schema: z.ZodType<Verdict>,
     run: () => Promise<StepCheckOutcome<Verdict> | null>,
+    options?: { retryDegraded?: boolean },
   ): Promise<StepCheckOutcome<Verdict> | null> {
-    const restored = restoreCheck(cached, schema);
+    const restored = restoreCheck(cached, schema, options);
     if (restored !== "run") return restored;
     return run();
   }
@@ -970,8 +1017,9 @@ export class AuditService {
     cached: CachedCheck | undefined,
     schema: z.ZodType<Verdict>,
     run: () => Promise<StepCheckOutcome<Verdict>>,
+    options?: { retryDegraded?: boolean },
   ): Promise<StepCheckOutcome<Verdict>> {
-    const restored = restoreCheck(cached, schema);
+    const restored = restoreCheck(cached, schema, options);
     if (restored !== "run" && restored !== null) return restored;
     return run();
   }
@@ -1542,8 +1590,8 @@ export class AuditService {
     };
   }
 
-  // Re-asks only the step checks that failed or never landed, then runs
-  // auditAll again. Degraded checks already have a verdict and are reused.
+  // Re-asks step checks that failed or never landed, then runs auditAll
+  // again. A requested retry of a finished pass also re-asks degraded ones.
   private async reauditAgent(chat: AgentChatAuditor, trace: TraceRecord) {
     try {
       await this.identifyFor(chat, trace);
@@ -1567,7 +1615,8 @@ export class AuditService {
     for (const span of trace.spans) {
       if (!this.shouldAuditStep(span, trace)) continue;
       const checks = meta[span.id]?.checks;
-      if (!stepNeedsRetry(checks)) continue;
+      if (!stepNeedsRetry(checks, { retryDegraded: chat.reasksDegraded }))
+        continue;
       chat.openStep();
       retries.push(
         this.stepAudit(chat, span.id).finally(() => chat.closeStep()),
@@ -1584,6 +1633,17 @@ export class AuditService {
     // whether it claimed more than its evidence supports, and what it walked
     // past -- because those are the only ones its spans can answer.
     if (!isAuditorTrace(trace)) {
+      // Same reason the auditor path opens a run before identify: a finished
+      // pass has already pinned intent, so deriveBoth will not open one, and
+      // a retry that reuses every degraded check then makes no model call at
+      // all. The POST returns the previous auditor id and the button looks
+      // dead.
+      this.openAuditTrace(trace);
+      // Findings stay published until auditAll commits the replacement. Filing
+      // them away first left a failed retry with an empty document.
+      if (!this.deps.auditStore.interruptedPass(trace.id)) {
+        chat.beginFreshPass();
+      }
       await this.reauditAgent(chat, trace);
       return;
     }
