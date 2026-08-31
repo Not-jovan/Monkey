@@ -2107,6 +2107,12 @@ textarea:focus {
   margin: 0 0 8px;
 }
 
+.trace-detail-footer-actions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 16px;
+}
+
 .audit-attempts-picker {
   display: inline-flex;
   align-items: center;

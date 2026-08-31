@@ -1,12 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
-import {
-  api,
-  hasAuthToken,
-  isApiErrorWithStatus,
-  type TraceDetail,
-} from "../api";
+import { api, hasAuthToken, isApiErrorWithStatus, type TraceDetail } from "../api";
 import type { AuditAttempt, TraceRecord } from "../types";
 import { auditAction, auditInFlight, showFailedAlert, type TracePane } from "./audit-action";
 import { attemptsOldestFirst, auditAttemptLabel } from "./audit-attempts";
@@ -84,27 +79,19 @@ function persistPane(pane: TracePane) {
 //
 // There is no ceiling here on purpose. However deep someone has chosen to go,
 // the way back is the same list.
-function AuditChain({
-  chain,
-  current,
-}: {
-  chain: { id: string; auditDepth: number }[];
-  current: string;
-}) {
+function AuditChain({ chain, current }: { chain: { id: string; auditDepth: number }[]; current: string }) {
   if (chain.length < 2) return null;
   return (
-    <nav className="audit-chain" aria-label="Audit chain">
+    <nav className='audit-chain' aria-label='Audit chain'>
       {chain.map((entry, index) => (
         <span key={entry.id}>
-          {index > 0 && <span className="audit-chain-separator"> › </span>}
+          {index > 0 && <span className='audit-chain-separator'> › </span>}
           {entry.id === current ? (
-            <span className="audit-chain-current" aria-current="page">
+            <span className='audit-chain-current' aria-current='page'>
               {auditChainLabel(entry.auditDepth)}
             </span>
           ) : (
-            <Link to={"/traces/" + entry.id}>
-              {auditChainLabel(entry.auditDepth)}
-            </Link>
+            <Link to={"/traces/" + entry.id}>{auditChainLabel(entry.auditDepth)}</Link>
           )}
         </span>
       ))}
@@ -119,22 +106,14 @@ export function auditChainLabel(depth: number) {
   return depth === 0 ? "Agent run" : "Audit";
 }
 
-function AuditAttempts({
-  attempts,
-  selectedId,
-  onSelect,
-}: {
-  attempts: AuditAttempt[];
-  selectedId: string;
-  onSelect: (id: string | null) => void;
-}) {
+function AuditAttempts({ attempts, selectedId, onSelect }: { attempts: AuditAttempt[]; selectedId: string; onSelect: (id: string | null) => void }) {
   if (attempts.length < 2) return null;
   const latestId = attempts[0]?.id;
   return (
-    <label className="audit-attempts-picker">
-      <span className="audit-attempts-label">Attempts</span>
+    <label className='audit-attempts-picker'>
+      <span className='audit-attempts-label'>Attempts</span>
       <select
-        aria-label="Auditor attempts"
+        aria-label='Auditor attempts'
         value={selectedId}
         onChange={(event) => {
           const id = event.target.value;
@@ -193,23 +172,18 @@ export function TraceDetailPage() {
     queryKey: ["trace", traceId],
     queryFn: (): Promise<TraceDetail> => api.trace(traceId),
     enabled: !locked && traceId.length > 0,
-    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
-      tracePollMs(query.state.data),
+    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) => tracePollMs(query.state.data),
   });
 
   const auditTraceId = detailQuery.data?.auditTraceId ?? null;
   const auditAttempts: AuditAttempt[] = detailQuery.data?.auditAttempts ?? [];
   const viewingAttemptId =
-    pinnedAttemptId !== null &&
-    auditAttempts.some((attempt) => attempt.id === pinnedAttemptId)
-      ? pinnedAttemptId
-      : auditTraceId;
+    pinnedAttemptId !== null && auditAttempts.some((attempt) => attempt.id === pinnedAttemptId) ? pinnedAttemptId : auditTraceId;
   const auditorDetailQuery = useQuery({
     queryKey: ["trace", viewingAttemptId],
     queryFn: (): Promise<TraceDetail> => api.trace(viewingAttemptId!),
     enabled: !locked && viewingAttemptId !== null,
-    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) =>
-      tracePollMs(query.state.data),
+    refetchInterval: (query: { state: { data: TraceDetail | undefined } }) => tracePollMs(query.state.data),
   });
 
   const trace: TraceRecord | null = detailQuery.data?.trace ?? null;
@@ -248,11 +222,15 @@ export function TraceDetailPage() {
     persistPane(next);
   };
 
+  // Following the audit deeper changes only the id in the route, so the page
+  // never unmounts and the tab would come along to a trace it does not
+  // describe — landing on the audit of the audit instead of the run just
+  // opened. Not choosePane: nobody picked this, so it must not overwrite the
+  // tab they did pick.
+  const followAudit = () => setPane("run");
+
   const auditBusy = audit.isPending || auditInFlight(auditAttempts);
-  const canRetryAudit =
-    pane === "auditor" &&
-    auditAttempts.length > 0 &&
-    detailQuery.data?.trace.status !== "running";
+  const canRetryAudit = pane === "auditor" && auditAttempts.length > 0 && detailQuery.data?.trace.status !== "running";
   const failed = showFailedAlert({ pane, auditHealth }) && !auditBusy;
 
   if (locked || detailQuery.error) {
@@ -264,11 +242,11 @@ export function TraceDetailPage() {
       message = "Unlock the launchpad from the Playground first.";
     }
     return (
-      <div className="glassbox-page">
-        <div className="error-banner" role="alert">
+      <div className='glassbox-page'>
+        <div className='error-banner' role='alert'>
           <span>{message}</span>
         </div>
-        <Link className="button button-ghost" to="/traces">
+        <Link className='button button-ghost' to='/traces'>
           ← Back
         </Link>
       </div>
@@ -276,21 +254,17 @@ export function TraceDetailPage() {
   }
 
   return (
-    <div className="glassbox-page">
-      <header className="glassbox-topbar">
-        <Link className="button button-ghost" to="/traces">
+    <div className='glassbox-page'>
+      <header className='glassbox-topbar'>
+        <Link className='button button-ghost' to='/traces'>
           ← Back
         </Link>
-        <div className="glassbox-topbar-actions">
-          <button
-            className="button button-ghost"
-            disabled={!trace}
-            onClick={() => setShowDebugPrompt(true)}
-          >
+        <div className='glassbox-topbar-actions'>
+          <button className='button button-ghost' disabled={!trace} onClick={() => setShowDebugPrompt(true)}>
             Get Debug Prompt
           </button>
           <button
-            className="button button-ghost"
+            className='button button-ghost'
             disabled={!trace}
             onClick={async () => {
               const payload = await api.auditor(traceId);
@@ -300,7 +274,7 @@ export function TraceDetailPage() {
             Auditor Trace
           </button>
           <button
-            className="button button-ghost"
+            className='button button-ghost'
             disabled={!trace}
             onClick={async () => {
               const payload = await api.trace(traceId);
@@ -314,19 +288,12 @@ export function TraceDetailPage() {
 
       {trace && (
         <>
-          <AuditChain
-            chain={detailQuery.data?.auditChain ?? []}
-            current={traceId}
-          />
-          <div className="trace-pane-row">
-            <div
-              className="pane-toggle view-toggle"
-              role="tablist"
-              aria-label="Trace view"
-            >
+          <AuditChain chain={detailQuery.data?.auditChain ?? []} current={traceId} />
+          <div className='trace-pane-row'>
+            <div className='pane-toggle view-toggle' role='tablist' aria-label='Trace view'>
               <button
-                type="button"
-                role="tab"
+                type='button'
+                role='tab'
                 className={pane === "run" ? "is-active" : ""}
                 aria-selected={pane === "run"}
                 onClick={() => choosePane("run")}
@@ -334,45 +301,26 @@ export function TraceDetailPage() {
                 View Run
               </button>
               <button
-                type="button"
-                role="tab"
+                type='button'
+                role='tab'
                 className={pane === "auditor" ? "is-active" : ""}
                 aria-selected={pane === "auditor"}
                 onClick={() => choosePane("auditor")}
               >
                 View Auditor
-                {auditHealth !== "ok" && (
-                  <span className="pane-mark">issue</span>
-                )}
+                {auditHealth !== "ok" && <span className='pane-mark'>issue</span>}
               </button>
             </div>
-            {action.run && !canRetryAudit && (
-              <button
-                type="button"
-                className="button button-ghost"
-                disabled={auditBusy}
-                onClick={() => audit.mutate()}
-              >
-                {audit.isPending ? "Auditing…" : "Audit"}
-              </button>
-            )}
           </div>
           {failed && (
-            <div
-              className="auditor-health auditor-health-failed"
-              role="alert"
-            >
-              <p className="auditor-health-title">This audit failed</p>
-              <p className="auditor-health-body">
-                The auditor could not complete.
-              </p>
+            <div className='auditor-health auditor-health-failed' role='alert'>
+              <p className='auditor-health-title'>This audit failed</p>
+              <p className='auditor-health-body'>The auditor could not complete.</p>
             </div>
           )}
           {audit.isError && (
-            <p className="intent-change-error" role="alert">
-              {audit.error instanceof Error
-                ? audit.error.message
-                : "The auditor could not be audited."}
+            <p className='intent-change-error' role='alert'>
+              {audit.error instanceof Error ? audit.error.message : "The auditor could not be audited."}
             </p>
           )}
         </>
@@ -389,29 +337,28 @@ export function TraceDetailPage() {
         />
       )}
 
-      {pane === "auditor" &&
-        (auditAttempts.length > 1 || canRetryAudit) && (
-          <div className="audit-attempts">
-            <AuditAttempts
-              attempts={auditAttempts}
-              selectedId={viewingAttemptId ?? ""}
-              onSelect={(id) => {
-                setAuditorSpanId(null);
-                setPinnedAttemptId(id);
-              }}
-            />
-            {canRetryAudit && (
-              <button
-                type="button"
-                className="button button-ghost"
-                disabled={auditBusy}
-                onClick={() => audit.mutate()}
-              >
-                {audit.isPending ? "Auditing…" : "Retry Audit"}
-              </button>
-            )}
-          </div>
-        )}
+      {pane === "auditor" && (auditAttempts.length > 1 || canRetryAudit || action.run) && (
+        <div className='audit-attempts'>
+          <AuditAttempts
+            attempts={auditAttempts}
+            selectedId={viewingAttemptId ?? ""}
+            onSelect={(id) => {
+              setAuditorSpanId(null);
+              setPinnedAttemptId(id);
+            }}
+          />
+          {action.run && !canRetryAudit && (
+            <button type='button' className='button button-ghost' disabled={auditBusy} onClick={() => audit.mutate()}>
+              {audit.isPending ? "Auditing…" : "Audit"}
+            </button>
+          )}
+          {canRetryAudit && (
+            <button type='button' className='button button-ghost' disabled={auditBusy} onClick={() => audit.mutate()}>
+              {audit.isPending ? "Auditing…" : "Retry Audit"}
+            </button>
+          )}
+        </div>
+      )}
 
       {pane === "auditor" && auditorDetailQuery.data && (
         <TraceRunView
@@ -424,38 +371,33 @@ export function TraceDetailPage() {
         />
       )}
 
-      {pane === "auditor" &&
-        !auditorDetailQuery.data &&
-        (!viewingAttemptId || auditorDetailQuery.error) && (
-          <p className="muted-cell">
-            The auditor has not recorded any steps yet.
-          </p>
-        )}
+      {pane === "auditor" && !auditorDetailQuery.data && (!viewingAttemptId || auditorDetailQuery.error) && (
+        <p className='muted-cell'>The auditor has not recorded any steps yet.</p>
+      )}
+
+      {pane === "auditor" && action.view && (
+        <div className='trace-detail-footer-actions'>
+          <Link className='button button-ghost' to={"/traces/" + action.view} onClick={followAudit}>
+            View auditor's trace details
+          </Link>
+        </div>
+      )}
 
       {showDebugPrompt && trace && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={() => setShowDebugPrompt(false)}
-        >
+        <div className='modal-backdrop' onMouseDown={() => setShowDebugPrompt(false)}>
           <div
-            className="modal debug-prompt-modal"
-            role="dialog"
-            aria-labelledby="debug-prompt-heading"
+            className='modal debug-prompt-modal'
+            role='dialog'
+            aria-labelledby='debug-prompt-heading'
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <div className="modal-heading">
+            <div className='modal-heading'>
               <div>
-                <span className="eyebrow">This run</span>
-                <h2 id="debug-prompt-heading">Debug Prompt</h2>
-                <p>
-                  Standing instructions for a diagnostic agent. Paths are
-                  filled in for this run.
-                </p>
+                <span className='eyebrow'>This run</span>
+                <h2 id='debug-prompt-heading'>Debug Prompt</h2>
+                <p>Standing instructions for a diagnostic agent. Paths are filled in for this run.</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowDebugPrompt(false)}
-              >
+              <button type='button' onClick={() => setShowDebugPrompt(false)}>
                 ×
               </button>
             </div>
@@ -474,12 +416,8 @@ export function TraceDetailPage() {
                 onFocus={(event) => event.currentTarget.select()}
               />
             </label>
-            <div className="modal-footer">
-              <button
-                type="button"
-                className="button button-ghost"
-                onClick={() => setShowDebugPrompt(false)}
-              >
+            <div className='modal-footer'>
+              <button type='button' className='button button-ghost' onClick={() => setShowDebugPrompt(false)}>
                 Close
               </button>
             </div>
