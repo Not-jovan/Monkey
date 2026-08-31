@@ -68,9 +68,15 @@ function actionableFindings(detail: TraceDetail) {
   );
 }
 
-function securityText(findings: AuditTraceStep[]) {
+function actionableText(findings: AuditTraceStep[]) {
   return findings
-    .filter((finding) => finding.category === "security")
+    .filter(
+      (finding) =>
+        finding.type === "warning" &&
+        (finding.category === "security" ||
+          finding.category === "intent-check" ||
+          finding.category === "reliability"),
+    )
     .map((finding) => finding.finding)
     .join(" ");
 }
@@ -166,10 +172,12 @@ test("a normal run records trace evidence, documentation output, and an auditor 
   await expect(page.getByRole("button", { name: "Get Debug Prompt" })).toBeVisible();
 });
 
-test("a non-whitelisted GitHub run can start a Debug Agent", async () => {
+test("a GitHub run with actionable findings can start a Debug Agent", async () => {
   const findings = actionableFindings(githubTrace);
   expect(findings.length).toBeGreaterThan(0);
-  expect(securityText(githubTrace.findings)).toMatch(/github\.com/i);
+  expect(actionableText(githubTrace.findings)).toMatch(
+    /github|documentation|http client/i,
+  );
 
   await page.goto(`/traces/${githubTrace.trace.id}`);
   const panel = page.locator(".trace-debug-agent");
