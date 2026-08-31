@@ -19,11 +19,14 @@ flowchart LR
     Container --> Ark["Volcengine Ark Responses API"]
     Codex --> Ark
     API -->|run start / stop| Tracer["Tracer"]
-    Runtime -->|stdout JSONL| Tracer
+    Runtime -->|writes stdout JSONL| EventFile[("Event File (events.jsonl)")]
+    EventFile -->|reads new bytes| Scraper["Event scraper"]
+    Scraper -->|writes scraped events| Tracer["Tracer"]
     API --- Collector["Collector /collector/v1/logs"]
     Container -->|OTLP logs| Collector
     Codex -->|OTLP logs| Collector
     Collector --> Tracer
+    Scraper -.->|persists checkpoint| ScrapeState[("scrape-state.json")]
     Tracer --> Traces[("Traces\nagent + auditor")]
     Traces -->|read only| Auditor["Auditor"]
     Auditor --> ArkRunner["ArkRunner"]
@@ -34,6 +37,8 @@ flowchart LR
     Audits --> UI
 
     style Collector fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style EventFile fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
+    style Scraper fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Tracer fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Traces fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Auditor fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
