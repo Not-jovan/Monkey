@@ -1,5 +1,7 @@
 # Monkey Auditor, Agent Tracing and Auditing
 
+![Monkey Overview](docs/overview.png)
+
 **Selected track: Track A — The Glass Box (Trace and Audit).**
 
 ## Problem
