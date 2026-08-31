@@ -397,6 +397,38 @@ export interface RuntimeEventPipeline {
   close(): Promise<void>;
 }
 
+export async function replayPersistedRuntimeEvents(input: {
+  dataDirectory: string;
+  runId: string;
+  onEvent: (event: Record<string, unknown>) => void | Promise<void>;
+  onProblem?:
+    | ((problem: RuntimeEventStreamProblem) => void | Promise<void>)
+    | undefined;
+  isTerminalEvent: (event: Record<string, unknown>) => boolean;
+}): Promise<boolean> {
+  const filePath = runtimeEventFilePath(input.dataDirectory, input.runId);
+  const fileInfo = await stat(filePath).catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (!fileInfo) return false;
+
+  const stateStore = new ScrapeStateStore();
+  await stateStore.save(filePath, emptyScrapeState());
+  const scraper = new RuntimeEventScraper({
+    runId: input.runId,
+    filePath,
+    onEvent: input.onEvent,
+    onProblem: input.onProblem,
+    isTerminalEvent: input.isTerminalEvent,
+    disrupted: false,
+  });
+  await scraper.start();
+  await scraper.flush();
+  await scraper.close();
+  return true;
+}
+
 export async function startRuntimeEventPipeline(input: {
   dataDirectory: string;
   runId: string;

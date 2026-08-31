@@ -735,8 +735,10 @@ export class AuditService {
     const traceId = chat.chatId;
     const opened = this.deps.traceStore.get(traceId);
     if (!opened) return;
+    if (!opened.evidenceComplete) return;
     await this.identifyFor(chat, opened);
     const trace = this.deps.traceStore.get(traceId);
+    if (!trace?.evidenceComplete) return;
     const span = trace?.spans.find((item) => item.id === spanId);
     if (!trace || !span) return;
 
@@ -1418,6 +1420,7 @@ export class AuditService {
     const traceId = chat.chatId;
     const opened = this.deps.traceStore.get(traceId);
     if (!opened) return;
+    if (!opened.evidenceComplete) return;
     let outcome: { status: "completed" | "failed"; error: string | null } = {
       status: "completed",
       error: null,
@@ -1426,8 +1429,10 @@ export class AuditService {
       await this.identifyFor(chat, opened);
       const trace = this.deps.traceStore.get(traceId);
       if (!trace) return;
+      if (!trace.evidenceComplete) return;
       await chat.awaitSteps();
       const settled = this.deps.traceStore.get(traceId) ?? trace;
+      if (!settled.evidenceComplete) return;
       const meta = await this.metaFor(chat);
       const draft = Object.values(meta).flatMap((entry) => entry.findings);
       const open: OpenQuestion[] = [

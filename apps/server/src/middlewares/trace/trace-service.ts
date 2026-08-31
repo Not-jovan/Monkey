@@ -43,6 +43,7 @@ interface RunStartInput {
 
 interface RunEndInput {
   status: "completed" | "failed" | "cancelled";
+  endedAt?: string | undefined;
   error?: string | null;
   output?: string | null;
   // Reported by runtimes that resolve their model at run time (Claude Code).
@@ -343,6 +344,74 @@ export class TraceService {
 
   redactText(text: string) {
     return this.redactor.redactText(text);
+  }
+
+  prepareRuntimeEventRecovery(runId: string) {
+    const trace = this.store.get(runId);
+    if (!trace) return null;
+    const rootSpan = trace.spans.find((span) => span.kind === "run");
+    const promptSpan = trace.spans.find(
+      (span) => span.kind === "user_action" && span.name === "user.prompt",
+    );
+    if (!rootSpan || !promptSpan) return null;
+    if (trace.status === "running") return null;
+
+    this.store.updateTrace(runId, (record) => {
+      record.status = "running";
+      record.endedAt = null;
+      record.usage = emptyUsage();
+      record.failingSpanId = null;
+      record.failure = null;
+      record.recoveredErrorCount = 0;
+      record.evidenceComplete = true;
+      record.evidenceProblem = null;
+      record.unrecognizedEvents = 0;
+      record.runtimeEvents = [];
+      record.spans = record.spans.filter(
+        (span) => span.id === rootSpan.id || span.id === promptSpan.id,
+      );
+    });
+    this.store.updateSpan(runId, rootSpan.id, (span) => {
+      span.status = "running";
+      span.endedAt = null;
+      span.durationMs = null;
+      span.error = null;
+      delete span.attributes.failureLayer;
+      delete span.attributes.failureKind;
+      delete span.attributes.retryability;
+    });
+    this.store.updateSpan(runId, promptSpan.id, (span) => {
+      span.status = "ok";
+      span.error = null;
+    });
+
+    this.runs.set(runId, {
+      agentId: trace.agentId,
+      rootSpanId: rootSpan.id,
+      promptSpanId: promptSpan.id,
+      prompt: trace.prompt,
+      rootConversationId: trace.conversationId,
+      turnSpanId: null,
+      toolSpans: new Map(),
+      scopes: new Map(),
+      conversationSpawn: new Map(),
+      completed: false,
+      rawModelCallStartedAt: null,
+    });
+
+    if (trace.conversationId) {
+      this.bindConversation(trace.conversationId, runId);
+    }
+
+    const rootError =
+      trace.spans.find((span) => span.id === rootSpan.id)?.error ?? null;
+    return {
+      status: trace.status,
+      endedAt: trace.endedAt,
+      error: rootError,
+      model: trace.model,
+      failure: trace.failure,
+    };
   }
 
   onEventStreamProblem(
@@ -876,7 +945,7 @@ export class TraceService {
     const state = this.runs.get(runId);
     if (!state || state.completed) return;
     state.completed = true;
-    const endedAt = this.now().toISOString();
+    const endedAt = outcome.endedAt ?? this.now().toISOString();
     const failed = outcome.status === "failed";
     const error = outcome.error
       ? this.redactor.redactText(outcome.error)
