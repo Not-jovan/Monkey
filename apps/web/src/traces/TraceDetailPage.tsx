@@ -457,8 +457,8 @@ export function TraceDetailPage() {
                 <span className="eyebrow">This run</span>
                 <h2 id="debug-prompt-heading">Debug Prompt</h2>
                 <p>
-                  Paste into a diagnosing agent. Paths are filled in for this
-                  run.
+                  Standing instructions for a diagnostic agent. Paths are
+                  filled in for this run.
                 </p>
               </div>
               <button

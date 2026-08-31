@@ -2,6 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { useNavigate } from "react-router";
 import { api, type TraceDetail } from "../api";
 import {
+  DEBUG_AGENT_DESCRIPTION,
   DEBUG_AGENT_FIRST_MESSAGE,
   DEBUG_AGENT_NAME,
   debugPrompt,
@@ -15,7 +16,7 @@ export function TraceDebugAgent({ detail }: { detail: TraceDetail }) {
     mutationFn: async () => {
       const { agent } = await api.createAgent({
         name: DEBUG_AGENT_NAME,
-        description: "",
+        description: DEBUG_AGENT_DESCRIPTION,
         instructions: debugPrompt({
           origin: window.location.origin,
           traceId: trace.id,
