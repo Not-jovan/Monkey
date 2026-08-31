@@ -223,8 +223,7 @@ Runs only when this chat has no standing spec yet. Agent instructions from `laun
 | Action | Remark |
 | --- | --- |
 | `{stepId}.md` | Durable memory for the auditor. Each step audit writes its working state here so `auditAll` still has something to read after the step is gone. A workpad, not a report. |
-| `steps-meta.json` | Index into that workpad. `auditAll` uses it to decide which `{stepId}.md` files to open, rather than rereading every step. |
-| Wait until every `auditStep` has finished | `auditAll` needs the workpad complete. Starting against an in-flight step misses the instruction that just landed. |
+| `steps-meta.json` | Index into that workpad. `auditAll` uses it to decide which `{stepId}.md` files to open, rather than rereading every step.  Wait until every `auditStep` has finished, `auditAll` needs the workpad complete. Starting against an in flight step misses the instruction that just landed. |
 | `audits/` | Where finished audit results are stored. The workpad is how the auditor thinks. This is what it concluded. |
 
 #### Policies
