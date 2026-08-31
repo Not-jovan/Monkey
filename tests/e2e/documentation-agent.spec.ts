@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import {
   correctIntent,
@@ -14,6 +16,7 @@ import {
 import { documentationFiles } from "./helpers/workspace";
 
 const live = process.env.RUN_LIVE_E2E === "true";
+const execFileAsync = promisify(execFile);
 test.skip(!live, "Set RUN_LIVE_E2E=true with Ark credentials to run this suite");
 test.describe.configure({ mode: "serial" });
 
@@ -76,6 +79,33 @@ async function currentTraceDetail(traceId: string) {
   const response = await page.request.get(`/api/traces/${traceId}`);
   expect(response.ok(), await response.text()).toBe(true);
   return (await response.json()) as TraceDetail;
+}
+
+async function activeRuntimeContainer(agentId: string): Promise<string> {
+  const systemResponse = await page.request.get("/api/system");
+  expect(systemResponse.ok(), await systemResponse.text()).toBe(true);
+  const system = (await systemResponse.json()) as {
+    containerEngine: string | null;
+  };
+  expect(system.containerEngine).toBeTruthy();
+
+  let containerId = "";
+  await expect
+    .poll(
+      async () => {
+        const result = await execFileAsync(system.containerEngine!, [
+          "ps",
+          "--quiet",
+          "--filter",
+          "label=io.codejam.agent-id=" + agentId,
+        ]);
+        containerId = result.stdout.trim().split(/\s+/)[0] ?? "";
+        return containerId;
+      },
+      { timeout: 30_000, intervals: [100, 250, 500] },
+    )
+    .not.toBe("");
+  return containerId;
 }
 
 test.beforeAll(async ({ browser }: { browser: Browser }) => {
@@ -354,15 +384,33 @@ test("an abruptly terminated Agent Runtime fails, then the Agent can retry", asy
     `/api/agents/${agent.id}/messages`,
     {
       data: {
-        // The Runtime container runs the CLI as PID 1. Killing it models an
-        // abrupt Runtime/service termination rather than a user cancellation.
         content:
-          "Run exactly this command and do not do anything else: kill -9 1",
+          "Work on a long-running task and do not finish before 2 minutes have passed.",
       },
     },
   );
   expect(failedResponse.status(), await failedResponse.text()).toBe(202);
   const failedBody = (await failedResponse.json()) as { run: { id: string } };
+  await expect
+    .poll(
+      async () => {
+        const response = await page.request.get(
+          `/api/runs/${failedBody.run.id}`,
+        );
+        if (!response.ok()) return "http-" + response.status();
+        return ((await response.json()) as { run: { status: string } }).run
+          .status;
+      },
+      { timeout: 30_000, intervals: [250, 500, 1_000] },
+    )
+    .toBe("running");
+  const containerId = await activeRuntimeContainer(agent.id);
+  const systemResponse = await page.request.get("/api/system");
+  const system = (await systemResponse.json()) as {
+    containerEngine: string;
+  };
+  await execFileAsync(system.containerEngine, ["rm", "--force", containerId]);
+
   const failedRun = await waitForRun(page.request, failedBody.run.id);
   expect(failedRun.status).toBe("failed");
   expect(failedRun.error).toBeTruthy();

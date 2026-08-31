@@ -208,8 +208,9 @@ Only one container engine is required. Codex CLI is already included in the Runt
 ### 3. Start the POC
 
 ```bash
-ARK_API_KEY=your-ark-api-key \
-ARK_MODEL=ep-your-endpoint-id \
+export ARK_API_KEY=your-ark-api-key 
+export ARK_MODEL=ep-your-endpoint-id 
+export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
 npm run poc
 ```
 
@@ -219,6 +220,15 @@ script automatically selects Docker, Colima, or Podman.
 The control plane listens on `PORT` (default `3000`). In development the UI is
 Vite on `5173` and talks to that API. In production the same process serves the
 built SPA at `/`.
+
+### Testing
+```bash
+export ARK_API_KEY=your-ark-api-key 
+export ARK_MODEL=ep-your-endpoint-id 
+export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
+npm run check
+npm run test:e2e
+```
 
 ## HTTP API
 
