@@ -20,10 +20,8 @@ flowchart LR
     Codex --> Ark
     API -->|run start / stop| Tracer["Tracer"]
     Runtime -->|stdout JSONL| Tracer
-    API --- Collector["Collector /collector/v1/logs"]
-    Container -->|OTLP logs| Collector
-    Codex -->|OTLP logs| Collector
-    Collector --> Tracer
+    Container -->|session log scrape| Tracer
+    Codex -->|session log scrape| Tracer
     Tracer --> Traces[("Traces\nagent + auditor")]
     Traces -->|read only| Auditor["Auditor"]
     Auditor --> ArkRunner["ArkRunner"]
@@ -226,9 +224,15 @@ built SPA at `/`.
 export ARK_API_KEY=your-ark-api-key 
 export ARK_MODEL=ep-your-endpoint-id 
 export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
+export RUN_LIVE_E2E=true
 npm run check
 npm run test:e2e
 ```
+
+`RUN_LIVE_E2E=true` is required for `npm run test:e2e` to do anything — without it,
+the Playwright suite has no `webServer` to run against and every spec skips itself.
+The suite drives real Codex runs through a real container runtime, so it also needs
+a container engine available (Docker, Colima, or Podman).
 
 ## HTTP API
 
@@ -236,9 +240,10 @@ When `APP_AUTH_TOKEN` is set, every `/api/` route except `/api/health` and
 `/api/auth` requires `Authorization: Bearer <token>`. Errors return
 `{ "error": "..." }`. Validation failures add `details`.
 
-The Runtime posts OTLP to `/collector/v1/logs`. That route is not under
-`/api/` and uses `x-collector-token`, not the bearer token. Operators and
-diagnosing agents should not call it.
+Trace data is never posted to the control plane — the server scrapes it
+directly from each Runtime's own session log (Codex's rollout file under
+`CODEX_HOME`, Claude Code's transcript under `CLAUDE_CONFIG_DIR`), so there is
+no collector endpoint or token to configure.
 
 ### Health and system
 
@@ -322,12 +327,3 @@ on demand, so a stack of auditors goes only as far as someone asked.
 | `POST` | `/api/traces/:id/audit` | `{ traceId, auditTraceId }`. Re-audits this trace, at any depth. `409` if one is already running. `503` if auditing is disabled. |
 | `GET` | `/api/audits/:id/archive` | Zip: `memory/{stepId}.md`, `memory/steps-meta.json`, `audit.json`. |
 | `GET` | `/api/agents/:id/intent` | Standing spec: `{ intent, diverged, versions, intentId }`. `diverged` means the conversation's objective has not been adopted into the agent's instructions. |
-
-### Collector
-
-The Runtime posts OTLP logs here. Body limit 16 MiB. Not gated by
-`APP_AUTH_TOKEN`.
-
-| Method | Path | Returns |
-| --- | --- | --- |
-| `POST` | `/collector/v1/logs` | `{ partialSuccess: {} }`. Header `x-collector-token` must match the per-boot collector token. `401` if it does not. `400` if the body is not OTLP logs. |

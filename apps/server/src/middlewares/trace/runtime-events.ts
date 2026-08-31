@@ -1,9 +1,9 @@
 // The vocabulary TraceService.applyRecord switches on. Each Agent runtime's
-// RuntimeDefinition.trace.normalize maps its own raw OTLP event shape onto
-// these kinds; a runtime that has no analog for a kind (or a raw event with
-// no representation here) simply never emits it — applyRecord's case for
-// it then never fires for that runtime rather than requiring every runtime
-// to emit every kind.
+// RuntimeTraceAdapter maps its own raw session-log shape onto these kinds; a
+// runtime that has no analog for a kind (or a raw event with no
+// representation here) simply never emits it — applyRecord's case for it
+// then never fires for that runtime rather than requiring every runtime to
+// emit every kind.
 //
 // Optional fields are typed `T | undefined` rather than bare `T` because
 // this project builds with exactOptionalPropertyTypes — the adapters below
@@ -106,6 +106,14 @@ export type NormalizedRuntimeEvent =
       errorMessage: string;
     };
 
+// A NormalizedRuntimeEvent paired with when it happened. Every raw line a
+// runtime writes carries its own timestamp; applyRecord needs one per event
+// for span startedAt/endedAt/duration, the same way it always has.
+export interface TimestampedEvent {
+  event: NormalizedRuntimeEvent;
+  timestamp: string;
+}
+
 export interface RuntimeTraceAdapter {
   // Mirrors RuntimeDefinition.id. TraceService is handed the adapter rather
   // than the whole definition, and it needs the runtime's identity for the
@@ -115,10 +123,28 @@ export interface RuntimeTraceAdapter {
   runtimeId: "codex" | "claude-code";
   // How the runtime is written in span labels a human reads.
   displayName: string;
-  // The OTLP attribute key that correlates records to a run/conversation —
-  // "conversation.id" for Codex, "session.id" for Claude Code.
-  correlationAttribute: string;
-  // Returns null when the attributes don't parse as a recognized event from
-  // this runtime at all (TraceService counts these as unrecognizedEvents).
-  normalize(attributes: Record<string, unknown>): NormalizedRuntimeEvent | null;
+  // Finds the session log this runtime already writes for a given
+  // conversation id, under the runtime's own home directory — no code of
+  // ours ever creates or names this file, we only locate it. Returns null
+  // when it doesn't exist yet: a run whose CLI process hasn't created (or
+  // flushed) it yet, not an error.
+  locateLog(homeDir: string, conversationId: string): Promise<string | null>;
+  // Parses the log's full text into the complete, ordered sequence of
+  // events it represents so far — always from the start, not incrementally.
+  // Re-parsing the whole (small, plain-text) file on every poll tick is
+  // deliberately simple: it sidesteps needing any state to survive between
+  // calls (no pending-tool-call map to lose track of across ticks), at the
+  // cost of repeated cheap work this project's scale doesn't need to avoid.
+  //
+  // The caller — TraceService — tracks how many of the returned events have
+  // already been applied and only applies the tail past that count; the
+  // *event* index is the durable cursor, not a byte or line offset.
+  //
+  // `flushTrailing` is true exactly when the caller already knows no further
+  // lines will ever be appended (the run has reached a terminal state), so a
+  // still-accumulating group at the end of the file (Claude Code splits one
+  // logical step across several lines sharing a message id) should be
+  // treated as complete rather than held back for a tick that will never
+  // come.
+  parseLog(text: string, flushTrailing: boolean): TimestampedEvent[];
 }

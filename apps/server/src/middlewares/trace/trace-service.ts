@@ -3,9 +3,13 @@ import { z } from "zod";
 // Codex-specific, and deliberately so: its only consumer is onRunnerEvent,
 // which reads Codex's own stdout stream. Runtime-agnostic span building goes
 // through the injected trace adapter instead.
+import { readFile } from "node:fs/promises";
 import { readStreamError } from "../../runtimes/codex.js";
-import { readOtlpLogs, type OtlpLogRecord } from "./otlp.js";
-import type { PartialUsage, RuntimeTraceAdapter } from "./runtime-events.js";
+import type {
+  NormalizedRuntimeEvent,
+  PartialUsage,
+  RuntimeTraceAdapter,
+} from "./runtime-events.js";
 import { detectSecretBindings } from "./secrets.js";
 import type { Redactor } from "./redaction.js";
 import type {
@@ -87,8 +91,15 @@ function emptyConversationScope(spawnSpanId: string | null): ConversationScope {
 
 const OUTPUT_CLIP = 4_000;
 const ARGUMENT_CLIP = 2_000;
-const PENDING_TTL_MS = 5 * 60_000;
-const PENDING_CAP = 1_000;
+// How often the live poller re-reads each bound conversation's session log
+// (the runtime's own rollout/transcript file) for new lines. Polling, not
+// fs.watch: this file is written across a Docker bind mount under
+// ContainerRuntimeRunner, and inotify propagation across Docker Desktop's
+// bind-mount layer (gRPC-FUSE/VirtioFS on macOS) is a known-flaky source of
+// missed change events. Polling is slower but has no such platform-dependent
+// failure mode, and this project's concurrency is low enough (single-process,
+// serial runs) that re-parsing a small text file this often is negligible.
+const SCRAPE_POLL_INTERVAL_MS = 400;
 
 function clip(text: string, limit: number) {
   if (text.length <= limit) return text;
@@ -256,15 +267,17 @@ export class TraceService {
   private readonly conversationToRun = new Map<string, string>();
   private readonly runs = new Map<string, RunState>();
   private readonly activeRunByAgent = new Map<string, string>();
-  private readonly pending = new Map<
-    string,
-    { records: OtlpLogRecord[]; since: number }
-  >();
+  private pollHandle: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private readonly store: TraceStore,
     private readonly redactor: Redactor,
     private readonly traceAdapter: RuntimeTraceAdapter,
+    // The runtime's own home directory (CODEX_HOME / CLAUDE_CONFIG_DIR) —
+    // where its adapter looks for the session log it never asked us for a
+    // path to. Not this server's data directory: we only ever read here,
+    // never write.
+    private readonly runtimeHomeDir: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
 
@@ -333,6 +346,7 @@ export class TraceService {
       unrecognizedEvents: 0,
       auditOf: run.auditOf ?? null,
       auditDepth: run.auditDepth ?? 0,
+      scrapeCursor: 0,
       spans: [],
     });
     this.store.appendSpan(run.id, {
@@ -405,10 +419,11 @@ export class TraceService {
     }
   }
 
-  // The runtime has named the conversation this run belongs to. Until this
-  // lands, every OTLP record the runtime exports correlates to an id nothing
-  // is listening for and is parked in `pending` — so a run whose conversation
-  // is never announced ends with a prompt span and nothing else.
+  // The runtime has named the conversation this run belongs to — this is
+  // also the id the runtime's own session log is named by (or contains), so
+  // this is what makes that log locatable at all. Until this lands, the live
+  // poller has no file to scrape for this run, so a run whose conversation is
+  // never announced ends with a prompt span and nothing else.
   //
   // Announced by the runner through RunnerRequest.onThread rather than
   // sniffed off the event stream here: Codex says it with a `thread.started`
@@ -729,79 +744,149 @@ export class TraceService {
     });
   }
 
-  ingestLogs(payload: unknown) {
-    const records = readOtlpLogs(payload);
-    if (records === null) {
-      return null;
-    }
-    let accepted = 0;
-    let buffered = 0;
-    let skipped = 0;
-    for (const record of records) {
-      const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
-      if (typeof conversationId !== "string" || conversationId.length === 0) {
-        skipped += 1;
-        continue;
-      }
-      const runId = this.conversationToRun.get(conversationId);
-      if (!runId) {
-        buffered += this.buffer(conversationId, record);
-        continue;
-      }
-      this.applyRecord(runId, record);
-      accepted += 1;
-    }
-    this.prunePending();
-    return { accepted, buffered, skipped };
+  // Best-effort diagnostic logging. A read that can throw on its own logging
+  // path defeats the point of being defensive about a file we don't control.
+  private log(message: string, error?: unknown) {
+    console.error("[trace-service] " + message, error);
   }
 
   private bindConversation(conversationId: string, runId: string) {
     this.conversationToRun.set(conversationId, runId);
-    const waiting = this.pending.get(conversationId);
-    if (waiting) {
-      this.pending.delete(conversationId);
-      for (const record of waiting.records) {
-        this.applyRecord(runId, record);
+  }
+
+  // Reconstructs enough RunState to keep appending spans to a trace whose
+  // run started in a *previous* process lifetime — the boot-time reconciler's
+  // case. Everything here is either read straight off the persisted trace
+  // (root/prompt span ids, prompt text, conversation id) or safe to start
+  // empty because whatever depended on it was already finalized by
+  // TraceStore's own crash recovery before this ever runs:
+  //   - turnSpanId starts null: any turn left "running" was already force-
+  //     closed with RESTART_CUTOFF_ERROR, so there is nothing valid left to
+  //     resume — applyRecord opens a fresh turn span for whatever comes next.
+  //   - toolSpans starts empty for the same reason: every open tool call was
+  //     already force-closed, so a tool_result record recovered after a crash
+  //     will not find a match and instead becomes its own new span — a
+  //     harmless, known wrinkle (two spans for one call instead of one
+  //     perfectly merged span) rather than reopening state the crash
+  //     recovery already finalized.
+  //   - conversationSpawn IS worth reconstructing: it is not touched by crash
+  //     recovery, and a recovered record for a subagent's conversation needs
+  //     it to attach under the right parent instead of a fresh root scope.
+  private ensureRunState(runId: string): RunState | null {
+    const existing = this.runs.get(runId);
+    if (existing) return existing;
+    const trace = this.store.get(runId);
+    if (!trace) return null;
+    const rootSpan = trace.spans.find(
+      (span) => span.kind === "run" && span.parentId === null,
+    );
+    if (!rootSpan) return null;
+    const promptSpan = trace.spans.find(
+      (span) => span.kind === "user_action" && span.name === "user.prompt",
+    );
+    const conversationSpawn = new Map<string, string>();
+    for (const span of trace.spans) {
+      if (span.kind !== "tool_call" || span.attributes.subagent !== true) continue;
+      const raw = span.attributes.receiverThreadIds;
+      if (typeof raw !== "string" || raw.length === 0) continue;
+      for (const threadId of raw.split(",")) {
+        if (threadId.length > 0) conversationSpawn.set(threadId, span.id);
       }
     }
-  }
-
-  private buffer(conversationId: string, record: OtlpLogRecord) {
-    const entry = this.pending.get(conversationId) ?? {
-      records: [],
-      since: Date.now(),
+    const state: RunState = {
+      agentId: trace.agentId,
+      rootSpanId: rootSpan.id,
+      promptSpanId: promptSpan?.id ?? rootSpan.id,
+      prompt: trace.prompt,
+      rootConversationId: trace.conversationId,
+      turnSpanId: null,
+      toolSpans: new Map(),
+      scopes: new Map(),
+      conversationSpawn,
+      completed: trace.status !== "running",
     };
-    if (entry.records.length >= PENDING_CAP) return 0;
-    entry.records.push(record);
-    this.pending.set(conversationId, entry);
-    return 1;
+    this.runs.set(runId, state);
+    return state;
   }
 
-  private prunePending() {
-    const cutoff = Date.now() - PENDING_TTL_MS;
-    for (const [conversationId, entry] of this.pending) {
-      if (entry.since < cutoff) this.pending.delete(conversationId);
+  // Starts polling every conversation this process has ever bound to a run
+  // for new session-log lines. Returns a function that stops it, for the
+  // shutdown path. Deliberately keeps polling a conversation even after its
+  // trace reaches a terminal status: the runtime's own file write is a
+  // separate channel from the runner's exit detection (stdout), so a
+  // trailing line (e.g. final usage) can legitimately land just after —
+  // caught by scrapeNewEvents's flushTrailing once the trace is terminal.
+  startScraping(): () => void {
+    this.pollHandle = setInterval(() => {
+      void this.pollBoundConversations();
+    }, SCRAPE_POLL_INTERVAL_MS);
+    return () => {
+      if (this.pollHandle) clearInterval(this.pollHandle);
+      this.pollHandle = null;
+    };
+  }
+
+  private async pollBoundConversations() {
+    for (const [conversationId, runId] of this.conversationToRun) {
+      await this.scrapeNewEvents(conversationId, runId);
     }
   }
 
-  private applyRecord(runId: string, record: OtlpLogRecord) {
-    const state = this.runs.get(runId);
+  // Shared by the live poller and the boot reconciler: locate this
+  // conversation's session log (the runtime's own file — Codex's rollout,
+  // Claude Code's transcript), re-parse it, apply whatever is past the
+  // trace's stored cursor, then persist the advanced cursor. The cursor only
+  // moves after every event up to it has been applied, so a crash mid-batch
+  // leaves it exactly where it was — nothing is ever marked applied before
+  // it truly is.
+  private async scrapeNewEvents(conversationId: string, runId: string) {
+    const trace = this.store.get(runId);
+    if (!trace) return;
+    const logPath = await this.traceAdapter.locateLog(this.runtimeHomeDir, conversationId);
+    // Not an error: a run whose CLI process hasn't created (or flushed) its
+    // session log yet. Nothing to do until a later tick finds it.
+    if (!logPath) return;
+    let text: string;
+    try {
+      text = await readFile(logPath, "utf8");
+    } catch (error) {
+      this.log("failed to read session log " + logPath, error);
+      return;
+    }
+    const flushTrailing = trace.status !== "running";
+    const events = this.traceAdapter.parseLog(text, flushTrailing);
+    const newEvents = events.slice(trace.scrapeCursor);
+    if (newEvents.length === 0) return;
+    for (const { event, timestamp } of newEvents) {
+      this.applyRecord(runId, conversationId, event, timestamp);
+    }
+    this.store.updateTrace(runId, (current) => {
+      current.scrapeCursor = events.length;
+    });
+  }
+
+  // Catches up every trace with a known conversation id, regardless of
+  // whether this process was the one that started its run. Called once at
+  // boot, after TraceStore.initialize() has already flipped any orphaned
+  // "running" trace to "failed" — a failed run still deserves its complete
+  // evidence trail up to the crash point, so this runs for every such trace,
+  // not only ones still "running".
+  async reconcileFromDisk(): Promise<void> {
+    for (const trace of this.store.list()) {
+      if (!trace.conversationId) continue;
+      this.bindConversation(trace.conversationId, trace.id);
+      await this.scrapeNewEvents(trace.conversationId, trace.id);
+    }
+  }
+
+  private applyRecord(
+    runId: string,
+    conversationId: string,
+    normalized: NormalizedRuntimeEvent,
+    timestamp: string,
+  ) {
+    const state = this.ensureRunState(runId);
     if (!state) return;
-    const timestamp =
-      typeof record.timestamp === "string"
-        ? record.timestamp
-        : this.now().toISOString();
-    const normalized = this.traceAdapter.normalize(record.attributes);
-    if (!normalized) {
-      this.store.updateTrace(runId, (trace) => {
-        trace.unrecognizedEvents += 1;
-      });
-      return;
-    }
-    const conversationId = record.attributes[this.traceAdapter.correlationAttribute];
-    if (typeof conversationId !== "string" || conversationId.length === 0) {
-      return;
-    }
     const scope = this.scopeFor(state, conversationId);
     const isRootScope = scope.spawnSpanId === null;
     const turnSpanId = this.ensureTurn(runId, state, timestamp);
@@ -990,10 +1075,10 @@ export class TraceService {
         // one thing the failure taxonomy exists to identify, and they never
         // produced a failing step.
         //
-        // These three all read the tool's output, which Claude Code's OTLP
-        // never carries (only input and byte sizes), so for that runtime they
-        // resolve to null/false. That is the correct answer for it, not a gap:
-        // there is no output to find a command failure in.
+        // These three all read the tool's output. Claude Code's own session
+        // transcript carries it in full (toolUseResult.stdout) — richer than
+        // the OTLP signal this used to read, which never carried more than
+        // input and byte sizes.
         const commandFailure = reportedSuccess
           ? readCommandFailure(normalized.output ?? "")
           : null;
@@ -1186,7 +1271,8 @@ export class TraceService {
   // equal to the spawn. The graph reads those fields and nothing else.
   //
   // Usage is rolled up here so an auditor's run accounts for its tokens the
-  // way a runtime's run does, where the same numbers arrive over OTLP.
+  // way a runtime's run does, where the same numbers are scraped from its
+  // own session log.
   recordModelCall(
     runId: string,
     span: TraceSpan,

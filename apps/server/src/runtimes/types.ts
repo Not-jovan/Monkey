@@ -32,8 +32,9 @@ export interface RuntimeDefinition {
   ): string[];
 
   // Parses one line of the runtime's stdout event stream. Distinct from the
-  // OTLP trace pipeline — this is how the caller gets the reply text,
-  // resumable thread/session id, and usage back into RunnerResult.
+  // trace pipeline (which scrapes this runtime's own session log file
+  // instead) — this is how the caller gets the reply text, resumable
+  // thread/session id, and usage back into RunnerResult.
   parseEventLine(
     line: string,
     parsed: ParsedEvents,
@@ -42,15 +43,15 @@ export interface RuntimeDefinition {
 
   // One-time side effects at boot (Codex: writes config.toml into homeDir;
   // Claude Code: no-op, it's configured entirely through env vars).
-  bootstrap(config: AppConfig, collectorToken: string): Promise<void>;
+  bootstrap(config: AppConfig): Promise<void>;
 
   // All env vars this runtime's process needs beyond PATH/HOME passthrough:
   // provider credential, home-dir var (host path — callers that need the
-  // container path override homeEnvVar themselves), OTLP telemetry vars.
-  // Computed fresh per run; used both as local child-process env and as the
-  // source for container --env flags, so neither runner implementation
-  // needs runtime-specific knowledge of what env vars matter.
-  processEnv(config: AppConfig, collectorToken: string): NodeJS.ProcessEnv;
+  // container path override homeEnvVar themselves). Computed fresh per run;
+  // used both as local child-process env and as the source for container
+  // --env flags, so neither runner implementation needs runtime-specific
+  // knowledge of what env vars matter.
+  processEnv(config: AppConfig): NodeJS.ProcessEnv;
 
   trace: RuntimeTraceAdapter;
 }

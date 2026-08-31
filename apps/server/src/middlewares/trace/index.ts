@@ -16,13 +16,26 @@ export async function createTraceMiddleware(input: {
     input.onStoreError,
   );
   await traceStore.initialize();
-  const traceService = new TraceService(traceStore, redactor, input.runtime.trace);
+  const traceService = new TraceService(
+    traceStore,
+    redactor,
+    input.runtime.trace,
+    input.runtime.homeDir(input.config),
+  );
+  // Catches up anything the runtime's own session log recorded but this
+  // process never scraped into spans before the last shutdown/crash, then
+  // starts polling for what arrives from here on. Order matters: after
+  // traceStore.initialize() has already flipped orphaned "running" traces to
+  // "failed".
+  await traceService.reconcileFromDisk();
+  const stopScraping = traceService.startScraping();
 
   return {
     traceStore,
     traceService,
     redactor,
     flush: () => traceStore.flush(),
+    stopScraping,
   };
 }
 

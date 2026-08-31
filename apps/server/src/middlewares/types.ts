@@ -25,5 +25,4 @@ export interface MiddlewareDeps {
   // correction routes report that correcting is unavailable rather than
   // applying an edit nothing would remember.
   correctionStore?: IntentCorrectionStore;
-  collectorToken: string;
 }

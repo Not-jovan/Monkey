@@ -84,6 +84,14 @@ export const traceRecordSchema = z.object({
   // otherwise, which is the whole reason auditing an auditor cannot run away.
   auditOf: z.string().nullable().default(null),
   auditDepth: z.number().default(0),
+  // How many events the runtime's own session log (its rollout/transcript
+  // file, scraped directly — not written by us) had already been parsed
+  // into the last time it was applied. Advanced only after every event up to
+  // that count has been fully applied, so a crash mid-batch can never leave
+  // it ahead of what's truly durable — the boot-time reconciler and the live
+  // poller both resume from here. Defaulted so traces written before this
+  // existed still parse.
+  scrapeCursor: z.number().default(0),
   spans: z.array(traceSpanSchema),
 });
 

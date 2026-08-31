@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { AgentService } from "./agent-service.js";
 import { createApp } from "./app.js";
@@ -17,14 +16,11 @@ import { WorkspaceManager } from "./workspace.js";
 
 const config = loadConfig();
 const runtime = selectRuntime(config);
-// Rotates every boot; runtime.bootstrap hands it to the Runtime as the OTLP
-// header the collector route requires.
-const collectorToken = randomUUID();
-await runtime.bootstrap(config, collectorToken);
+await runtime.bootstrap(config);
 
 const store = new JsonStore(path.join(config.dataDirectory, "launchpad.json"));
 const workspaces = new WorkspaceManager(config.workspaceRoot);
-const runner = createRunner(config, runtime, collectorToken);
+const runner = createRunner(config, runtime);
 
 const onStoreError = (message: string, error?: unknown) =>
   console.error(message, error);
@@ -75,12 +71,12 @@ const app = await createApp(config, service, {
   auditMemory: audit.auditMemory,
   contextService: context.contextService,
   correctionStore: intent.correctionStore,
-  collectorToken,
 });
 
 const shutdown = async (signal: string) => {
   app.log.info({ signal }, "Shutting down");
   await app.close();
+  trace.stopScraping();
   await trace.flush();
   await context.flush();
   await audit.flush();
