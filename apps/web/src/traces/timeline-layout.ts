@@ -1,6 +1,6 @@
 import type { TraceSpan } from "../types";
 import { orderedLaneIds } from "./canvas-layout";
-import { formatDuration } from "./format";
+import { formatDuration, lastRecordedWorkEndedAt } from "./format";
 import { isVisibleStep, laneIdForSpan, sortTime } from "./steps";
 
 export interface TimelineBar {
@@ -46,11 +46,22 @@ export function layoutTimeline(spans: TraceSpan[], nowMs: number) {
 
   let startedAt = Number.POSITIVE_INFINITY;
   let endedAt = 0;
+  const workEndedAt = lastRecordedWorkEndedAt(spans);
+  const workEndedMs = workEndedAt ? Date.parse(workEndedAt) : null;
   const ranges = steps.map((span) => {
     const start = new Date(span.startedAt).getTime();
-    const recordedEnd = span.endedAt
+    let recordedEnd = span.endedAt
       ? new Date(span.endedAt).getTime()
       : nowMs;
+    // A span closed without a measured duration was cut off. Stretching it to
+    // "when we noticed" makes a short run look like it filled the idle gap.
+    if (
+      span.durationMs === null &&
+      span.endedAt &&
+      workEndedMs !== null
+    ) {
+      recordedEnd = Math.min(recordedEnd, workEndedMs);
+    }
     const end = Math.max(recordedEnd, start);
     if (start < startedAt) startedAt = start;
     if (end > endedAt) endedAt = end;

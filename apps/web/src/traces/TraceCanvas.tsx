@@ -17,7 +17,7 @@ import {
   subagentCallLabel,
   subagentResultHeadline,
 } from "./steps";
-import { formatDuration, spanDuration } from "./format";
+import { formatDuration, displaySpanDurationMs } from "./format";
 
 // Gaps shorter than this are not worth a label; the arrow matters more.
 const GAP_LABEL_MIN_MS = 1_000;
@@ -398,7 +398,7 @@ export function TraceCanvas({
             let durationLabel = "running";
             if (span.status !== "running") {
               durationLabel = formatDuration(
-                span.durationMs ?? spanDuration(span.startedAt, span.endedAt),
+                displaySpanDurationMs(span, spans),
               );
             }
             if (failing) durationLabel += " · failing step";

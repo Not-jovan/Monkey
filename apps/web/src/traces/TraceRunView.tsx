@@ -4,7 +4,7 @@ import type { AuditTraceStep, TraceRecord, TraceSpan } from "../types";
 import { isSuccessfulAudit } from "./audit-status";
 import { parseCodexFailure, readCommand } from "./codex-error";
 import { FailureBlock } from "./FailureBlock";
-import { formatDuration, spanDuration } from "./format";
+import { formatDuration, spanDuration, displayTraceEndedAt } from "./format";
 import { stepContext, stepReturn, stepReturnNote } from "./span-context";
 import { stepHeadline } from "./steps";
 import { TextBlock } from "./TextBlock";
@@ -174,7 +174,10 @@ export function TraceRunView({
   let durationLabel = "—";
   if (trace.endedAt) {
     durationLabel = formatDuration(
-      spanDuration(trace.startedAt, trace.endedAt),
+      spanDuration(
+        trace.startedAt,
+        displayTraceEndedAt(trace.endedAt, trace.spans),
+      ),
     );
   } else {
     durationLabel = formatDuration(

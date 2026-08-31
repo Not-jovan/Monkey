@@ -12,6 +12,65 @@ interface TraceStoreEvents {
   "trace-completed": [{ trace: TraceRecord }];
 }
 
+export const RESTART_CUTOFF_ERROR = "Server restarted during this run";
+
+// Last time this run actually recorded a step. Spans that were only closed
+// because the process died do not count — using wall-clock at boot made a
+// 12-second auditor look like it ran until someone restarted the server.
+function lastObservedEndedAt(trace: TraceRecord): string {
+  let latest = trace.startedAt;
+  for (const span of trace.spans) {
+    if (!span.endedAt) continue;
+    if (span.error === RESTART_CUTOFF_ERROR) continue;
+    if (span.endedAt > latest) latest = span.endedAt;
+  }
+  return latest;
+}
+
+function closeSpanAt(span: TraceSpan, endedAt: string, error: string) {
+  span.status = "error";
+  span.error = span.error ?? error;
+  span.endedAt = endedAt;
+  span.durationMs =
+    new Date(endedAt).getTime() - new Date(span.startedAt).getTime();
+}
+
+function failAbandonedTrace(trace: TraceRecord) {
+  const endedAt = lastObservedEndedAt(trace);
+  trace.status = "failed";
+  trace.endedAt = endedAt;
+  for (const span of trace.spans) {
+    if (span.status !== "running") continue;
+    closeSpanAt(span, endedAt, RESTART_CUTOFF_ERROR);
+  }
+}
+
+// A previous boot already marked the run failed, but stamped endedAt at
+// notice-time. Pull it back to last real work so the duration stops growing.
+function clampRestartCutoff(trace: TraceRecord): boolean {
+  if (
+    !trace.spans.some((span) => span.error === RESTART_CUTOFF_ERROR)
+  ) {
+    return false;
+  }
+  const endedAt = lastObservedEndedAt(trace);
+  if (trace.endedAt === endedAt) {
+    const stretched = trace.spans.some(
+      (span) =>
+        span.error === RESTART_CUTOFF_ERROR && span.endedAt !== endedAt,
+    );
+    if (!stretched) return false;
+  }
+  trace.endedAt = endedAt;
+  for (const span of trace.spans) {
+    if (span.error !== RESTART_CUTOFF_ERROR) continue;
+    span.endedAt = endedAt;
+    span.durationMs =
+      new Date(endedAt).getTime() - new Date(span.startedAt).getTime();
+  }
+  return true;
+}
+
 export class TraceStore extends EventEmitter<TraceStoreEvents> {
   private readonly traces = new Map<string, TraceRecord>();
   private readonly writeQueues = new Map<string, Promise<void>>();
@@ -43,17 +102,15 @@ export class TraceStore extends EventEmitter<TraceStoreEvents> {
           JSON.parse(await readFile(filePath, "utf8")),
         );
         if (trace.status === "running") {
-          trace.status = "failed";
-          trace.endedAt = trace.endedAt ?? new Date().toISOString();
-          for (const span of trace.spans) {
-            if (span.status === "running") {
-              span.status = "error";
-              span.error = span.error ?? "Server restarted during this run";
-              span.endedAt = span.endedAt ?? trace.endedAt;
-            }
-          }
+          failAbandonedTrace(trace);
+          this.traces.set(trace.id, trace);
+          this.persistTrace(trace.id);
+        } else if (clampRestartCutoff(trace)) {
+          this.traces.set(trace.id, trace);
+          this.persistTrace(trace.id);
+        } else {
+          this.traces.set(trace.id, trace);
         }
-        this.traces.set(trace.id, trace);
         this.indexAudit(trace);
       } catch {
         // Skip unreadable files rather than refusing to boot.

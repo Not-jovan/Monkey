@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Konva from "konva";
 import { Group, Layer, Rect, Stage, Text } from "react-konva";
 import type { TraceSpan } from "../types";
-import { formatDuration, spanDuration } from "./format";
+import { formatDuration, displaySpanDurationMs } from "./format";
 import { isErrorStep, stepHeadline } from "./steps";
 import {
   clampTimelinePan,
@@ -263,9 +263,7 @@ export function TraceTimeline({
                   const selected = span.id === selectedId;
                   const failing = span.id === failingSpanId;
                   const warnings = warningsBySpan.get(span.id) ?? 0;
-                  const duration =
-                    span.durationMs ??
-                    spanDuration(span.startedAt, span.endedAt);
+                  const duration = displaySpanDurationMs(span, spans);
                   const label = stepHeadline(span);
                   const meta =
                     formatDuration(duration) +
@@ -337,13 +335,7 @@ export function TraceTimeline({
             >
               {stepHeadline(hovered.bar.span)}
               {" · "}
-              {formatDuration(
-                hovered.bar.span.durationMs ??
-                  spanDuration(
-                    hovered.bar.span.startedAt,
-                    hovered.bar.span.endedAt,
-                  ),
-              )}
+              {formatDuration(displaySpanDurationMs(hovered.bar.span, spans))}
             </div>
           )}
         </div>

@@ -112,14 +112,68 @@ describe("TraceStore", () => {
     const open = trace("33333333-3333-4333-8333-333333333333");
     store.create(open);
     store.appendSpan(open.id, span("s1", open.id));
+    store.appendSpan(open.id, {
+      ...span("s2", open.id),
+      id: "s2",
+      name: "tool.exec_command",
+      kind: "tool_call",
+      status: "ok",
+      startedAt: "2026-08-26T12:00:01.000Z",
+      endedAt: "2026-08-26T12:00:12.000Z",
+      durationMs: 11_000,
+    });
     await store.flush();
 
     const recovered = new TraceStore(directory);
     await recovered.initialize();
     const restored = recovered.get(open.id);
     expect(restored?.status).toBe("failed");
+    expect(restored?.endedAt).toBe("2026-08-26T12:00:12.000Z");
     expect(restored?.spans[0]?.status).toBe("error");
     expect(restored?.spans[0]?.error).toContain("restarted");
+    expect(restored?.spans[0]?.endedAt).toBe("2026-08-26T12:00:12.000Z");
+    expect(restored?.spans[0]?.durationMs).toBe(12_000);
+  });
+
+  it("pulls a restart-stamped duration back to last recorded work", async () => {
+    const { directory } = await makeStore();
+    const abandoned = {
+      ...trace("44444444-4444-4444-8444-444444444444"),
+      status: "failed" as const,
+      startedAt: "2026-08-31T02:01:16.088Z",
+      endedAt: "2026-08-31T02:15:06.619Z",
+      spans: [
+        {
+          ...span("root", "44444444-4444-4444-8444-444444444444"),
+          status: "error" as const,
+          endedAt: "2026-08-31T02:15:06.619Z",
+          durationMs: null,
+          error: "Server restarted during this run",
+        },
+        {
+          ...span("step", "44444444-4444-4444-8444-444444444444"),
+          id: "step",
+          name: "audit.step.summary",
+          kind: "model_call" as const,
+          status: "ok" as const,
+          startedAt: "2026-08-31T02:01:16.088Z",
+          endedAt: "2026-08-31T02:01:28.242Z",
+          durationMs: 12_154,
+          error: null,
+        },
+      ],
+    };
+    await writeFile(
+      path.join(directory, abandoned.id + ".json"),
+      JSON.stringify(abandoned) + "\n",
+      "utf8",
+    );
+
+    const recovered = new TraceStore(directory);
+    await recovered.initialize();
+    const restored = recovered.get(abandoned.id);
+    expect(restored?.endedAt).toBe("2026-08-31T02:01:28.242Z");
+    expect(restored?.spans[0]?.endedAt).toBe("2026-08-31T02:01:28.242Z");
   });
 
   it("indexes an auditor trace against what it audited, across a restart", async () => {

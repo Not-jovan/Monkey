@@ -149,6 +149,32 @@ describe("layoutTimeline", () => {
     expect(layout.durationMs).toBe(10_000);
     expect(layout.bars[0]?.width).toBeCloseTo(1);
   });
+
+  it("does not stretch a cut-off run to when the process died", () => {
+    const root = span({
+      id: "root",
+      name: "agent.run",
+      kind: "run",
+      status: "error",
+      startedAt: "2026-08-31T02:01:16.088Z",
+      endedAt: "2026-08-31T02:15:06.619Z",
+      durationMs: null,
+      error: "Server restarted during this run",
+    });
+    const step = span({
+      id: "step",
+      name: "audit.step.summary",
+      kind: "model_call",
+      startedAt: "2026-08-31T02:01:16.088Z",
+      endedAt: "2026-08-31T02:01:28.242Z",
+      durationMs: 12_154,
+    });
+    const layout = layoutTimeline(
+      [root, step],
+      Date.parse("2026-08-31T02:15:06.619Z"),
+    );
+    expect(layout.durationMs).toBe(12_154);
+  });
 });
 
 describe("timeline zoom and pan", () => {

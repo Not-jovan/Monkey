@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TraceSpan } from "../types";
-import { formatDuration, formatTime, spanDuration } from "./format";
+import { formatDuration, formatTime, displaySpanDurationMs } from "./format";
 import { orderedSteps, stepHeadline, stepRole, stepStatusText } from "./steps";
 
 // The default view of a run: real DOM, so it is keyboard navigable, readable
@@ -80,7 +80,7 @@ export function TraceStepList({
     >
       {steps.map(({ span, depth }, index) => {
         const warnings = warningsBySpan.get(span.id) ?? 0;
-        const duration = span.durationMs ?? spanDuration(span.startedAt, span.endedAt);
+        const duration = displaySpanDurationMs(span, spans);
         const failing = span.id === failingSpanId;
         const selected = span.id === selectedId;
         return (
