@@ -706,7 +706,13 @@ export class TraceService {
         if (kind === "command_execution") {
           const turnSpanId = this.ensureTurn(runId, state, timestamp);
           const command = rawRunnerCommand(item.data);
-          const argumentsJson = command ? JSON.stringify({ cmd: command }) : "";
+          const rawArgumentsJson = command
+            ? JSON.stringify({ cmd: command })
+            : "";
+          const requestSecrets = this.secretNames(rawArgumentsJson);
+          const argumentsJson = rawArgumentsJson
+            ? this.redactor.redactText(clip(rawArgumentsJson, ARGUMENT_CLIP))
+            : "";
           if (event.type === "item.started") {
             this.closeRawModelSpan(runId, state, timestamp);
             const spanId = randomUUID();
@@ -731,6 +737,9 @@ export class TraceService {
                   ? { causedBySpanId: scope.lastModelCallSpanId }
                   : {}),
                 ...(argumentsJson ? { arguments: argumentsJson } : {}),
+                ...(requestSecrets.length > 0
+                  ? { secretsInRequest: requestSecrets.join(",") }
+                  : {}),
               },
               error: null,
             });

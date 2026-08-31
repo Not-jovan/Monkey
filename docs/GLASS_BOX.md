@@ -14,12 +14,15 @@ store. It never mutates a trace, and an audit failure never blocks a Run.
 flowchart LR
     User["User"] -->|message| API["Fastify control plane"]
     API --> Intent["Intent classifier"]
-    API --> Runtime["Agent Runtime\n(Codex or Claude Code)"]
+    API --> Runner["Agent runner"]
+    Runner -->|launch| Runtime["Agent Runtime\n(Codex or Claude Code)"]
     Intent -->|standing spec| Runtime
-    Runtime -->|writes stdout JSONL| EventFile[("events.jsonl")]
-    EventFile --> Scraper["Durable event scraper"]
-    Scraper --> Redact["Secret detection + masking"]
-    Redact --> Traces[("Traces")]
+    Runtime -->|stdout JSONL pipe| Runner
+    Runner -->|append| EventFile[("runtime-events/<runId>/events.jsonl")]
+    EventFile -->|complete records| Scraper["Resumable event scraper"]
+    State[("scrape-state.json")] -.->|byte offset + partial line| Scraper
+    Scraper --> TraceService["TraceService\nsecret detection + masking + span assembly"]
+    TraceService --> Traces[("traces/<traceId>.json")]
     Traces -->|span events| Audit["Auditor"]
     Intent --> Audit
     Audit --> Audits[("Audits")]
@@ -27,35 +30,27 @@ flowchart LR
     Traces --> UI
 ```
 
-The trust boundary sits at the collector. The Runtime cannot hold the
-operator's bearer token, so it authenticates with a per-boot collector token
-that each runtime's `RuntimeDefinition` embeds into whatever telemetry
-configuration mechanism that runtime uses. Codex's `codexRuntime.bootstrap`
-(`apps/server/src/runtimes/codex.ts`) writes it into `config.toml`; Claude
-Code has no config file, so `claudeCodeRuntime.processEnv`
-(`apps/server/src/runtimes/claude-code.ts`) passes it as an
-`OTEL_EXPORTER_OTLP_LOGS_HEADERS` env var on every process launch instead.
-Detection and masking run before anything is written either way, so the
-stores never receive a plaintext credential.
+The trust boundary is the child process's stdout pipe. The Runtime does not call
+a control-plane collector and never receives the operator bearer token. The
+control-plane runner owns that pipe and appends stdout to a host-side
+`events.jsonl` file with mode `0600`. The scraper reads only complete lines and
+stores its durable byte offset and any partial line in the adjacent
+`scrape-state.json` file.
 
-Records find their run by conversation id — `conversation.id` for Codex,
-`session.id` for Claude Code, named by each `RuntimeDefinition.trace`. The
-runtime picks that id at run time, so nothing can be correlated until it says
-what it is: the runner announces it through `RunnerRequest.onThread` the
-moment its own stdout parser sees it, and `TraceService.onConversation` binds
-it. Records that arrive before the announcement are held and replayed on
-binding rather than dropped, since telemetry regularly outruns stdout. A run
-whose id is never announced ends with a prompt span and nothing else — which
-is exactly what Claude Code runs used to do, because the binding read Codex's
-`thread.started` event and Claude Code announces itself with `system`/`init`
-instead.
+The untrusted boundary ends inside `TraceService`. It detects credential names
+before masking, retains only those names for policy evaluation, recursively
+masks raw runtime events, and separately masks every derived prompt, tool
+argument, output, and error before handing the record to `TraceStore`. The
+auditor consequently reads persisted, already-masked evidence and cannot put a
+plaintext credential back into an audit.
 
-Telemetry stays on the machine: Codex 0.111.0's generated `[otel]` block
-pins `metrics_exporter` and `trace_exporter` to `none`, overriding its
-default of reporting metrics to its own endpoint. Claude Code is configured
-the same way in spirit — `OTEL_METRICS_EXPORTER=none` and
-`OTEL_TRACES_EXPORTER=none` in `processEnv` — just via env vars rather than
-a file.
+If collection is interrupted, stdout continues to accumulate in the event
+file. At boot, a terminal trace marked as incomplete is reduced to its root and
+prompt spans, its usage and derived steps are cleared, and the persisted event
+file is replayed from the beginning. The normal finalization path then rebuilds
+the trace and can trigger its audit. Runtime event collection has no active
+HTTP collector route; the OTLP parsers retained in the codebase are internal
+compatibility code, not the deployed ingestion boundary.
 
 ## Diagnosing a failure
 
@@ -540,8 +535,8 @@ insertion order and the ids are random UUIDs, so the order has to be carried
 explicitly rather than left to survive a JSON round trip.
 
 Everything under `/api` is covered by the operator bearer token when
-`APP_AUTH_TOKEN` is set. The collector route is not, and uses its own per-boot
-token instead.
+`APP_AUTH_TOKEN` is set. Runtime evidence arrives through the local event file,
+not through an unauthenticated or separately authenticated HTTP route.
 
 ## Storage
 
@@ -555,6 +550,10 @@ under `APP_DATA_DIR`:
 .data/audits/<chatId>.json    intent-pinned findings for that chat
 .data/intent/<agentId>.json   insertion-ordered map of intent versions
 .data/context/<chatId>.json   what that run carried out, for the next one
+.data/runtime-events/<chatId>/events.jsonl
+                              append-only Runtime stdout evidence
+.data/runtime-events/<chatId>/scrape-state.json
+                              durable scraper offset, completion and partial line
 .data/agent-runs/<agentId>/<chatId>/
                               one <stepId>.md per audited step, plus
                               steps-meta.json indexing their summaries
@@ -584,8 +583,8 @@ record; it does not own it.
 A failed Run also leaves a transcript at `.data/run-logs/<runId>.log`. It is
 not part of the trio above and the auditor never reads it: it is written by
 the runner, only on failure, and holds the Runtime's argv plus its raw stdout
-and stderr — the material you need when a Run dies before emitting any
-telemetry. It goes through the same redactor and the same `0600` mode as
+and stderr — the material you need when a Run dies before emitting a complete
+event. It goes through the same redactor and the same `0600` mode as
 everything else here, so the shape-based masking caveat under Limitations
 applies to it too.
 
@@ -598,23 +597,25 @@ Run as live when nothing is running.
 npm run check
 ```
 
-Runs typecheck, the test suite, and both builds. The suite covers OTLP parsing,
-span assembly, masking, storage, route auth, the audit policies, intent
-classification mechanics, failure attribution, and the prior-context chain.
+Runs typecheck, the server test suite, and both builds. The restored security
+and audit suites cover configured and shape-based masking, the persisted trace
+redaction boundary, the 20-case deterministic policy fixture, network and
+secret detection, suspicious sinks, repeated failures, verdict merging, and
+degraded-model behavior. The existing suites continue to cover the Runtime,
+scraper, control-plane routes, storage, and Agent lifecycle.
 
 Typecheck covers test files as well as sources (`tsconfig.test.json`). They were
 excluded before, which is how a runner result that had grown a required field
 reached the suite as a runtime `TypeError` rather than a compile error.
 
-Two properties are worth naming because they are the ones most easily broken by
-a later change:
+Two restored properties are worth naming because they are easy to break:
 
-- **Prior context is established without a model.** `context-store.test.ts`
-  drives a full chain with no auditor wired in at all and asserts the digest,
-  the thread keying, and survival across a restart.
-- **A failure is never attributed to the Agent by default.** `failures.test.ts`
-  covers every rule in the taxonomy, and an unrecognised failure falls back to
-  `platform` rather than `agent`.
+- **Masking is a persistence boundary.** The integration test drives a raw
+  Runtime event through `TraceService` and asserts that neither the trace file
+  nor the API-facing record contains the planted plaintext credential.
+- **Deterministic evidence survives model failure.** Network and credential
+  facts remain in the step report with degraded audit health when a judged
+  check cannot answer.
 
 The audit policies are verified against the 20-case dataset from the audit
 plan, kept verbatim at
@@ -687,34 +688,14 @@ Agent already receives the key in its process environment, so this grants no new
 access, but the platform does not keep secrets off disk entirely. Clear the
 snapshots before recording a demo and rotate the key afterwards.
 
-**Claude Code's telemetry never carries tool output content.** Confirmed
-against a live run: even with `OTEL_LOG_TOOL_DETAILS=1` set, Claude Code's
-OTLP logs signal only ever delivers tool call *input* (as two JSON strings,
-`tool_parameters` and `tool_input`) and byte sizes — never the output text
-itself, unlike Codex which reports it inline. The secret-detection and
-network-whitelist checks read both call arguments and output off span
-attributes, so for a Claude Code-backed Agent they only ever see the input
-half of a tool call. See
-`apps/server/src/middlewares/trace/claude-code-events.ts` for the field-level detail.
-
-**Claude Code's model calls are logged after the tool calls they cause.**
-The CLI emits `tool_decision` the moment a tool-use block finishes streaming,
-but only logs `api_request` when the whole call completes — so on the wire a
-tool decision can precede the model call that produced it (measured on a live
-run: decision at `+51.035s`, its own request logged at `+51.123s`). Span
-*times* are still right, because the request's span is backdated by its
-reported duration, but two things derived from arrival order are one step out
-of phase for this runtime: the `Model · after <tool>` labels, and the
-`causedBySpanId` link the UI presents as a likely cause. Codex reports the
-call first and is unaffected.
-
-**A runtime's background model calls are filtered by name, not by nature.**
-Claude Code names its session with a separate haiku call on the same telemetry
-stream; unfiltered it became the run's first model-call span and billed its
-tokens to the agent. It is excluded by `query_source`
-(`BACKGROUND_QUERY_SOURCES` in `apps/server/src/runtimes/claude-code.ts`),
-which is a denylist of the sources observed so far — a new one would surface
-as an extra span rather than being silently swallowed.
+**Claude Code's direct stream currently produces coarser step evidence.** The
+active pipeline records Claude Code's `stream-json` stdout, and its runner
+parser reliably extracts the session id, final result, failures, model and
+usage. The raw step assembler has richer handling for Codex's item events than
+for Claude Code's assistant/tool content blocks, so Claude-backed traces do not
+currently have the same tool-argument and tool-output fidelity. The OTLP
+normalizers retained for compatibility are not connected to an active HTTP
+collector and should not be mistaken for evidence the deployed path receives.
 
 **The follow-through checks read summaries, not steps.** Both the forward trace
 and the backtrace judge from each step's recorded one-line summary, so a step

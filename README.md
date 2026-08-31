@@ -1,5 +1,7 @@
 # Monkey Auditor, Agent Tracing and Auditing
 
+**Selected track: Track A — The Glass Box (Trace and Audit).**
+
 ## Problem
 You cannot improve what you cannot trace.
 
@@ -11,28 +13,31 @@ We propose a middleware that traces through agent runs and audit it.
 ### Integration Points
 ```mermaid
 flowchart LR
-    UI["React Web UI"] --> API["Fastify control plane"]
-    API --> Store["JSON metadata and Agent workspaces"]
-    API --> Runtime{"Runtime provider"}
-    Runtime -->|Local POC| Container["Disposable Docker / Colima / Podman container"]
-    Runtime -->|ECS profile| Codex["Codex CLI in application container"]
-    Container --> Ark["Volcengine Ark Responses API"]
-    Codex --> Ark
-    API -->|run start / stop| Tracer["Tracer"]
-    Runtime -->|launches| Runner["Agent runner"]
-    Runner -->|captures stdout JSONL| EventFile[("Event File (events.jsonl)")]
-    EventFile -->|reads new bytes| Scraper["Event scraper"]
-    EventFile -.->|replays incomplete runs after restart| Scraper
-    ScrapeState[("scrape-state.json")] -.->|resume byte pointer| Scraper
-    Scraper -->|reconstructs runtime steps| Tracer["Tracer"]
-    Tracer --> Traces[("Traces\nagent + auditor")]
-    Traces -->|complete evidence only| Auditor["Auditor"]
+    subgraph Control["Control plane / trust boundary"]
+        UI["React Web UI"] --> API["Fastify API / AgentService"]
+        API --> Store["JSON metadata and Agent workspaces"]
+        API --> Runner["Agent runner"]
+        Runner -->|append| EventFile[("runtime-events/<runId>/events.jsonl")]
+        Scraper["Resumable event scraper"] --> Tracer["TraceService\nredact + assemble spans"]
+        Tracer --> Traces[("traces/<traceId>.json\nagent + auditor")]
+        Traces -->|complete evidence only| Auditor["Auditor"]
+        Auditor --> Audits[("audits + auditor memory")]
+        Traces --> UI
+        Audits --> UI
+    end
+
+    subgraph RuntimeBoundary["Agent Runtime / failure boundary"]
+        Runner --> Container["Disposable local container\nor ECS application container"]
+        Container --> Ark["Volcengine Ark Responses API"]
+        Container -->|stdout JSONL pipe| Runner
+    end
+
+    EventFile -->|read new bytes| Scraper
+    EventFile -.->|replay incomplete terminal trace| Scraper
+    ScrapeState[("scrape-state.json")] -.->|durable byte offset| Scraper
     Auditor --> ArkRunner["ArkRunner"]
     ArkRunner --> Ark
     Auditor -->|audit run| Tracer
-    Auditor --> Audits[("Audits")]
-    Traces --> UI
-    Audits --> UI
 
     style EventFile fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
     style Scraper fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
@@ -43,10 +48,15 @@ flowchart LR
     style Audits fill:#f39c12,stroke:#d35400,stroke-width:3px,color:#ffffff
 ```
 
-Each runner dumps its event logs to the events jsonl file. The runner is responsible for ensuring that the logs are written. 
-This file gets scraped by the `Scraper`, the traces normalized to an output the `Auditor` can use to audit.
+The runner appends Runtime stdout to `runtime-events/<runId>/events.jsonl` with
+mode `0600`. The scraper reads only complete JSONL records and persists its byte
+offset and partial line in `scrape-state.json`. `TraceService` masks the raw
+event and every derived prompt, argument, output, and error before `TraceStore`
+persists it or the API returns it to the browser.
 
-In the event that the scraper is inaccessible, the logs are still written by the runner. We can retry when the Scraper is available in the future.
+If the scraper is disrupted, the event file remains the durable evidence
+source. On restart, an incomplete terminal trace is reset to its root evidence,
+the event file is replayed from the beginning, and the trace is finalized again.
 
 #### Try it out yourself
 Shut off the POC. Run
@@ -267,4 +277,3 @@ When `APP_AUTH_TOKEN` is set, every `/api/` route except `/api/health` and
 The Agent runner writes runtime JSONL to the local event file. The durable
 scraper reads that file, checkpoints its byte position, and sends the parsed
 events to the Tracer. Runtime event collection does not use an HTTP collector.
-
