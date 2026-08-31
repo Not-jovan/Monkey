@@ -22,10 +22,11 @@ flowchart LR
     Runtime -->|launches| Runner["Agent runner"]
     Runner -->|captures stdout JSONL| EventFile[("Event File (events.jsonl)")]
     EventFile -->|reads new bytes| Scraper["Event scraper"]
-    Scraper -->|writes scraped events| Tracer["Tracer"]
-    Scraper -.->|persists checkpoint| ScrapeState[("scrape-state.json")]
+    EventFile -.->|replays incomplete runs after restart| Scraper
+    ScrapeState[("scrape-state.json")] -.->|resume byte pointer| Scraper
+    Scraper -->|reconstructs runtime steps| Tracer["Tracer"]
     Tracer --> Traces[("Traces\nagent + auditor")]
-    Traces -->|read only| Auditor["Auditor"]
+    Traces -->|complete evidence only| Auditor["Auditor"]
     Auditor --> ArkRunner["ArkRunner"]
     ArkRunner --> Ark
     Auditor -->|audit run| Tracer
