@@ -58,14 +58,19 @@ export function runtimeEventStatePath(
   dataDirectory: string,
   runId: string,
 ): string {
-  return path.join(runtimeEventDirectory(dataDirectory, runId), "scrape-state.json");
+  return path.join(
+    runtimeEventDirectory(dataDirectory, runId),
+    "scrape-state.json",
+  );
 }
 
 class ScrapeStateStore {
   private readonly states = new Map<string, ScrapeState>();
   private readonly queues = new Map<string, Promise<void>>();
 
-  async load(filePath: string): Promise<{ state: ScrapeState; exists: boolean }> {
+  async load(
+    filePath: string,
+  ): Promise<{ state: ScrapeState; exists: boolean }> {
     const cached = this.states.get(filePath);
     if (cached) {
       return {
@@ -94,16 +99,21 @@ class ScrapeStateStore {
     const next = { ...state };
     this.states.set(filePath, next);
     const file = statePathFor(filePath);
-    const queued = (this.queues.get(filePath) ?? Promise.resolve()).then(async () => {
-      await mkdir(path.dirname(file), { recursive: true });
-      const temporary = file + ".tmp";
-      await writeFile(temporary, JSON.stringify(next, null, 2) + "\n", {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      await rename(temporary, file);
-    });
-    this.queues.set(filePath, queued.catch(() => undefined));
+    const queued = (this.queues.get(filePath) ?? Promise.resolve()).then(
+      async () => {
+        await mkdir(path.dirname(file), { recursive: true });
+        const temporary = file + ".tmp";
+        await writeFile(temporary, JSON.stringify(next, null, 2) + "\n", {
+          encoding: "utf8",
+          mode: 0o600,
+        });
+        await rename(temporary, file);
+      },
+    );
+    this.queues.set(
+      filePath,
+      queued.catch(() => undefined),
+    );
     await queued;
   }
 }
@@ -128,7 +138,9 @@ interface RuntimeEventScraperOptions {
   runId: string;
   filePath: string;
   onEvent: (event: Record<string, unknown>) => void | Promise<void>;
-  onProblem?: ((problem: RuntimeEventStreamProblem) => void | Promise<void>) | undefined;
+  onProblem?:
+    | ((problem: RuntimeEventStreamProblem) => void | Promise<void>)
+    | undefined;
   isTerminalEvent: (event: Record<string, unknown>) => boolean;
   disrupted: boolean;
 }
@@ -216,33 +228,38 @@ class RuntimeEventScraper {
       throw new MockTracerDisruptionError(reason);
     }
 
-    const fileInfo = await stat(this.options.filePath).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    });
+    const fileInfo = await stat(this.options.filePath).catch(
+      (error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      },
+    );
     if (!fileInfo) return;
 
     const fileSize = fileInfo.size;
-    if (fileSize < state.ptr) {
+    const partialBytes = Buffer.byteLength(state.partialLine, "utf8");
+    const readStart = state.ptr + partialBytes;
+    if (fileSize < readStart) {
       await this.markReset(state);
       return;
     }
-    if (fileSize === state.ptr) return;
+    if (fileSize === readStart) return;
 
-    const bytes = await readRange(this.options.filePath, state.ptr, fileSize);
+    const bytes = await readRange(this.options.filePath, readStart, fileSize);
     let text = state.partialLine + bytes.toString("utf8");
     state.partialLine = "";
 
     const lines = text.split("\n");
     const completeLines = text.endsWith("\n")
-      ? lines
+      ? lines.slice(0, -1)
       : (() => {
           state.partialLine = lines.pop() ?? "";
           return lines;
         })();
 
     for (const line of completeLines) {
-      const eventSize = Buffer.byteLength(line, "utf8") + Buffer.byteLength("\n", "utf8");
+      const eventSize =
+        Buffer.byteLength(line, "utf8") + Buffer.byteLength("\n", "utf8");
       if (line.trim().length === 0) {
         state.ptr += eventSize;
         await this.stateStore.save(this.options.filePath, state);
@@ -264,7 +281,11 @@ class RuntimeEventScraper {
 
       const event = runtimeEventSchema.safeParse(parsed);
       if (!event.success) {
-        await this.markMalformed("Runtime JSONL event failed schema validation", line, state);
+        await this.markMalformed(
+          "Runtime JSONL event failed schema validation",
+          line,
+          state,
+        );
         return;
       }
 
@@ -334,7 +355,10 @@ class RuntimeEventFile {
 
   constructor(private readonly filePath: string) {}
 
-  static async create(dataDirectory: string, runId: string): Promise<RuntimeEventFile> {
+  static async create(
+    dataDirectory: string,
+    runId: string,
+  ): Promise<RuntimeEventFile> {
     const directory = runtimeEventDirectory(dataDirectory, runId);
     await mkdir(directory, { recursive: true });
     const filePath = runtimeEventFilePath(dataDirectory, runId);
@@ -377,11 +401,16 @@ export async function startRuntimeEventPipeline(input: {
   dataDirectory: string;
   runId: string;
   onEvent: (event: Record<string, unknown>) => void | Promise<void>;
-  onProblem?: ((problem: RuntimeEventStreamProblem) => void | Promise<void>) | undefined;
+  onProblem?:
+    | ((problem: RuntimeEventStreamProblem) => void | Promise<void>)
+    | undefined;
   isTerminalEvent: (event: Record<string, unknown>) => boolean;
   disrupted?: boolean | undefined;
 }): Promise<RuntimeEventPipeline> {
-  const writer = await RuntimeEventFile.create(input.dataDirectory, input.runId);
+  const writer = await RuntimeEventFile.create(
+    input.dataDirectory,
+    input.runId,
+  );
   const scraper = new RuntimeEventScraper({
     runId: input.runId,
     filePath: writer.path(),
