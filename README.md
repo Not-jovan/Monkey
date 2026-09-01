@@ -4,7 +4,7 @@
 
 See [Demo](https://youtu.be/cAqrO3ge7R8)
 
-**Selected track: Track A — Agent Launchpad: Design and Build Lightweight Agent Middleware**
+**Selected track: Track #1 - Agent Launchpad: Design and Build Lightweight Agent Middleware**
 
 ## Problem
 You cannot improve what you cannot trace.
