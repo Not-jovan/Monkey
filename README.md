@@ -1,6 +1,8 @@
-# Monkey Auditor, Agent Tracing and Auditing
+# Monkey Tracer and Auditor
 
 ![Monkey Overview](docs/overview.png)
+
+See [Demo](https://youtu.be/cAqrO3ge7R8)
 
 **Selected track: Track A — Agent Launchpad: Design and Build Lightweight Agent Middleware**
 
@@ -28,7 +30,7 @@ Out of scope / Limitations:
 
 | Limitation | Remark | Remediation |
 | --- | --- | --- |
-| Integration with log collection tools such as Loki | Log collection is simulated with our Scraper implementation. | Add a log sink or adapter that forwards runtime events to Loki. **The Auditor just needs to have the normalized traces from whatever log store you use.** |
+| Integration with log collection tools such as Loki | Log collection is simulated with our Scraper implementation. | Add a log sink or adapter that forwards runtime events to whatever log collector and point the Scraper to it. **The Auditor just needs to have the normalized traces from whatever log store you use.** |
 | Bindings to other runtimes or custom agent runners | The current integration supports the runtimes and runners described in this README. | Implement adapters for additional runtime providers and custom agent runners. In our demo, we implemented the tracing of the Auditor. **You can audit the Auditor** | 
 | Auditing every chat run | Auditing all runs can be extremely costly. The auditor is intended for full-fledged auditing, such as agent development and security audits. | Use sampling, or a heuristic/classifier to select which runs require auditing. |
 | Enforcement | We **DO NOT** automatically enforce policies. Mutation to the agent run creates side effects, it creates variability in intent. False positivie triggers can ruin your agent's performance. | You as the agent builder implement the policies and validate against the traces to determine whether it works |
