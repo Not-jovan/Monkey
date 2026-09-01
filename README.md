@@ -14,20 +14,19 @@ We create agents to achieve some desired goal. As the agent progresses, we may i
 ## Middleware Solution
 We propose a middleware that traces through agent runs and audit it.
 
-Features:
+### Features:
 - **Preserved** Starter Baseline, to create Agent Runs
 - Tracer to trace Agent Runs (Tool call, Input/Output, Thought)
 - Scraper to scrape traces, processes (e.g. Redaciton, normalization) them for Auditor.
 - Auditor uses scraped results to Audit the Agent Run
 - Failsafe mechanisms (See "Try it yourself" for Scraper and Auditor)
 
-Value Proposition:
+### Value Proposition:
 - Feedback of agent runs for agent development, providing traces to diagnose issues. We used this flow during development.
 - Visibility of run progress to ensure policies are not violated.
 - Loop feedback of agent runs for agent self checking.
 
-Out of scope / Limitations:
-
+### Out of scope / Limitations:
 | Limitation | Remark | Remediation |
 | --- | --- | --- |
 | Integration with log collection tools such as Loki | Log collection is simulated with our Scraper implementation. | Add a log sink or adapter that forwards runtime events to whatever log collector and point the Scraper to it. **The Auditor just needs to have the normalized traces from whatever log store you use.** |
