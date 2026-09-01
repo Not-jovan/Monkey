@@ -308,20 +308,34 @@ Shut off the poc container while the auditor runs. Restart it, it **should recov
 See [Demo](https://youtu.be/cAqrO3ge7R8?t=76)
 
 ### Testing
+
+Credential-free submission gate:
+
+```bash
+npx playwright install chromium
+npm run check
+```
+
+Optional live Ark and container suite:
+
 ```bash
 export ARK_API_KEY=your-ark-api-key 
 export ARK_MODEL=ep-your-endpoint-id 
 export ARK_BASE_URL=https://ark.ap-southeast.bytepluses.com/api/v3 
 # Optional: comma-separated hostnames allowed by the network whitelist
 # export AUDIT_NETWORK_WHITELIST=api.github.com,.githubusercontent.com,registry.npmjs.org
-npm run check
-RUN_LIVE_E2E=true npm run test:e2e
+npm run test:e2e:live
 ```
 
 `npm run check` is the credential free submission gate: it runs typecheck, the
-server tests, and both production builds. The Playwright suite is a live Ark
-and container integration test. It is skipped unless `RUN_LIVE_E2E=true` is
-set and requires valid Ark credentials, activated audit models, and Docker,
+server tests, both production builds, and a deterministic Playwright proof of
+the real browser → API → Runtime JSONL → scraper → trace → auditor → browser
+path. It uses protocol-compatible local fixtures only at the Codex and Ark
+boundaries, executes one browser test, and needs no credentials or container.
+Install its browser once with `npx playwright install chromium`.
+
+`npm run test:e2e:live` keeps the separate real Ark and container integration
+suite. It requires valid Ark credentials, activated audit models, and Docker,
 Colima, or Podman.
 
 See [Demo](https://youtu.be/cAqrO3ge7R8?t=103)

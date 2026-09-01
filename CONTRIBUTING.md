@@ -17,6 +17,7 @@ For container-based Agent execution, follow
 ## Validate
 
 ```bash
+npx playwright install chromium
 npm run check
 terraform fmt -check -recursive deploy/volcengine
 docker compose config

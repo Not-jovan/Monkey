@@ -597,9 +597,18 @@ Run as live when nothing is running.
 npm run check
 ```
 
-Runs typecheck, the server test suite, and both builds. The restored security
-and audit suites cover configured and shape-based masking, the persisted trace
-redaction boundary, the 20-case deterministic policy fixture, network and
+Runs typecheck, the server test suite, both builds, and the credential-free
+Playwright proof. The browser proof drives the real UI and control plane,
+executes a protocol-compatible local Runtime fixture, persists and scrapes its
+JSONL, completes an audit through a local Ark protocol fixture, and opens the
+resulting trace and auditor views. It executes by default rather than reporting
+a successful command with every scenario skipped. Install Chromium once with
+`npx playwright install chromium`; use `npm run test:e2e:live` for the separate
+real Ark/container suite.
+
+The restored security and audit suites cover configured and shape-based
+masking, the persisted trace redaction boundary, the 20-case deterministic
+policy fixture, network and
 secret detection, suspicious sinks, repeated failures, verdict merging, and
 degraded-model behavior. The existing suites continue to cover the Runtime,
 scraper, control-plane routes, storage, and Agent lifecycle.
